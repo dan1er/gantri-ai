@@ -40,7 +40,14 @@ async function main() {
 
   const { app, receiver } = buildSlackApp({ orchestrator, usersRepo, conversationsRepo });
 
-  receiver.router.get('/healthz', async (_req, res) => {
+  // Liveness check — only verifies the HTTP server is up.
+  // Must stay fast (<1s) so Fly health checks don't trigger auth flows on boot.
+  receiver.router.get('/healthz', (_req, res) => {
+    res.status(200).json({ ok: true });
+  });
+
+  // Readiness / deep check — exercises downstream auth. Call manually or via a scheduled probe.
+  receiver.router.get('/readyz', async (_req, res) => {
     const nb = await northbeam.healthCheck();
     res.status(nb.ok ? 200 : 503).json({ ok: nb.ok, northbeam: nb });
   });

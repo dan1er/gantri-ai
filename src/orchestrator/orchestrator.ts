@@ -37,8 +37,14 @@ export class Orchestrator {
 
   async run(input: OrchestratorInput): Promise<OrchestratorOutput> {
     const tools = this.opts.registry.getAllTools();
+    // Anthropic requires tool names to match ^[a-zA-Z0-9_-]+$. Our internal
+    // convention uses "." as a namespace separator (e.g. "northbeam.overview").
+    // Map "." → "_" on the way out, and remember the inverse so we can resolve
+    // the registry entry when Claude calls the tool back.
+    const toSafeName = (n: string) => n.replace(/\./g, '_');
+    const nameMap = new Map(tools.map((t) => [toSafeName(t.name), t.name]));
     const claudeTools = tools.map((t) => ({
-      name: t.name,
+      name: toSafeName(t.name),
       description: t.description,
       input_schema: t.jsonSchema as any,
     }));
@@ -89,9 +95,10 @@ export class Orchestrator {
       const toolResults: any[] = [];
       for (const block of resp.content) {
         if (block.type !== 'tool_use') continue;
-        const result = await this.opts.registry.execute(block.name, block.input);
+        const registryName = nameMap.get(block.name) ?? block.name;
+        const result = await this.opts.registry.execute(registryName, block.input);
         toolCalls.push({
-          name: block.name,
+          name: registryName,
           args: block.input,
           ok: result.ok,
           errorMessage: result.ok ? undefined : result.error?.message,

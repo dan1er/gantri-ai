@@ -85,9 +85,12 @@ const SalesArgs = z.object({
   breakdown: z.string().optional(),
   platformFilter: z.string().optional(),
   statusFilter: z.array(z.string()).optional(),
-  sorting: z
-    .array(z.object({ dimensionId: z.string(), order: z.enum(['asc', 'desc']) }))
-    .optional(),
+  /**
+   * Which metric to sort results by, descending. Defaults to the first entry
+   * of `metrics`. Sorting is performed client-side because Northbeam's API
+   * only accepts sort-by-dimension, not sort-by-metric.
+   */
+  sortByMetric: z.enum(METRIC_IDS).optional(),
   limit: z.number().int().min(1).max(200).default(50),
   offset: z.number().int().min(0).default(0),
   ...Common,
@@ -144,9 +147,11 @@ export function buildNorthbeamTools(deps: NorthbeamToolDeps): ToolDef[] {
     async execute(args) {
       const dimensionIds = ['name', 'campaignName'];
       if (args.breakdown) dimensionIds.push(`breakdown:${args.breakdown}`);
-      // Northbeam's filter input uses field name `breakdown`, not `key`.
+      // Northbeam's filter input: `{ breakdown: string, value: string }` — note
+      // singular `value`, not `values`; breakdown is the key name from
+      // `GetSalesBreakdownConfigs`.
       const breakdownFilters = args.platformFilter
-        ? [{ breakdown: 'Platform (Northbeam)', values: [args.platformFilter] }]
+        ? [{ breakdown: 'Platform (Northbeam)', value: args.platformFilter }]
         : [];
       const variables = {
         ...args,
@@ -156,9 +161,10 @@ export function buildNorthbeamTools(deps: NorthbeamToolDeps): ToolDef[] {
         universalBenchmarkBreakdownFilters: [],
         metricFilters: [],
         statusFilters: args.statusFilter ?? null,
-        // Default-sort by the first requested metric so the sort field is always
-        // in the SELECT clause (Northbeam rejects sort-on-unselected-column).
-        sorting: args.sorting ?? [{ dimensionId: args.metrics[0], order: 'desc' }],
+        // Northbeam only accepts sort-by-dimension server-side. Always sort by
+        // `name` ascending for stable ordering; metric-based sorting is applied
+        // client-side below.
+        sorting: [{ dimensionId: 'name', order: 'asc' }],
         compareDateRange: args.compareToPreviousPeriod ? previousPeriod(args.dateRange) : null,
         isSummary: false,
         summaryDimensionIds: null,
@@ -170,10 +176,19 @@ export function buildNorthbeamTools(deps: NorthbeamToolDeps): ToolDef[] {
       const data = await deps.gql.request<{
         me: { salesMetricsReportV4: { actual: unknown[]; comparison: unknown[] | null } };
       }>('GetSalesMetricsReportV4', GET_SALES_METRICS_REPORT_V4, variables);
+
+      // Client-side sort by the requested metric (descending), then apply limit.
+      const sortMetric = args.sortByMetric ?? args.metrics[0];
+      const rows = (data.me.salesMetricsReportV4.actual as Array<{ metrics?: Record<string, number | null> }>)
+        .slice()
+        .sort((a, b) => (b.metrics?.[sortMetric] ?? -Infinity) - (a.metrics?.[sortMetric] ?? -Infinity))
+        .slice(args.offset, args.offset + args.limit);
+
       const result = {
         period: args.dateRange,
         comparePeriod: variables.compareDateRange,
-        rows: data.me.salesMetricsReportV4.actual,
+        sortedBy: { metric: sortMetric, order: 'desc' as const },
+        rows,
         comparison: data.me.salesMetricsReportV4.comparison,
       };
       await deps.cache.set(key, result, cacheTtl(args.dateRange, nowISO));

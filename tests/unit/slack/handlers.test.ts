@@ -62,4 +62,32 @@ describe('createDmHandler', () => {
     await handler({ event: e as any, client: ctx.client, say: ctx.say } as any);
     expect(ctx.spies.postMessage).not.toHaveBeenCalled();
   });
+
+  it('stores summary-only tool_calls when DEBUG_FULL_LOGS is off', async () => {
+    process.env.DEBUG_FULL_LOGS = 'false';
+    const ctx = makeContext(true);
+    (ctx.spies.runSpy as any).mockResolvedValueOnce({
+      response: 'ok', model: 'm', toolCalls: [{ name: 'x', args: { secret: 1 }, ok: true }],
+      tokensInput: 0, tokensOutput: 0, iterations: 1,
+    });
+    const handler = createDmHandler(ctx.deps as any);
+    await handler({ event: ctx.event as any, client: ctx.client, say: ctx.say } as any);
+    const call = (ctx.spies.insertSpy.mock.calls[0] as any)[0];
+    expect(call.tool_calls[0]).not.toHaveProperty('args');
+  });
+
+  it('preserves args in tool_calls when DEBUG_FULL_LOGS is on', async () => {
+    process.env.DEBUG_FULL_LOGS = 'true';
+    const ctx = makeContext(true);
+    (ctx.spies.runSpy as any).mockResolvedValueOnce({
+      response: 'ok', model: 'm', toolCalls: [{ name: 'x', args: { secret: 1 }, ok: true }],
+      tokensInput: 0, tokensOutput: 0, iterations: 1,
+    });
+    const handler = createDmHandler(ctx.deps as any);
+    await handler({ event: ctx.event as any, client: ctx.client, say: ctx.say } as any);
+    const call = (ctx.spies.insertSpy.mock.calls[0] as any)[0];
+    expect(call.tool_calls[0]).toHaveProperty('args');
+    // Cleanup for other tests
+    delete process.env.DEBUG_FULL_LOGS;
+  });
 });

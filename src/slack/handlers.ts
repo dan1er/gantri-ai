@@ -3,6 +3,7 @@ import type { ConversationsRepo } from '../storage/repositories/conversations.js
 import type { Orchestrator } from '../orchestrator/orchestrator.js';
 import { markdownToSlackBlocks } from '../orchestrator/formatter.js';
 import { logger } from '../logger.js';
+import { loadEnv } from '../config/env.js';
 
 export interface HandlerDeps {
   orchestrator: Orchestrator;
@@ -11,6 +12,7 @@ export interface HandlerDeps {
 }
 
 export function createDmHandler(deps: HandlerDeps) {
+  const env = loadEnv();
   return async ({ event, client }: any) => {
     if (event.channel_type !== 'im') return;
     if (event.bot_id) return;
@@ -51,7 +53,9 @@ export function createDmHandler(deps: HandlerDeps) {
         slack_channel_id: event.channel,
         slack_user_id: event.user,
         question: event.text,
-        tool_calls: out.toolCalls,
+        tool_calls: env.DEBUG_FULL_LOGS
+          ? out.toolCalls
+          : out.toolCalls.map(({ name, ok, errorMessage }) => ({ name, ok, errorMessage })),
         response: out.response,
         model: out.model,
         tokens_input: out.tokensInput,

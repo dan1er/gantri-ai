@@ -112,3 +112,53 @@ query FetchPartnersApexConsent {
     isMetaCapiConfigured
   }
 }`;
+
+export const FETCH_ORDER_SUMMARY = `
+query FetchOrderSummary($filterOptions: OrdersFilterOptionsInput!, $sorting: OrdersSortingInput, $offset: Int, $limit: Int) {
+  me {
+    orders(filterOptions: $filterOptions, sorting: $sorting, offset: $offset, limit: $limit) {
+      data {
+        orderId
+        occurredAt
+        orderType
+        orderNumber
+        revenueInDollars
+        discountValue
+        shippingValue
+        taxValue
+        refundAmountInDollars
+        attributed
+        orderTags
+        sourceName
+        customerTags
+        discountCodes
+        customerId
+        customerEmail
+        numberOfTouchpoints
+        newNumberOfTouchpoints
+        subscriptionType
+        products { title quantity }
+      }
+      totalCount
+    }
+  }
+}`;
+
+export const FETCH_ORDER_SUMMARY_GRAPH_KPI = `
+query FetchOrderSummaryGraphKPI($dateRange: DateRangeInput!, $comparedDateRange: DateRangeInput!, $filterOptions: OrdersGraphFilterOptionsInput) {
+  me {
+    orderSummaryGraphKPI(dateRange: $dateRange, comparedDateRange: $comparedDateRange, filterOptions: $filterOptions) {
+      currentKPIs { orderRevenue orderCount }
+      comparisonKPIs { orderRevenue orderCount }
+    }
+  }
+}`;
+
+export const FETCH_ORDER_SUMMARY_GRAPH = `
+query FetchOrderSummaryGraph($dateRange: DateRangeInput!, $granularity: String!, $filterOptions: OrdersGraphFilterOptionsInput) {
+  me {
+    orderSummaryGraph(dateRange: $dateRange, granularity: $granularity, filterOptions: $filterOptions) {
+      data { orderRevenue orderCount datetime }
+    }
+  }
+}`;

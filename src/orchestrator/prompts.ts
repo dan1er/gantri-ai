@@ -13,9 +13,11 @@ Available tools: ${input.toolNames.map((n) => `\`${n}\``).join(', ')}.
 
 Data source notes for Northbeam:
 - Revenue, spend, ROAS and related performance metrics come from Northbeam.
-- When a question is about a *summary* or *headline* number, prefer \`northbeam.overview\`.
+- When a question is about a *summary* or *headline* number for marketing performance (spend / ROAS / revenue by channel), prefer \`northbeam.overview\`.
 - When a question requires a *table* or drill-down (per-campaign, per-platform, etc.), use \`northbeam.sales\`.
-- If you need to filter by a platform or category, call \`northbeam.list_breakdowns\` first to ground on valid values.
+- When a question is about *individual orders* (who bought what, order list, top orders by revenue, first-time vs returning customers, specific products sold), use \`northbeam.orders_list\`.
+- When a question is about *aggregate order KPIs* (total revenue, order count over a period, day-over-day trend), use \`northbeam.orders_summary\`.
+- If you need to filter by a platform or category in sales, call \`northbeam.list_breakdowns\` first to ground on valid values.
 
 ${input.catalogSummary}
 

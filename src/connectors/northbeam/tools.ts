@@ -11,6 +11,9 @@ import {
   TIME_GRANULARITIES,
 } from './catalog.js';
 import {
+  FETCH_ORDER_SUMMARY,
+  FETCH_ORDER_SUMMARY_GRAPH,
+  FETCH_ORDER_SUMMARY_GRAPH_KPI,
   FETCH_PARTNERS_APEX_CONSENT,
   GET_OVERVIEW_METRICS_REPORT_V3,
   GET_SALES_BREAKDOWN_CONFIGS,
@@ -250,7 +253,223 @@ export function buildNorthbeamTools(deps: NorthbeamToolDeps): ToolDef[] {
     },
   };
 
-  return [overview, sales, listBreakdowns, listMetrics, connectedPartners];
+  // ========================================================================
+  // Orders page tools: individual orders + revenue/count KPIs.
+  // ========================================================================
+
+  const OrderFilters = z.object({
+    attributed: z.boolean().optional(),
+    orderTypes: z.array(z.enum(['first_time', 'returning'])).optional(),
+    customerTags: z.array(z.string()).optional(),
+    orderTags: z.array(z.string()).optional(),
+    sourceName: z.array(z.string()).optional(),
+    discountCodes: z.array(z.string()).optional(),
+    subscriptions: z.array(z.string()).optional(),
+    products: z.array(z.string()).optional(),
+    adPlatforms: z.array(z.string()).optional(),
+    ecommercePlatforms: z.array(z.string()).optional(),
+    adjustForReturns: z.boolean().default(false),
+  });
+
+  /** Convert a plain date-range {startDate, endDate} (YYYY-MM-DD, interpreted
+   *  in Northbeam's tenant timezone — America/Los_Angeles) into the ISO instant
+   *  range the orders API expects. Uses a -07:00 offset (PDT). If Northbeam
+   *  ever surfaces a different tz or we cross a DST boundary, revisit. */
+  function toIsoDateRange(range: { startDate: string; endDate: string }) {
+    const endNextDay = addOneDayIso(range.endDate);
+    return {
+      start: `${range.startDate}T07:00:00.000Z`, // 00:00 PT
+      end: `${endNextDay}T06:59:59.999Z`,         // 23:59:59 PT on endDate
+    };
+  }
+  function addOneDayIso(dateYmd: string): string {
+    const d = new Date(`${dateYmd}T00:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + 1);
+    return d.toISOString().slice(0, 10);
+  }
+
+  /** Convert OrderFilters + null-fill all other fields Northbeam expects. */
+  function buildOrderFilterOptions(f: z.infer<typeof OrderFilters> | undefined, includeDateRange?: { start: string; end: string }) {
+    const base = {
+      discountCodes: f?.discountCodes ?? null,
+      subscriptions: f?.subscriptions ?? null,
+      customerTags: f?.customerTags ?? null,
+      orderTags: f?.orderTags ?? null,
+      sourceName: f?.sourceName ?? null,
+      orderTypes: f?.orderTypes ?? null,
+      products: f?.products ?? null,
+      attributed: f?.attributed ?? null,
+      adjustForReturns: f?.adjustForReturns ?? false,
+      adPlatforms: f?.adPlatforms ?? null,
+      ecommercePlatforms: f?.ecommercePlatforms ?? null,
+    };
+    return includeDateRange ? { ...base, dateRange: includeDateRange } : base;
+  }
+
+  // Northbeam's `OrdersSortingField` enum only accepts `date`; any other field
+  // (revenue, touchpoints, etc.) must be sorted client-side.
+  const ORDERS_SORTABLE_METRICS = [
+    'revenueInDollars',
+    'numberOfTouchpoints',
+    'refundAmountInDollars',
+    'discountValue',
+  ] as const;
+  const ORDERS_METRIC_ALIASES: Record<string, (typeof ORDERS_SORTABLE_METRICS)[number]> = {
+    revenue: 'revenueInDollars',
+    revenues: 'revenueInDollars',
+    touchpoints: 'numberOfTouchpoints',
+    touchpoint: 'numberOfTouchpoints',
+    refund: 'refundAmountInDollars',
+    refunds: 'refundAmountInDollars',
+    discount: 'discountValue',
+    discounts: 'discountValue',
+  };
+  const normalizeOrdersMetric = (v: unknown): unknown => {
+    const s = typeof v === 'string' ? v.replace(/^["']+|["']+$/g, '') : v;
+    if (typeof s === 'string' && s in ORDERS_METRIC_ALIASES) return ORDERS_METRIC_ALIASES[s];
+    return s;
+  };
+
+  const OrdersListArgs = z.object({
+    dateRange: DateRange,
+    filters: OrderFilters.optional(),
+    sortOrder: z.preprocess(normalizeEnum, z.enum(['asc', 'desc'])).default('desc'),
+    /**
+     * Optional: sort results client-side by this metric (descending order
+     * always). Overrides the default date-based sort. Northbeam's API only
+     * allows server-side sort by date, so non-date sorts are applied after
+     * fetching.
+     */
+    sortByMetric: z.preprocess(normalizeOrdersMetric, z.enum(ORDERS_SORTABLE_METRICS)).optional(),
+    limit: z.number().int().min(1).max(200).default(25),
+    offset: z.number().int().min(0).default(0),
+  });
+  type OrdersListArgs = z.infer<typeof OrdersListArgs>;
+
+  const ordersList: ToolDef<OrdersListArgs> = {
+    name: 'northbeam.orders_list',
+    description:
+      'Returns individual orders (revenue, customer email, products, touchpoints, attributed flag, first-time vs returning) for a date range with optional filters. Use for questions like "who bought a Pavone Floor Light last week", "top 10 orders yesterday by revenue", "list unattributed orders this month", or "how many first-time vs returning orders".',
+    schema: OrdersListArgs as z.ZodType<OrdersListArgs>,
+    jsonSchema: zodToJsonSchema(OrdersListArgs),
+    async execute(args) {
+      // For client-side metric sort we need to pull the whole dataset for the
+      // period; otherwise respect the requested page.
+      const needsAllRows = !!args.sortByMetric;
+      const variables = {
+        filterOptions: buildOrderFilterOptions(args.filters, toIsoDateRange(args.dateRange)),
+        sorting: { sortingField: 'date', sortingOrder: args.sortOrder },
+        limit: needsAllRows ? 1000 : args.limit,
+        offset: needsAllRows ? 0 : args.offset,
+      };
+      const key = TtlCache.key('nb.orders_list.v2', {
+        ...variables,
+        sortByMetric: args.sortByMetric ?? null,
+        limit: args.limit,
+        offset: args.offset,
+      } as Record<string, unknown>);
+      const cached = await deps.cache.get(key);
+      if (cached) return cached;
+      const data = await deps.gql.request<{
+        me: {
+          orders: {
+            data: Array<Record<string, unknown> & { revenueInDollars?: number | null }>;
+            totalCount: number;
+          };
+        };
+      }>('FetchOrderSummary', FETCH_ORDER_SUMMARY, variables);
+
+      let orders = data.me.orders.data;
+      if (args.sortByMetric) {
+        const metric = args.sortByMetric;
+        orders = orders
+          .slice()
+          .sort((a, b) => ((b[metric] as number | null) ?? -Infinity) - ((a[metric] as number | null) ?? -Infinity))
+          .slice(args.offset, args.offset + args.limit);
+      }
+
+      const result = {
+        period: args.dateRange,
+        sortedBy: args.sortByMetric ?? `date ${args.sortOrder}`,
+        orders,
+        totalCount: data.me.orders.totalCount,
+        returnedCount: orders.length,
+      };
+      await deps.cache.set(key, result, cacheTtl(args.dateRange, nowISO));
+      return result;
+    },
+  };
+
+  const OrdersSummaryArgs = z.object({
+    dateRange: DateRange,
+    filters: OrderFilters.optional(),
+    compareToPreviousPeriod: z.boolean().default(true),
+    granularity: z.preprocess(normalizeEnum, z.enum(['DAY', 'WEEK', 'MONTH'])).default('DAY'),
+    includeTimeSeries: z.boolean().default(false),
+  });
+  type OrdersSummaryArgs = z.infer<typeof OrdersSummaryArgs>;
+
+  const ordersSummary: ToolDef<OrdersSummaryArgs> = {
+    name: 'northbeam.orders_summary',
+    description:
+      'Returns aggregate order KPIs (`orderRevenue`, `orderCount`) for a date range, compared against the previous period by default. Optionally returns daily/weekly/monthly time-series. Use for summary questions like "total revenue last week", "how many orders yesterday", "orders by day for April".',
+    schema: OrdersSummaryArgs as z.ZodType<OrdersSummaryArgs>,
+    jsonSchema: zodToJsonSchema(OrdersSummaryArgs),
+    async execute(args) {
+      const dateRangeIso = toIsoDateRange(args.dateRange);
+      const filterOptions = buildOrderFilterOptions(args.filters);
+      const cacheKey = TtlCache.key('nb.orders_summary', { args } as Record<string, unknown>);
+      const cached = await deps.cache.get(cacheKey);
+      if (cached) return cached;
+
+      const compareRange = args.compareToPreviousPeriod ? previousPeriod(args.dateRange) : null;
+      const compareRangeIso = compareRange ? toIsoDateRange(compareRange) : null;
+
+      const kpiPromise = deps.gql.request<{
+        me: {
+          orderSummaryGraphKPI: {
+            currentKPIs: { orderRevenue: number; orderCount: number };
+            comparisonKPIs: { orderRevenue: number; orderCount: number };
+          };
+        };
+      }>(
+        'FetchOrderSummaryGraphKPI',
+        FETCH_ORDER_SUMMARY_GRAPH_KPI,
+        {
+          dateRange: dateRangeIso,
+          comparedDateRange: compareRangeIso ?? dateRangeIso,
+          filterOptions,
+        },
+      );
+
+      const graphPromise = args.includeTimeSeries
+        ? deps.gql.request<{
+            me: { orderSummaryGraph: { data: Array<{ orderRevenue: number; orderCount: number; datetime: string }> } };
+          }>('FetchOrderSummaryGraph', FETCH_ORDER_SUMMARY_GRAPH, {
+            dateRange: dateRangeIso,
+            granularity: args.granularity,
+            filterOptions,
+          })
+        : Promise.resolve(null);
+
+      const [kpiData, graphData] = await Promise.all([kpiPromise, graphPromise]);
+      const kpi = kpiData.me.orderSummaryGraphKPI;
+
+      const result = {
+        period: args.dateRange,
+        comparePeriod: compareRange,
+        actual: { revenue: kpi.currentKPIs.orderRevenue, orderCount: kpi.currentKPIs.orderCount },
+        comparison: args.compareToPreviousPeriod
+          ? { revenue: kpi.comparisonKPIs.orderRevenue, orderCount: kpi.comparisonKPIs.orderCount }
+          : null,
+        timeSeries: graphData?.me.orderSummaryGraph.data ?? null,
+      };
+      await deps.cache.set(cacheKey, result, cacheTtl(args.dateRange, nowISO));
+      return result;
+    },
+  };
+
+  return [overview, sales, listBreakdowns, listMetrics, connectedPartners, ordersList, ordersSummary];
 }
 
 // Small util just for Claude's tool manifest. Covers the shapes used in this file.

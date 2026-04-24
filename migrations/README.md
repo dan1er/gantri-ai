@@ -9,9 +9,9 @@ Order matters: run files in numeric order (`0001_*`, `0002_*`, ...).
 This project relies on secrets stored in Supabase Vault. To create them, run in the SQL Editor:
 
 ```sql
-select vault.create_secret('danny@gantri.com',     'NORTHBEAM_EMAIL');
-select vault.create_secret('G@ntriSecure',         'NORTHBEAM_PASSWORD');
-select vault.create_secret('1aaaa257-60a3-4fd7-a99e-7886894240d3', 'NORTHBEAM_DASHBOARD_ID');
+select vault.create_secret('<email>',        'NORTHBEAM_EMAIL');
+select vault.create_secret('<password>',     'NORTHBEAM_PASSWORD');
+select vault.create_secret('<workspace-id>', 'NORTHBEAM_DASHBOARD_ID');
 ```
 
-(Values are placeholders in this README; actual values live only in Supabase Vault.)
+The real values are documented privately (out of this repo). Populate them in Supabase Vault via the SQL Editor; never commit them to version control.

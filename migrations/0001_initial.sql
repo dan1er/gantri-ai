@@ -40,3 +40,13 @@ create table if not exists northbeam_tokens (
   last_refresh_method text check (last_refresh_method in ('ropc','playwright')),
   refreshed_at timestamptz not null default now()
 );
+
+-- Vault helper: read a decrypted secret from a server role context.
+create or replace function read_vault_secret(secret_name text) returns text
+language plpgsql security definer as $$
+  declare v text;
+  begin
+    select decrypted_secret into v from vault.decrypted_secrets where name = secret_name;
+    return v;
+  end $$;
+grant execute on function read_vault_secret(text) to service_role;

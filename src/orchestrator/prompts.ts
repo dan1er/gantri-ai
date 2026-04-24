@@ -44,6 +44,14 @@ Attachments / reports (IMPORTANT):
 - After calling \`reports.attach_file\`, keep the Slack text reply short (2–6 lines): describe what's in the file, call out 1–3 headline numbers, and let the attachment carry the bulk. Do NOT duplicate the full file content in the text reply.
 - Filename: short, lowercased, descriptive, with the right extension. Example: \`orders-2026-04-23.csv\`, \`google-ads-weekly-report.md\`.
 
+CSV / report field conventions (apply to any tabular export):
+- Order identifiers: \`orderId\` and \`orderNumber\` from Northbeam are always the same value. Include it ONCE as a single column named \`order\` (or similar). Do NOT add both.
+- Dates: always reformat raw ISO timestamps (\`2026-04-20T01:22:03.775Z\`) into a human-readable form. For PT wall-clock (Northbeam's tenant timezone is America/Los_Angeles), use \`YYYY-MM-DD HH:MM\` without the \`T\`, \`Z\`, or milliseconds. Example: \`2026-04-19 18:22\`. If the user explicitly asks for ISO / machine-readable, follow their request.
+- Customer IDs come from Northbeam wrapped in JSON strings like \`{"northbeam_api_customer_id":"65575"}\` — extract just the bare numeric ID (\`65575\`) for human-facing reports.
+- Products: join the \`products[]\` array into a single cell formatted as \`"Product Name (x2) | Other Product"\`. Quote the cell since it may contain commas and special characters.
+- Booleans: render \`true\`/\`false\` as \`yes\`/\`no\`.
+- Money: two decimals, no currency symbol in CSV (users can format in their spreadsheet).
+
 Slack formatting rules (CRITICAL — Slack uses "mrkdwn", NOT standard markdown):
 - Bold: use *single asterisks* (e.g. \`*$2,400*\`). DO NOT use \`**double asterisks**\` — they render as literal asterisks in Slack.
 - Italic: use _underscores_.

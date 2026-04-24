@@ -55,6 +55,14 @@ describe('createDmHandler', () => {
     expect(ctx.spies.runSpy).not.toHaveBeenCalled();
   });
 
+  it('ignores message_changed subtype events', async () => {
+    const ctx = makeContext(true);
+    const handler = createDmHandler(ctx.deps as any);
+    const e = { ...ctx.event, subtype: 'message_changed' };
+    await handler({ event: e as any, client: ctx.client, say: ctx.say } as any);
+    expect(ctx.spies.postMessage).not.toHaveBeenCalled();
+  });
+
   it('ignores events from the bot itself (no bot_id loops)', async () => {
     const ctx = makeContext(true);
     const handler = createDmHandler(ctx.deps as any);

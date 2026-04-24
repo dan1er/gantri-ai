@@ -48,6 +48,22 @@ describe('northbeam tools', () => {
     expect(parsed.success).toBe(false);
   });
 
+  it('overview compareDateRange spans the same number of days as the query range', async () => {
+    const deps = fakeDeps();
+    deps.gql.request.mockResolvedValue({
+      me: { overviewMetricsReportV3: { rows: [], summary: { actual: [], comparison: [] } } },
+    });
+    const tools = buildNorthbeamTools(deps as any);
+    const overview = tools.find((t) => t.name === 'northbeam.overview')!;
+    await overview.execute({
+      dateRange: { startDate: '2026-04-17', endDate: '2026-04-23' },
+      metrics: ['spend'],
+      compareToPreviousPeriod: true,
+    });
+    const variables = deps.gql.request.mock.calls[0][2] as any;
+    expect(variables.compareDateRange).toEqual({ startDate: '2026-04-10', endDate: '2026-04-16' });
+  });
+
   it('list_breakdowns returns a normalized map', async () => {
     const deps = fakeDeps();
     deps.gql.request.mockResolvedValue({

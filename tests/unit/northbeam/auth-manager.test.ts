@@ -46,7 +46,7 @@ describe('NorthbeamAuthManager (ROPC)', () => {
     const jwt = makeValidJwt(7200);
     const repo = makeRepo();
     await repo.upsert({
-      access_token_encrypted: jwt,
+      access_token: jwt,
       expires_at: new Date(Date.now() + 7200 * 1000).toISOString(),
       last_refresh_method: 'ropc',
     });
@@ -67,7 +67,7 @@ describe('NorthbeamAuthManager (ROPC)', () => {
     const newJwt = makeValidJwt(3600);
     const repo = makeRepo();
     await repo.upsert({
-      access_token_encrypted: oldJwt,
+      access_token: oldJwt,
       expires_at: new Date(Date.now() + 600 * 1000).toISOString(),
       last_refresh_method: 'ropc',
     });

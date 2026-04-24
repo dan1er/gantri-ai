@@ -23,7 +23,6 @@ export interface OrchestratorOptions {
   claude: Anthropic;
   model: string;
   maxIterations?: number;
-  maxInputTokens?: number;
   maxOutputTokens?: number;
 }
 

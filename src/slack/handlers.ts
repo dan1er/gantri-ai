@@ -16,6 +16,7 @@ export function createDmHandler(deps: HandlerDeps) {
   return async ({ event, client }: any) => {
     if (event.channel_type !== 'im') return;
     if (event.bot_id) return;
+    if (event.subtype) return;
     if (!event.text || !event.user) return;
 
     const threadTs = event.thread_ts ?? event.ts;
@@ -34,6 +35,15 @@ export function createDmHandler(deps: HandlerDeps) {
       thread_ts: threadTs,
       text: "🔍 Consultando datos…",
     });
+
+    if (!placeholder.ts) {
+      await client.chat.postMessage({
+        channel: event.channel,
+        thread_ts: threadTs,
+        text: "⚠️ Couldn't start the reply thread. Try again.",
+      });
+      return;
+    }
 
     const threadHistory = await deps.conversationsRepo.loadRecentByThread(threadTs, 10);
     const started = Date.now();

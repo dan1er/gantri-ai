@@ -68,10 +68,10 @@ describe('NorthbeamTokensRepo', () => {
     const client = clientWithTable({ northbeam_tokens: { upsert } });
     const repo = new NorthbeamTokensRepo(client);
     await repo.upsert({
-      access_token_encrypted: 'abc',
+      access_token: 'abc',
       expires_at: new Date().toISOString(),
       last_refresh_method: 'ropc',
     });
-    expect(upsert).toHaveBeenCalledWith(expect.objectContaining({ id: 1, access_token_encrypted: 'abc' }));
+    expect(upsert).toHaveBeenCalledWith(expect.objectContaining({ id: 1, access_token: 'abc' }));
   });
 });

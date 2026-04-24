@@ -35,7 +35,7 @@ create index if not exists northbeam_cache_expires_idx on northbeam_cache (expir
 
 create table if not exists northbeam_tokens (
   id int primary key default 1 check (id = 1),
-  access_token_encrypted text not null,
+  access_token text not null,
   expires_at timestamptz not null,
   last_refresh_method text check (last_refresh_method in ('ropc','playwright')),
   refreshed_at timestamptz not null default now()

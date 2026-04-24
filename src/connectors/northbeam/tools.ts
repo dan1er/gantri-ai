@@ -47,11 +47,12 @@ const OverviewArgs = z.object({
 type OverviewArgs = z.infer<typeof OverviewArgs>;
 
 function previousPeriod(range: { startDate: string; endDate: string }) {
+  const dayMs = 24 * 3600 * 1000;
   const start = new Date(range.startDate + 'T00:00:00Z').getTime();
   const end = new Date(range.endDate + 'T00:00:00Z').getTime();
-  const span = end - start;
-  const prevEnd = new Date(start - 24 * 3600 * 1000);
-  const prevStart = new Date(prevEnd.getTime() - span);
+  const span = end - start + dayMs;
+  const prevEnd = new Date(start - dayMs);
+  const prevStart = new Date(prevEnd.getTime() - span + dayMs);
   return {
     startDate: prevStart.toISOString().slice(0, 10),
     endDate: prevEnd.toISOString().slice(0, 10),

@@ -8,9 +8,8 @@ export const logger = pino({
   base: { service: 'gantri-ai-bot' },
   redact: {
     paths: [
-      '*.authorization',
-      '*.access_token',
-      '*.access_token_encrypted',
+      '**.authorization',
+      '**.access_token',
       'password',
       'email',
       'SLACK_BOT_TOKEN',

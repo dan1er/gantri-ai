@@ -29,7 +29,7 @@ export class NorthbeamAuthManager {
   async getAccessToken(): Promise<string> {
     const cached = await this.opts.tokensRepo.get();
     if (cached && !this.isNearExpiry(cached.expires_at)) {
-      return cached.access_token_encrypted;
+      return cached.access_token;
     }
     if (this.inflight) return this.inflight;
     this.inflight = this.refresh().finally(() => { this.inflight = null; });
@@ -77,7 +77,7 @@ export class NorthbeamAuthManager {
     method: TokenRow['last_refresh_method'],
   ): Promise<void> {
     await this.opts.tokensRepo.upsert({
-      access_token_encrypted: accessToken,
+      access_token: accessToken,
       expires_at: new Date(Date.now() + expiresIn * 1000).toISOString(),
       last_refresh_method: method,
     });

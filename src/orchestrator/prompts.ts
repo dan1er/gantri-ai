@@ -47,12 +47,18 @@ What you can answer (canonical list — when the user asks "what can you do" / "
   • Example: "Daily spend on Paid - Video for the last 60 days"
   • Example: "Halo effect of TV spend on Amazon orders"
 
-*6. Catalogs / grounding*
+*6. Orders from Gantri's own system (Porter DB, source of truth)* — \`gantri.orders_query\`, \`gantri.order_get\`, \`gantri.order_stats\`
+  • Fields per order: id, type (Order, Refund, Wholesale, Trade, R&D, etc.), status (Processed, Shipped, Delivered, Cancelled, Refunded, Lost, …), customer name + email, userId, organizationId, amount breakdown in dollars (total, subtotal, shipping, tax, transaction fee), address, tracking, ship dates, productIds, trade partner IDs, notes
+  • Filters: transaction types, statuses, user/organization, customer name or email contains, date range (PT), min/max total in dollars
+  • Stats: count, total revenue, avg order value, breakdown by status and type
+  • Use this tool for questions like "orders with status Refunded this month", "all wholesale orders this year", "orders for customer X", "find order by ID", "how many refunds vs orders", or whenever the question concerns internal order workflow (status, shipping, trade partner). Northbeam's orders tools are about attribution; these tools are about the Gantri system of record.
+
+*7. Catalogs / grounding*
   • \`northbeam.list_breakdowns\` — enumerate valid breakdown keys and their allowed values (Platform, Category, Targeting, Forecast, Revenue Source)
   • \`northbeam.list_metrics\` — enumerate valid metric IDs with descriptions
   • \`northbeam.connected_partners\` — which ad platforms have a live Northbeam connection
 
-*7. Reports & exports* — \`reports.attach_file\`
+*8. Reports & exports* — \`reports.attach_file\`
   • Any answer can be attached as a downloadable file (CSV for tabular data, Markdown for narrative reports, plain text).
   • Use when the user asks for a "report", "export", "spreadsheet", or any answer that would be ≥10 rows of tabular data.
 

@@ -7,6 +7,7 @@ import { ConversationsRepo } from './storage/repositories/conversations.js';
 import { ConnectorRegistry } from './connectors/base/registry.js';
 import { NorthbeamConnector } from './connectors/northbeam/northbeam-connector.js';
 import { ReportsConnector } from './connectors/reports/reports-connector.js';
+import { GantriDbConnector } from './connectors/gantri-db/gantri-db-connector.js';
 import { Orchestrator } from './orchestrator/orchestrator.js';
 import { buildSlackApp } from './slack/app.js';
 
@@ -14,10 +15,19 @@ async function main() {
   const env = loadEnv();
   const supabase = getSupabase();
 
-  const [email, password, dashboardId] = await Promise.all([
+  const [
+    email, password, dashboardId,
+    porterDbHost, porterDbPort, porterDbName, porterDbUser, porterDbPassword, porterDbSsl,
+  ] = await Promise.all([
     readVaultSecret(supabase, 'NORTHBEAM_EMAIL'),
     readVaultSecret(supabase, 'NORTHBEAM_PASSWORD'),
     readVaultSecret(supabase, 'NORTHBEAM_DASHBOARD_ID'),
+    readVaultSecret(supabase, 'PORTER_DB_HOST'),
+    readVaultSecret(supabase, 'PORTER_DB_PORT'),
+    readVaultSecret(supabase, 'PORTER_DB_NAME'),
+    readVaultSecret(supabase, 'PORTER_DB_USER'),
+    readVaultSecret(supabase, 'PORTER_DB_PASSWORD'),
+    readVaultSecret(supabase, 'PORTER_DB_SSL'),
   ]);
 
   const registry = new ConnectorRegistry();
@@ -27,6 +37,16 @@ async function main() {
   });
   registry.register(northbeam);
   registry.register(new ReportsConnector());
+
+  const gantriDb = new GantriDbConnector({
+    host: porterDbHost,
+    port: Number(porterDbPort),
+    database: porterDbName,
+    user: porterDbUser,
+    password: porterDbPassword,
+    ssl: porterDbSsl === 'true' || porterDbSsl === '1',
+  });
+  registry.register(gantriDb);
 
   const claude = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
   const orchestrator = new Orchestrator({
@@ -48,10 +68,14 @@ async function main() {
     res.status(200).json({ ok: true });
   });
 
-  // Readiness / deep check — exercises downstream auth. Call manually or via a scheduled probe.
+  // Readiness / deep check — exercises downstream auth and DB. Call manually.
   receiver.router.get('/readyz', async (_req, res) => {
-    const nb = await northbeam.healthCheck();
-    res.status(nb.ok ? 200 : 503).json({ ok: nb.ok, northbeam: nb });
+    const [nb, db] = await Promise.all([
+      northbeam.healthCheck(),
+      gantriDb.healthCheck(),
+    ]);
+    const ok = nb.ok && db.ok;
+    res.status(ok ? 200 : 503).json({ ok, northbeam: nb, gantriDb: db });
   });
 
   await app.start(env.PORT);

@@ -30,11 +30,19 @@ const DateRange = z.object({
   endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
 });
 
+// LLMs sometimes send enum values with surrounding quotes (e.g. `"7"` as a
+// literal 3-char string) or as numbers. Normalize before validating.
+const normalizeEnum = (v: unknown): unknown => {
+  if (typeof v === 'number') return String(v);
+  if (typeof v === 'string') return v.replace(/^["']+|["']+$/g, '');
+  return v;
+};
+
 const Common = {
-  attributionModel: z.enum(ATTRIBUTION_MODELS).default('linear'),
-  attributionWindow: z.enum(ATTRIBUTION_WINDOWS).default('1'),
-  accountingMode: z.enum(ACCOUNTING_MODES).default('accrual'),
-  timeGranularity: z.enum(TIME_GRANULARITIES).default('daily'),
+  attributionModel: z.preprocess(normalizeEnum, z.enum(ATTRIBUTION_MODELS)).default('linear'),
+  attributionWindow: z.preprocess(normalizeEnum, z.enum(ATTRIBUTION_WINDOWS)).default('1'),
+  accountingMode: z.preprocess(normalizeEnum, z.enum(ACCOUNTING_MODES)).default('accrual'),
+  timeGranularity: z.preprocess(normalizeEnum, z.enum(TIME_GRANULARITIES)).default('daily'),
 };
 
 const OverviewArgs = z.object({
@@ -71,7 +79,7 @@ function cacheTtl(dateRange: { endDate: string }, nowISO: () => string): number 
 }
 
 const SalesArgs = z.object({
-  level: z.enum(SALES_LEVELS),
+  level: z.preprocess(normalizeEnum, z.enum(SALES_LEVELS)),
   dateRange: DateRange,
   metrics: z.array(z.enum(METRIC_IDS)).min(1).max(20),
   breakdown: z.string().optional(),
@@ -136,8 +144,9 @@ export function buildNorthbeamTools(deps: NorthbeamToolDeps): ToolDef[] {
     async execute(args) {
       const dimensionIds = ['name', 'campaignName'];
       if (args.breakdown) dimensionIds.push(`breakdown:${args.breakdown}`);
+      // Northbeam's filter input uses field name `breakdown`, not `key`.
       const breakdownFilters = args.platformFilter
-        ? [{ key: 'Platform (Northbeam)', values: [args.platformFilter] }]
+        ? [{ breakdown: 'Platform (Northbeam)', values: [args.platformFilter] }]
         : [];
       const variables = {
         ...args,
@@ -147,7 +156,9 @@ export function buildNorthbeamTools(deps: NorthbeamToolDeps): ToolDef[] {
         universalBenchmarkBreakdownFilters: [],
         metricFilters: [],
         statusFilters: args.statusFilter ?? null,
-        sorting: args.sorting ?? [{ dimensionId: 'spend', order: 'desc' }],
+        // Default-sort by the first requested metric so the sort field is always
+        // in the SELECT clause (Northbeam rejects sort-on-unselected-column).
+        sorting: args.sorting ?? [{ dimensionId: args.metrics[0], order: 'desc' }],
         compareDateRange: args.compareToPreviousPeriod ? previousPeriod(args.dateRange) : null,
         isSummary: false,
         summaryDimensionIds: null,

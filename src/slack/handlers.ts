@@ -90,7 +90,7 @@ export function createDmHandler(deps: HandlerDeps) {
     const placeholder = await client.chat.postMessage({
       channel: event.channel,
       thread_ts: threadTs,
-      text: "🔍 Consultando datos…",
+      text: "🔍 Thinking…",
     });
 
     if (!placeholder.ts) {
@@ -107,7 +107,7 @@ export function createDmHandler(deps: HandlerDeps) {
     try {
       const out = await deps.orchestrator.run({ question: event.text, threadHistory });
       const blocks = markdownToSlackBlocks(out.response, {
-        footer: `Fuente: Northbeam • Modelo: ${out.model} • ${out.iterations} iteración${out.iterations === 1 ? '' : 'es'}`,
+        footer: `Source: Northbeam • Model: ${out.model} • ${out.iterations} iteration${out.iterations === 1 ? '' : 's'}`,
       });
       await client.chat.update({
         channel: event.channel,

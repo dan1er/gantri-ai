@@ -15,6 +15,7 @@ import {
   FETCH_ORDER_SUMMARY_GRAPH,
   FETCH_ORDER_SUMMARY_GRAPH_KPI,
   FETCH_PARTNERS_APEX_CONSENT,
+  GET_METRICS_EXPLORER_REPORT,
   GET_OVERVIEW_METRICS_REPORT_V3,
   GET_SALES_BREAKDOWN_CONFIGS,
   GET_SALES_METRICS_REPORT_V4,
@@ -469,7 +470,191 @@ export function buildNorthbeamTools(deps: NorthbeamToolDeps): ToolDef[] {
     },
   };
 
-  return [overview, sales, listBreakdowns, listMetrics, connectedPartners, ordersList, ordersSummary];
+  // ========================================================================
+  // Metrics Explorer: fetch one or more metric time-series (each with its own
+  // optional breakdown filter) and compute pairwise Pearson correlations.
+  // ========================================================================
+
+  const MetricSeriesSpec = z.object({
+    metric: z.preprocess(normalizeEnum, z.enum(METRIC_IDS)),
+    label: z.string().optional(),
+    /** Optional breakdown filter, e.g. { key: "Category (Northbeam)", value: "Paid - Video" }.
+     *  Call `northbeam.list_breakdowns` to ground on valid keys/values. */
+    breakdown: z
+      .object({
+        key: z.string().min(1),
+        value: z.string().min(1),
+      })
+      .optional(),
+  });
+  type MetricSeriesSpec = z.infer<typeof MetricSeriesSpec>;
+
+  const MetricsExplorerArgs = z.object({
+    dateRange: DateRange,
+    /** Between 1 and 6 metric series. With 2+, Pearson correlations between each pair are also returned. */
+    metrics: z.array(MetricSeriesSpec).min(1).max(6),
+    ...Common,
+  });
+  type MetricsExplorerArgs = z.infer<typeof MetricsExplorerArgs>;
+
+  async function fetchMetricSeries(
+    common: Pick<MetricsExplorerArgs, 'dateRange' | 'attributionModel' | 'attributionWindow' | 'accountingMode' | 'timeGranularity'>,
+    spec: MetricSeriesSpec,
+  ): Promise<{ date: string; value: number }[]> {
+    const variables = {
+      accountingMode: common.accountingMode,
+      attributionModel: common.attributionModel,
+      attributionWindow: common.attributionWindow,
+      level: 'campaign',
+      timeGranularity: common.timeGranularity,
+      dateRange: common.dateRange,
+      dimensionIds: ['date'],
+      metricIds: [spec.metric],
+      advancedSearch: null,
+      breakdownFilters: spec.breakdown
+        ? [{ breakdown: spec.breakdown.key, value: spec.breakdown.value }]
+        : [],
+      isSummary: false,
+    };
+    const data = await deps.gql.request<{
+      me: {
+        metricsExplorerReport: {
+          rows: Array<{ date: string; metrics: Record<string, number | null> }>;
+        };
+      };
+    }>('GetMetricsExplorerReport', GET_METRICS_EXPLORER_REPORT, variables);
+    return data.me.metricsExplorerReport.rows
+      .map((r) => ({ date: r.date, value: r.metrics[spec.metric] ?? 0 }))
+      .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  }
+
+  /** Align two series on the union of their dates (missing values → 0) and
+   *  return aligned numeric arrays suitable for correlation math. */
+  function alignSeries(a: { date: string; value: number }[], b: { date: string; value: number }[]) {
+    const byDate = new Map<string, [number | undefined, number | undefined]>();
+    for (const p of a) byDate.set(p.date, [p.value, byDate.get(p.date)?.[1]]);
+    for (const p of b) {
+      const cur = byDate.get(p.date) ?? [undefined, undefined];
+      byDate.set(p.date, [cur[0], p.value]);
+    }
+    const dates = [...byDate.keys()].sort();
+    const xs: number[] = [];
+    const ys: number[] = [];
+    for (const d of dates) {
+      const [x, y] = byDate.get(d)!;
+      xs.push(x ?? 0);
+      ys.push(y ?? 0);
+    }
+    return { dates, xs, ys };
+  }
+
+  function pearson(xs: number[], ys: number[]): number {
+    const n = xs.length;
+    if (n < 2) return 0;
+    const mean = (arr: number[]) => arr.reduce((s, v) => s + v, 0) / arr.length;
+    const mx = mean(xs);
+    const my = mean(ys);
+    let num = 0, sx = 0, sy = 0;
+    for (let i = 0; i < n; i++) {
+      const dx = xs[i] - mx;
+      const dy = ys[i] - my;
+      num += dx * dy;
+      sx += dx * dx;
+      sy += dy * dy;
+    }
+    const denom = Math.sqrt(sx * sy);
+    return denom === 0 ? 0 : num / denom;
+  }
+
+  function strengthLabel(r: number): string {
+    const abs = Math.abs(r);
+    const dir = r > 0 ? 'positive' : r < 0 ? 'negative' : 'none';
+    if (abs < 0.1) return 'no correlation';
+    if (abs < 0.3) return `weak ${dir}`;
+    if (abs < 0.5) return `moderate ${dir}`;
+    if (abs < 0.7) return `strong ${dir}`;
+    return `very strong ${dir}`;
+  }
+
+  function defaultLabel(s: MetricSeriesSpec): string {
+    const base = METRIC_CATALOG.find((m) => m.id === s.metric)?.label ?? s.metric;
+    return s.breakdown ? `${base} (${s.breakdown.value})` : base;
+  }
+
+  const metricsExplorer: ToolDef<MetricsExplorerArgs> = {
+    name: 'northbeam.metrics_explorer',
+    description:
+      'Fetch time-series for one or more metrics over a date range, each with an optional breakdown filter, and (for 2+ metrics) compute pairwise Pearson correlations client-side. Use for questions about relationships between metrics ("does Facebook spend correlate with Google branded search revenue?", "is there a halo effect from TV spend on Amazon orders?"), or for raw daily series of a specific metric+filter ("give me Google Ads spend by day for the last 60 days"). Call `northbeam.list_breakdowns` first if you need valid breakdown keys/values.',
+    schema: MetricsExplorerArgs as z.ZodType<MetricsExplorerArgs>,
+    jsonSchema: zodToJsonSchema(MetricsExplorerArgs),
+    async execute(args) {
+      const cacheKey = TtlCache.key('nb.metrics_explorer', args as Record<string, unknown>);
+      const cached = await deps.cache.get(cacheKey);
+      if (cached) return cached;
+
+      // Fetch all series in parallel.
+      const seriesData = await Promise.all(
+        args.metrics.map((m) =>
+          fetchMetricSeries(
+            {
+              dateRange: args.dateRange,
+              attributionModel: args.attributionModel,
+              attributionWindow: args.attributionWindow,
+              accountingMode: args.accountingMode,
+              timeGranularity: args.timeGranularity,
+            },
+            m,
+          ),
+        ),
+      );
+
+      const series = args.metrics.map((m, i) => {
+        const rows = seriesData[i];
+        const total = rows.reduce((s, r) => s + r.value, 0);
+        return {
+          label: m.label ?? defaultLabel(m),
+          metric: m.metric,
+          breakdown: m.breakdown ?? null,
+          total,
+          rows,
+        };
+      });
+
+      // Pairwise Pearson correlations.
+      const correlations: Array<{
+        a: string;
+        b: string;
+        pearson: number;
+        strength: string;
+      }> = [];
+      for (let i = 0; i < series.length; i++) {
+        for (let j = i + 1; j < series.length; j++) {
+          const { xs, ys } = alignSeries(seriesData[i], seriesData[j]);
+          const r = pearson(xs, ys);
+          correlations.push({
+            a: series[i].label,
+            b: series[j].label,
+            pearson: Math.round(r * 1000) / 1000,
+            strength: strengthLabel(r),
+          });
+        }
+      }
+
+      const result = {
+        period: args.dateRange,
+        attributionModel: args.attributionModel,
+        attributionWindow: args.attributionWindow,
+        accountingMode: args.accountingMode,
+        timeGranularity: args.timeGranularity,
+        series,
+        correlations,
+      };
+      await deps.cache.set(cacheKey, result, cacheTtl(args.dateRange, nowISO));
+      return result;
+    },
+  };
+
+  return [overview, sales, listBreakdowns, listMetrics, connectedPartners, ordersList, ordersSummary, metricsExplorer];
 }
 
 // Small util just for Claude's tool manifest. Covers the shapes used in this file.

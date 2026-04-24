@@ -154,6 +154,31 @@ query FetchOrderSummaryGraphKPI($dateRange: DateRangeInput!, $comparedDateRange:
   }
 }`;
 
+export const GET_METRICS_EXPLORER_REPORT = `
+query GetMetricsExplorerReport(
+  $accountingMode: String!, $attributionModel: String!, $attributionWindow: String!,
+  $level: String!, $timeGranularity: String!,
+  $dateRange: SalesDateRangeInput!,
+  $dimensionIds: [String!]!, $metricIds: [String!]!,
+  $advancedSearch: JSONObject,
+  $breakdownFilters: [SalesTableReportV3BreakdownsFilterInput!],
+  $isSummary: Boolean
+) {
+  me {
+    metricsExplorerReport(
+      accountingMode: $accountingMode, attributionModel: $attributionModel,
+      attributionWindow: $attributionWindow, level: $level,
+      timeGranularity: $timeGranularity, dateRange: $dateRange,
+      dimensionIds: $dimensionIds, metricIds: $metricIds,
+      advancedSearch: $advancedSearch, breakdownFilters: $breakdownFilters,
+      isSummary: $isSummary
+    ) {
+      rows
+      summary
+    }
+  }
+}`;
+
 export const FETCH_ORDER_SUMMARY_GRAPH = `
 query FetchOrderSummaryGraph($dateRange: DateRangeInput!, $granularity: String!, $filterOptions: OrdersGraphFilterOptionsInput) {
   me {

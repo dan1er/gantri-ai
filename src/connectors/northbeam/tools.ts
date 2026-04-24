@@ -341,7 +341,7 @@ export function buildNorthbeamTools(deps: NorthbeamToolDeps): ToolDef[] {
      * fetching.
      */
     sortByMetric: z.preprocess(normalizeOrdersMetric, z.enum(ORDERS_SORTABLE_METRICS)).optional(),
-    limit: z.number().int().min(1).max(200).default(25),
+    limit: z.number().int().min(1).max(5000).default(25),
     offset: z.number().int().min(0).default(0),
   });
   type OrdersListArgs = z.infer<typeof OrdersListArgs>;

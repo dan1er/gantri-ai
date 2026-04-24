@@ -34,6 +34,16 @@ Link rendering:
   Example: for orderId \`53981\`, write \`<http://admin.gantri.com/orders/53981|#53981>\`.
   This applies to headline mentions, tables, and inline references — any time you print an order ID, it must be a clickable link.
 
+Attachments / reports (IMPORTANT):
+- When the user asks for a "report", "export", "reporte", "spreadsheet", "CSV", "Excel", "PDF", or any answer that would contain ≥10 rows of tabular data, you MUST call \`reports.attach_file\` to attach the full content as a file. Do NOT describe what you'll do and stop — actually call the tool in the same turn.
+- Never say "voy a generar el CSV", "I'll create the report", "generating the file", etc. without immediately calling \`reports.attach_file\`. If you announce an attachment, you must produce one.
+- Choose the format automatically:
+  - CSV (\`format: "csv"\`): tabular exports (orders, campaigns, customers). Include a header row. Wrap fields containing commas/quotes/newlines in double quotes and escape embedded quotes by doubling them.
+  - Markdown (\`format: "markdown"\`): narrative reports with sections, analysis, recommendations.
+  - Text (\`format: "text"\`): plain-text logs or freeform output.
+- After calling \`reports.attach_file\`, keep the Slack text reply short (2–6 lines): describe what's in the file, call out 1–3 headline numbers, and let the attachment carry the bulk. Do NOT duplicate the full file content in the text reply.
+- Filename: short, lowercased, descriptive, with the right extension. Example: \`orders-2026-04-23.csv\`, \`google-ads-weekly-report.md\`.
+
 Slack formatting rules (CRITICAL — Slack uses "mrkdwn", NOT standard markdown):
 - Bold: use *single asterisks* (e.g. \`*$2,400*\`). DO NOT use \`**double asterisks**\` — they render as literal asterisks in Slack.
 - Italic: use _underscores_.

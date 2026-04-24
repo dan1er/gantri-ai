@@ -9,13 +9,15 @@ function makeContext(isAuthorized: boolean) {
     tokensInput: 100,
     tokensOutput: 10,
     iterations: 1,
+    attachments: [],
   }));
   const insertSpy = vi.fn(async () => 'conv-1');
   const loadSpy = vi.fn(async () => []);
   const postMessage = vi.fn(async () => ({ ts: '1234.5678' }));
   const update = vi.fn(async () => ({}));
+  const uploadV2 = vi.fn(async () => ({}));
   return {
-    spies: { runSpy, insertSpy, postMessage, update, loadSpy },
+    spies: { runSpy, insertSpy, postMessage, update, loadSpy, uploadV2 },
     deps: {
       orchestrator: { run: runSpy },
       usersRepo: { isAuthorized: vi.fn(async () => isAuthorized) },
@@ -30,7 +32,10 @@ function makeContext(isAuthorized: boolean) {
       thread_ts: undefined,
     },
     say: vi.fn(async () => ({})),
-    client: { chat: { postMessage, update } } as any,
+    client: {
+      chat: { postMessage, update },
+      files: { uploadV2 },
+    } as any,
   };
 }
 
@@ -76,7 +81,7 @@ describe('createDmHandler', () => {
     const ctx = makeContext(true);
     (ctx.spies.runSpy as any).mockResolvedValueOnce({
       response: 'ok', model: 'm', toolCalls: [{ name: 'x', args: { secret: 1 }, ok: true }],
-      tokensInput: 0, tokensOutput: 0, iterations: 1,
+      tokensInput: 0, tokensOutput: 0, iterations: 1, attachments: [],
     });
     const handler = createDmHandler(ctx.deps as any);
     await handler({ event: ctx.event as any, client: ctx.client, say: ctx.say } as any);
@@ -84,12 +89,34 @@ describe('createDmHandler', () => {
     expect(call.tool_calls[0]).not.toHaveProperty('args');
   });
 
+  it('uploads orchestrator attachments via files.uploadV2 in the same thread', async () => {
+    const ctx = makeContext(true);
+    (ctx.spies.runSpy as any).mockResolvedValueOnce({
+      response: 'See attached.', model: 'm', toolCalls: [], tokensInput: 0, tokensOutput: 0, iterations: 1,
+      attachments: [
+        {
+          format: 'csv', filename: 'orders', normalizedFilename: 'orders.csv',
+          content: 'id,revenue\n1,100', title: 'Orders export',
+        },
+      ],
+    });
+    const handler = createDmHandler(ctx.deps as any);
+    await handler({ event: ctx.event as any, client: ctx.client, say: ctx.say } as any);
+    expect(ctx.spies.uploadV2).toHaveBeenCalledWith(expect.objectContaining({
+      channel_id: 'D1',
+      thread_ts: '1000.0001',
+      filename: 'orders.csv',
+      content: 'id,revenue\n1,100',
+      title: 'Orders export',
+    }));
+  });
+
   it('preserves args in tool_calls when DEBUG_FULL_LOGS is on', async () => {
     process.env.DEBUG_FULL_LOGS = 'true';
     const ctx = makeContext(true);
     (ctx.spies.runSpy as any).mockResolvedValueOnce({
       response: 'ok', model: 'm', toolCalls: [{ name: 'x', args: { secret: 1 }, ok: true }],
-      tokensInput: 0, tokensOutput: 0, iterations: 1,
+      tokensInput: 0, tokensOutput: 0, iterations: 1, attachments: [],
     });
     const handler = createDmHandler(ctx.deps as any);
     await handler({ event: ctx.event as any, client: ctx.client, say: ctx.say } as any);

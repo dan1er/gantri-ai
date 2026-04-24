@@ -6,6 +6,7 @@ import { AuthorizedUsersRepo } from './storage/repositories/authorized-users.js'
 import { ConversationsRepo } from './storage/repositories/conversations.js';
 import { ConnectorRegistry } from './connectors/base/registry.js';
 import { NorthbeamConnector } from './connectors/northbeam/northbeam-connector.js';
+import { ReportsConnector } from './connectors/reports/reports-connector.js';
 import { Orchestrator } from './orchestrator/orchestrator.js';
 import { buildSlackApp } from './slack/app.js';
 
@@ -25,6 +26,7 @@ async function main() {
     credentials: { email, password, dashboardId },
   });
   registry.register(northbeam);
+  registry.register(new ReportsConnector());
 
   const claude = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
   const orchestrator = new Orchestrator({
@@ -32,7 +34,7 @@ async function main() {
     claude,
     model: 'claude-sonnet-4-6',
     maxIterations: 5,
-    maxOutputTokens: 4096,
+    maxOutputTokens: 16384,
   });
 
   const usersRepo = new AuthorizedUsersRepo(supabase);

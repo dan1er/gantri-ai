@@ -58,6 +58,29 @@ export function createDmHandler(deps: HandlerDeps) {
         text: out.response.slice(0, 200),
         blocks,
       });
+
+      // If Claude attached any files, upload them to the same thread.
+      for (const a of out.attachments ?? []) {
+        try {
+          await client.files.uploadV2({
+            channel_id: event.channel,
+            thread_ts: threadTs,
+            filename: a.normalizedFilename,
+            title: a.title,
+            content: a.content,
+            initial_comment: undefined,
+          });
+        } catch (uploadErr) {
+          const msg = uploadErr instanceof Error ? uploadErr.message : String(uploadErr);
+          logger.error({ err: msg, filename: a.normalizedFilename }, 'file upload failed');
+          await client.chat.postMessage({
+            channel: event.channel,
+            thread_ts: threadTs,
+            text: `⚠️ Couldn't attach \`${a.normalizedFilename}\`: ${msg}`,
+          });
+        }
+      }
+
       await deps.conversationsRepo.insert({
         slack_thread_ts: threadTs,
         slack_channel_id: event.channel,

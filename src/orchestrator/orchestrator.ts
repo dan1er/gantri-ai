@@ -2,6 +2,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import type { ConnectorRegistry } from '../connectors/base/registry.js';
 import { buildSystemPrompt } from './prompts.js';
 import { describeCatalog } from '../connectors/northbeam/catalog.js';
+import type { ReportAttachment } from '../connectors/reports/reports-connector.js';
 import { logger } from '../logger.js';
 
 export interface OrchestratorInput {
@@ -16,6 +17,8 @@ export interface OrchestratorOutput {
   tokensInput: number;
   tokensOutput: number;
   iterations: number;
+  /** Files Claude requested to attach via the `reports.attach_file` tool. */
+  attachments: ReportAttachment[];
 }
 
 export interface OrchestratorOptions {
@@ -63,6 +66,7 @@ export class Orchestrator {
     messages.push({ role: 'user', content: input.question });
 
     const toolCalls: OrchestratorOutput['toolCalls'] = [];
+    const attachments: ReportAttachment[] = [];
     let tokensInput = 0;
     let tokensOutput = 0;
     let lastModel = this.opts.model;
@@ -88,6 +92,7 @@ export class Orchestrator {
           tokensInput,
           tokensOutput,
           iterations: iter,
+          attachments,
         };
       }
 
@@ -103,10 +108,35 @@ export class Orchestrator {
           ok: result.ok,
           errorMessage: result.ok ? undefined : result.error?.message,
         });
+
+        // Intercept reports.attach_file results: collect the attachment and
+        // send Claude a trimmed confirmation instead of the full content (no
+        // point feeding the blob back in).
+        let toolContent: string;
+        if (result.ok && registryName === 'reports.attach_file') {
+          const data = result.data as { attachment?: ReportAttachment };
+          if (data?.attachment) {
+            attachments.push(data.attachment);
+            toolContent = JSON.stringify({
+              ok: true,
+              attached: {
+                filename: data.attachment.normalizedFilename,
+                format: data.attachment.format,
+                bytes: data.attachment.content.length,
+              },
+            });
+          } else {
+            toolContent = JSON.stringify(result.data);
+          }
+        } else if (result.ok) {
+          toolContent = JSON.stringify(result.data);
+        } else {
+          toolContent = `ERROR: ${result.error?.message}`;
+        }
         toolResults.push({
           type: 'tool_result',
           tool_use_id: block.id,
-          content: result.ok ? JSON.stringify(result.data) : `ERROR: ${result.error?.message}`,
+          content: toolContent,
           is_error: !result.ok,
         });
       }
@@ -122,6 +152,7 @@ export class Orchestrator {
       tokensInput,
       tokensOutput,
       iterations: this.maxIterations,
+      attachments,
     };
   }
 }

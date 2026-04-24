@@ -6,7 +6,7 @@ const envSchema = z.object({
   ANTHROPIC_API_KEY: z.string().min(1),
   SLACK_BOT_TOKEN: z.string().min(1),
   SLACK_SIGNING_SECRET: z.string().min(1),
-  LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error']).default('info'),
+  LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'silent']).default('info'),
   DEBUG_FULL_LOGS: z
     .union([z.boolean(), z.string()])
     .transform((v) => v === true || v === 'true')

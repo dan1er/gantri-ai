@@ -20,9 +20,24 @@ Data source notes for Northbeam:
 ${input.catalogSummary}
 
 Response guidelines:
-- Be concise. Lead with the headline number, then tables or breakdowns.
+- Be concise. Lead with the headline number, then breakdowns.
 - Always state the period, attribution model, and attribution window you used.
 - If a tool returns an error, explain briefly what went wrong and try a correction before giving up.
 - Never fabricate metric IDs, breakdown keys, or attribution values — only use ones listed above.
-- Format for Slack: short paragraphs, bullet lists for details, use code-fenced blocks for tabular data.`;
+
+Slack formatting rules (CRITICAL — Slack uses "mrkdwn", NOT standard markdown):
+- Bold: use *single asterisks* (e.g. \`*$2,400*\`). DO NOT use \`**double asterisks**\` — they render as literal asterisks in Slack.
+- Italic: use _underscores_.
+- Strikethrough: use ~tildes~.
+- Inline code: use \`backticks\`.
+- Headings/dividers: do not use \`#\`, \`##\`, or \`---\`. Emphasize section titles with *bold* instead.
+- Lists: use "- " bullets; the formatter will convert them to Slack bullets.
+- Tables: Slack does NOT render markdown tables. For tabular data, wrap an ASCII-aligned table in a triple-backtick code block, e.g.:
+  \`\`\`
+  Campaign              Spend     ROAS
+  Performance Max     $1,224    1.09x
+  Shopping Catch-All    $430    0.62x
+  \`\`\`
+- Links: write \`<https://example.com|label>\` if you need an inline link; otherwise just paste the URL.
+- Keep responses under ~2000 characters unless strictly necessary; prefer one tight summary plus one code-block table over long prose.`;
 }

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { ToolDef } from '../base/connector.js';
 import type { NorthbeamGraphqlClient } from './graphql-client.js';
-import type { TtlCache } from '../../storage/cache.js';
+import { TtlCache } from '../../storage/cache.js';
 import {
   ACCOUNTING_MODES,
   ATTRIBUTION_MODELS,
@@ -96,17 +96,16 @@ export function buildNorthbeamTools(deps: NorthbeamToolDeps): ToolDef[] {
     schema: OverviewArgs as z.ZodType<OverviewArgs>,
     jsonSchema: zodToJsonSchema(OverviewArgs),
     async execute(args) {
-      const dimensions = args.dimensions ?? ['date'];
       const variables = {
         ...args,
-        dimensionIds: dimensions,
+        dimensionIds: args.dimensions ?? ['date'],
         metricIds: args.metrics,
         level: 'campaign',
         breakdownFilters: [],
-        sorting: [{ dimensionId: dimensions[0] ?? 'date', order: 'asc' }],
+        sorting: [{ dimensionId: (args.dimensions ?? ['date'])[0] ?? 'date', order: 'asc' }],
         compareDateRange: args.compareToPreviousPeriod ? previousPeriod(args.dateRange) : null,
       };
-      const key = `nb.overview:${JSON.stringify(variables)}`;
+      const key = TtlCache.key('nb.overview', variables as Record<string, unknown>);
       const cached = await deps.cache.get(key);
       if (cached) return cached;
       const data = await deps.gql.request<{
@@ -130,7 +129,7 @@ export function buildNorthbeamTools(deps: NorthbeamToolDeps): ToolDef[] {
   const sales: ToolDef<SalesArgs> = {
     name: 'northbeam.sales',
     description:
-      'Returns a granular performance table at campaign/adset/ad/platform level with rich metrics and optional breakdown by Platform (Northbeam) / Category / Targeting. Use for drill-down questions like "best campaigns last week" or "Meta ROAS by adset".',
+      'Returns a granular performance table at campaign/adset/ad/platform level with rich metrics and optional breakdown by Platform (Northbeam), Category (Northbeam), Targeting (Northbeam), etc. Use for drill-down questions like "best campaigns last week" or "Meta ROAS by adset". The `breakdown` argument must be one of the keys returned by `northbeam.list_breakdowns`; do not invent a breakdown key.',
     schema: SalesArgs as z.ZodType<SalesArgs>,
     jsonSchema: zodToJsonSchema(SalesArgs),
     async execute(args) {
@@ -153,7 +152,7 @@ export function buildNorthbeamTools(deps: NorthbeamToolDeps): ToolDef[] {
         summaryDimensionIds: null,
         advancedSearch: null,
       };
-      const key = `nb.sales:${JSON.stringify(variables)}`;
+      const key = TtlCache.key('nb.sales', variables as Record<string, unknown>);
       const cached = await deps.cache.get(key);
       if (cached) return cached;
       const data = await deps.gql.request<{

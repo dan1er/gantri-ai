@@ -1,9 +1,66 @@
 import type { AuthorizedUsersRepo } from '../storage/repositories/authorized-users.js';
 import type { ConversationsRepo } from '../storage/repositories/conversations.js';
 import type { Orchestrator } from '../orchestrator/orchestrator.js';
+import type { ReportAttachment } from '../connectors/reports/reports-connector.js';
 import { markdownToSlackBlocks } from '../orchestrator/formatter.js';
 import { logger } from '../logger.js';
 import { loadEnv } from '../config/env.js';
+
+/**
+ * Upload a text file to a Slack channel using the external-upload API (three
+ * steps: getUploadURLExternal → POST binary → completeUploadExternal). This is
+ * the Slack-recommended flow for 2026+; the SDK's `files.uploadV2` helper has
+ * been observed to silently fail in some environments, so we drive the raw
+ * endpoints ourselves.
+ */
+async function uploadSlackFile(params: {
+  token: string;
+  channel: string;
+  threadTs: string | undefined;
+  filename: string;
+  content: string;
+  title?: string;
+}): Promise<void> {
+  const contentBytes = Buffer.byteLength(params.content, 'utf8');
+
+  // Step 1: get signed upload URL + file ID.
+  const step1 = await fetch(
+    `https://slack.com/api/files.getUploadURLExternal?filename=${encodeURIComponent(
+      params.filename,
+    )}&length=${contentBytes}`,
+    { headers: { authorization: `Bearer ${params.token}` } },
+  ).then((r) => r.json() as Promise<{ ok: boolean; upload_url?: string; file_id?: string; error?: string }>);
+  if (!step1.ok || !step1.upload_url || !step1.file_id) {
+    throw new Error(`getUploadURLExternal failed: ${step1.error ?? 'unknown'}`);
+  }
+
+  // Step 2: upload the raw bytes to the signed URL.
+  const step2 = await fetch(step1.upload_url, {
+    method: 'POST',
+    body: params.content,
+    headers: { 'content-type': 'text/plain; charset=utf-8' },
+  });
+  if (!step2.ok) {
+    throw new Error(`upload POST returned HTTP ${step2.status}: ${await step2.text().catch(() => '')}`);
+  }
+
+  // Step 3: complete and share into the channel/thread.
+  const step3 = await fetch('https://slack.com/api/files.completeUploadExternal', {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${params.token}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      files: [{ id: step1.file_id, title: params.title ?? params.filename }],
+      channel_id: params.channel,
+      thread_ts: params.threadTs,
+    }),
+  }).then((r) => r.json() as Promise<{ ok: boolean; error?: string }>);
+  if (!step3.ok) {
+    throw new Error(`completeUploadExternal failed: ${step3.error ?? 'unknown'}`);
+  }
+}
 
 export interface HandlerDeps {
   orchestrator: Orchestrator;
@@ -59,17 +116,22 @@ export function createDmHandler(deps: HandlerDeps) {
         blocks,
       });
 
-      // If Claude attached any files, upload them to the same thread.
-      for (const a of out.attachments ?? []) {
+      // If Claude attached any files, upload each to the same thread.
+      for (const a of (out.attachments ?? []) as ReportAttachment[]) {
         try {
-          await client.files.uploadV2({
-            channel_id: event.channel,
-            thread_ts: threadTs,
+          logger.info(
+            { filename: a.normalizedFilename, bytes: a.content.length, format: a.format },
+            'uploading attachment',
+          );
+          await uploadSlackFile({
+            token: env.SLACK_BOT_TOKEN,
+            channel: event.channel,
+            threadTs,
             filename: a.normalizedFilename,
-            title: a.title,
             content: a.content,
-            initial_comment: undefined,
+            title: a.title,
           });
+          logger.info({ filename: a.normalizedFilename }, 'attachment uploaded');
         } catch (uploadErr) {
           const msg = uploadErr instanceof Error ? uploadErr.message : String(uploadErr);
           logger.error({ err: msg, filename: a.normalizedFilename }, 'file upload failed');

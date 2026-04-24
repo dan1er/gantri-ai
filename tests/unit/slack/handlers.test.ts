@@ -15,9 +15,8 @@ function makeContext(isAuthorized: boolean) {
   const loadSpy = vi.fn(async () => []);
   const postMessage = vi.fn(async () => ({ ts: '1234.5678' }));
   const update = vi.fn(async () => ({}));
-  const uploadV2 = vi.fn(async () => ({}));
   return {
-    spies: { runSpy, insertSpy, postMessage, update, loadSpy, uploadV2 },
+    spies: { runSpy, insertSpy, postMessage, update, loadSpy },
     deps: {
       orchestrator: { run: runSpy },
       usersRepo: { isAuthorized: vi.fn(async () => isAuthorized) },
@@ -34,7 +33,6 @@ function makeContext(isAuthorized: boolean) {
     say: vi.fn(async () => ({})),
     client: {
       chat: { postMessage, update },
-      files: { uploadV2 },
     } as any,
   };
 }
@@ -89,26 +87,47 @@ describe('createDmHandler', () => {
     expect(call.tool_calls[0]).not.toHaveProperty('args');
   });
 
-  it('uploads orchestrator attachments via files.uploadV2 in the same thread', async () => {
-    const ctx = makeContext(true);
-    (ctx.spies.runSpy as any).mockResolvedValueOnce({
-      response: 'See attached.', model: 'm', toolCalls: [], tokensInput: 0, tokensOutput: 0, iterations: 1,
-      attachments: [
-        {
-          format: 'csv', filename: 'orders', normalizedFilename: 'orders.csv',
-          content: 'id,revenue\n1,100', title: 'Orders export',
-        },
-      ],
+  it('uploads orchestrator attachments through the external-upload Slack API in the same thread', async () => {
+    const origFetch = globalThis.fetch;
+    const fetchSpy = vi.fn(async (url: string | URL | Request, _init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes('files.getUploadURLExternal')) {
+        return new Response(JSON.stringify({ ok: true, upload_url: 'https://files.slack.com/upload/test', file_id: 'F_TEST' }));
+      }
+      if (u.startsWith('https://files.slack.com/upload/')) {
+        return new Response('OK - 16');
+      }
+      if (u.includes('files.completeUploadExternal')) {
+        return new Response(JSON.stringify({ ok: true }));
+      }
+      return new Response('{}');
     });
-    const handler = createDmHandler(ctx.deps as any);
-    await handler({ event: ctx.event as any, client: ctx.client, say: ctx.say } as any);
-    expect(ctx.spies.uploadV2).toHaveBeenCalledWith(expect.objectContaining({
-      channel_id: 'D1',
-      thread_ts: '1000.0001',
-      filename: 'orders.csv',
-      content: 'id,revenue\n1,100',
-      title: 'Orders export',
-    }));
+    globalThis.fetch = fetchSpy as any;
+    try {
+      const ctx = makeContext(true);
+      (ctx.spies.runSpy as any).mockResolvedValueOnce({
+        response: 'See attached.', model: 'm', toolCalls: [], tokensInput: 0, tokensOutput: 0, iterations: 1,
+        attachments: [
+          {
+            format: 'csv', filename: 'orders', normalizedFilename: 'orders.csv',
+            content: 'id,revenue\n1,100', title: 'Orders export',
+          },
+        ],
+      });
+      const handler = createDmHandler(ctx.deps as any);
+      await handler({ event: ctx.event as any, client: ctx.client, say: ctx.say } as any);
+      const urls = fetchSpy.mock.calls.map((c: any[]) => String(c[0]));
+      expect(urls.some((u: string) => u.includes('files.getUploadURLExternal'))).toBe(true);
+      expect(urls.some((u: string) => u.startsWith('https://files.slack.com/upload/'))).toBe(true);
+      expect(urls.some((u: string) => u.includes('files.completeUploadExternal'))).toBe(true);
+
+      const completeCall = fetchSpy.mock.calls.find((c: any[]) => String(c[0]).includes('files.completeUploadExternal'))!;
+      const body = JSON.parse(String((completeCall[1] as RequestInit).body));
+      expect(body).toMatchObject({ channel_id: 'D1', thread_ts: '1000.0001' });
+      expect(body.files[0]).toMatchObject({ id: 'F_TEST', title: 'Orders export' });
+    } finally {
+      globalThis.fetch = origFetch;
+    }
   });
 
   it('preserves args in tool_calls when DEBUG_FULL_LOGS is on', async () => {

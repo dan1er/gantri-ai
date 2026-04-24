@@ -71,12 +71,15 @@ export class ReportsConnector implements Connector {
         },
       },
       async execute(args: AttachFileArgs) {
+        // Return a plain data object (no `ok` field) so ConnectorRegistry wraps
+        // this into `{ ok: true, data }` — otherwise the registry would pass
+        // through the object as a pre-formed ToolResult and `result.data` would
+        // be undefined in the orchestrator.
         return {
           attachment: {
             ...args,
             normalizedFilename: normalizeFilename(args.filename, args.format),
           } satisfies ReportAttachment,
-          ok: true,
         };
       },
     },

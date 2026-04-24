@@ -53,6 +53,17 @@ const OverviewArgs = z.object({
   dateRange: DateRange,
   metrics: z.array(z.enum(METRIC_IDS)).min(1).max(20),
   dimensions: z.array(z.string()).default(['date']),
+  /**
+   * Optional breakdown filter. Call `northbeam.list_breakdowns` first to get valid
+   * `key` / `value` pairs. Example: { key: "Category (Northbeam)", value: "Paid - Video" }
+   * or { key: "Platform (Northbeam)", value: "Google Ads" }.
+   */
+  breakdown: z
+    .object({
+      key: z.string().min(1),
+      value: z.string().min(1),
+    })
+    .optional(),
   ...Common,
   compareToPreviousPeriod: z.boolean().default(true),
 });
@@ -117,7 +128,9 @@ export function buildNorthbeamTools(deps: NorthbeamToolDeps): ToolDef[] {
         dimensionIds: args.dimensions ?? ['date'],
         metricIds: args.metrics,
         level: 'campaign',
-        breakdownFilters: [],
+        breakdownFilters: args.breakdown
+          ? [{ breakdown: args.breakdown.key, value: args.breakdown.value }]
+          : [],
         sorting: [{ dimensionId: (args.dimensions ?? ['date'])[0] ?? 'date', order: 'asc' }],
         compareDateRange: args.compareToPreviousPeriod ? previousPeriod(args.dateRange) : null,
       };

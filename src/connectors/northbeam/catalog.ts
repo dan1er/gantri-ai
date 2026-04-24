@@ -21,27 +21,30 @@ export interface MetricDef {
   description: string;
 }
 
+// Metric IDs accepted by Northbeam's metricsExplorerReport / salesMetricsReportV4
+// / overviewMetricsReportV3. Verified by probing the live API 2026-04-24.
 export const METRIC_CATALOG: MetricDef[] = [
   { id: 'spend', label: 'Spend', description: 'Marketing dollars spent.' },
-  { id: 'rev', label: 'Revenue', description: 'Attributed revenue.' },
+  { id: 'rev', label: 'Revenue', description: 'Attributed revenue (uses current attribution model).' },
+  { id: 'revFt', label: 'Revenue (First-touch)', description: 'Attributed revenue under a first-touch model.' },
+  { id: 'revLtv', label: 'Revenue (LTV)', description: 'Attributed revenue adjusted for lifetime value.' },
   { id: 'roas', label: 'ROAS', description: 'Return on ad spend (rev / spend).' },
-  { id: 'roasFt', label: 'ROAS (First-touch)', description: 'Return on ad spend computed with a first-touch model.' },
+  { id: 'roasFt', label: 'ROAS (First-touch)', description: 'Return on ad spend under a first-touch model.' },
   { id: 'roasLtv', label: 'ROAS (LTV)', description: 'Return on ad spend adjusted for lifetime value.' },
   { id: 'googleROAS', label: 'Google ROAS', description: 'ROAS as reported natively by Google Ads.' },
   { id: 'metaROAS7DClick1DView', label: 'Meta ROAS (7D Click, 1D View)', description: 'ROAS as reported by Meta with 7-day click / 1-day view attribution.' },
+  { id: 'cac', label: 'CAC', description: 'Customer Acquisition Cost (spend / new-customer orders). Use `cac` — Northbeam does NOT support `cpo` or `cpa`.' },
   { id: 'cpm', label: 'CPM', description: 'Cost per thousand impressions.' },
   { id: 'ctr', label: 'CTR', description: 'Click-through rate.' },
   { id: 'ecpc', label: 'eCPC', description: 'Effective cost per click.' },
   { id: 'ecpnv', label: 'eCPNV', description: 'Effective cost per new visitor.' },
   { id: 'ecr', label: 'ECR', description: 'E-commerce conversion rate (orders / visits).' },
+  { id: 'aov', label: 'AOV', description: 'Average order value.' },
+  { id: 'txns', label: 'Transactions', description: 'Attributed order/transaction count. Use `txns` — Northbeam does NOT support `orders` as a metric id.' },
   { id: 'visits', label: 'Visits', description: 'Session count from tracked sources.' },
   { id: 'percentageNewVisits', label: '% New visits', description: 'Share of visits from new users.' },
+  { id: 'avgTouchpointsPerOrder', label: 'Avg touchpoints / order', description: 'Average number of attributed touchpoints preceding any order.' },
   { id: 'avgTouchpointsPerOrderNew', label: 'Avg touchpoints / new order', description: 'Average number of attributed touchpoints preceding a new-customer order.' },
-  { id: 'cpo', label: 'CPO', description: 'Cost per order.' },
-  { id: 'aov', label: 'AOV', description: 'Average order value.' },
-  { id: 'orders', label: 'Orders', description: 'Attributed order count.' },
-  { id: 'rev_new', label: 'New customer revenue', description: 'Revenue attributed to first-time customers.' },
-  { id: 'rev_returning', label: 'Returning customer revenue', description: 'Revenue from repeat customers.' },
 ];
 
 export function describeCatalog(): string {

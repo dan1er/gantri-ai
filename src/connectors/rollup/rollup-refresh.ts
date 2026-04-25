@@ -143,7 +143,8 @@ function rowsToUpserts(fields: string[], rows: unknown[][]): UpsertRollupInput[]
   const byOrgIdx = idx('by_organization');
   const out: UpsertRollupInput[] = [];
   for (const row of rows) {
-    const day = String(row[dayIdx]).slice(0, 10);
+    const day = normalizeDay(row[dayIdx]);
+    if (!day) continue; // skip rows where the date didn't parse
     out.push({
       date: day,
       total_orders: Number(row[totalOrdersIdx] ?? 0),
@@ -154,6 +155,38 @@ function rowsToUpserts(fields: string[], rows: unknown[][]): UpsertRollupInput[]
     });
   }
   return out;
+}
+
+/**
+ * Grafana's data API serializes the `date` column three different ways
+ * depending on payload size and version: ISO string ("2025-03-15"), full
+ * timestamp ("2025-03-15T00:00:00Z"), or unix epoch in seconds (1714867200)
+ * or ms (1714867200000). Coerce all of them to YYYY-MM-DD (PT day) or null
+ * when nothing reasonable comes through.
+ */
+function normalizeDay(value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value === 'string') {
+    // 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM...' — first 10 chars are the date.
+    if (/^\d{4}-\d{2}-\d{2}/.test(value)) return value.slice(0, 10);
+    // numeric-string fallback (e.g. "1714867200")
+    const n = Number(value);
+    if (Number.isFinite(n)) return msToDay(n > 1e12 ? n : n * 1000);
+    return null;
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return msToDay(value > 1e12 ? value : value * 1000);
+  }
+  return null;
+}
+
+function msToDay(ms: number): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: PT_TZ,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date(ms));
 }
 
 function parseJson(value: unknown): Record<string, { orders: number; revenueCents: number }> {

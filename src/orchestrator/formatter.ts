@@ -6,17 +6,64 @@ type Block =
   | { type: 'section'; text: { type: 'mrkdwn'; text: string } }
   | { type: 'context'; elements: Array<{ type: 'mrkdwn'; text: string }> };
 
+/** Slack section blocks reject text > 3000 chars with `invalid_blocks`.
+ *  We use 2800 to leave headroom for footers + fence chars added during splits. */
+const SECTION_MAX_CHARS = 2800;
+
 export function markdownToSlackBlocks(markdown: string, opts: FormatterOptions = {}): Block[] {
   const cleaned = markdownToMrkdwn(markdown);
   const paragraphs = splitParagraphs(cleaned);
-  const blocks: Block[] = paragraphs.map((p) => ({
-    type: 'section',
-    text: { type: 'mrkdwn', text: p },
-  }));
+  const blocks: Block[] = [];
+  for (const p of paragraphs) {
+    for (const chunk of splitOverlongParagraph(p, SECTION_MAX_CHARS)) {
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: chunk } });
+    }
+  }
   if (opts.footer) {
     blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: opts.footer }] });
   }
   return blocks;
+}
+
+/**
+ * If a paragraph exceeds Slack's 3000-char-per-section limit, split it into
+ * multiple sections on line boundaries while preserving any open code fences
+ * (close + reopen ``` across the split so each piece is independently valid
+ * mrkdwn).
+ */
+function splitOverlongParagraph(text: string, maxChars: number): string[] {
+  if (text.length <= maxChars) return [text];
+  const lines = text.split('\n');
+  const out: string[] = [];
+  let buf: string[] = [];
+  let inFence = false;
+  let bufLen = 0;
+  const flush = () => {
+    if (buf.length === 0) return;
+    let chunk = buf.join('\n');
+    // If we're mid-fence, close the chunk's fence and remember to re-open next chunk.
+    if (inFence) chunk += '\n```';
+    out.push(chunk);
+    buf = [];
+    bufLen = 0;
+    if (inFence) {
+      buf.push('```');
+      bufLen = 4;
+    }
+  };
+  for (const line of lines) {
+    const lineLen = line.length + 1; // include newline
+    if (bufLen + lineLen > maxChars && buf.length > 0) flush();
+    if (line.startsWith('```')) inFence = !inFence;
+    buf.push(line);
+    bufLen += lineLen;
+  }
+  if (buf.length > 0) {
+    let chunk = buf.join('\n');
+    if (inFence) chunk += '\n```';
+    out.push(chunk);
+  }
+  return out;
 }
 
 /**

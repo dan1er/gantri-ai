@@ -105,7 +105,11 @@ export function createDmHandler(deps: HandlerDeps) {
     const threadHistory = await deps.conversationsRepo.loadRecentByThread(threadTs, 10);
     const started = Date.now();
     try {
-      const out = await deps.orchestrator.run({ question: event.text, threadHistory });
+      const out = await deps.orchestrator.run({
+        question: event.text,
+        threadHistory,
+        actor: { slackUserId: event.user, slackChannelId: event.channel },
+      });
       const blocks = markdownToSlackBlocks(out.response, {
         footer: `Source: Northbeam • Model: ${out.model} • ${out.iterations} iteration${out.iterations === 1 ? '' : 's'}`,
       });

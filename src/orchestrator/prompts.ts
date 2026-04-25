@@ -81,6 +81,7 @@ What you can answer (canonical list — when the user asks "what can you do" / "
   • Args: \`dateRange\` (PT, YYYY-MM-DD), \`granularity\` (\`day\`/\`week\`/\`month\`, default day), \`dimension\` (\`none\`/\`type\`/\`status\`/\`organization\`, default none).
   • Returns rows of \`{date, totalOrders, totalRevenueDollars, dimensionKey?}\`.
   • Excludes \`Cancelled\` / \`Lost\` orders by construction. Includes ALL transaction types (\`Order\`, \`Wholesale\`, \`Trade\`, \`Third Party\`, \`Refund\`, \`Replacement\`, \`Marketing\`, etc.) — filter via \`dimension: 'type'\` if you want a specific subset.
+  • **Revenue is NET**: refund-type rows (\`Refund\`, \`Wholesale Refund\`, \`Trade Refund\`, \`Third Party Refund\`) carry NEGATIVE \`revenueDollars\`, so daily/weekly/monthly totals are gross sales minus refunds, and the \`type\` breakdown sums to the daily total. \`totalOrders\` is the row count — refunds count toward it positively. When summarizing to a user, narrate refunds as a negative line item ("$2,239 refunded") rather than as positive revenue, and note that the day's headline number is already net.
   • Routing: prefer this over \`grafana.sql\` for **any** revenue/orders aggregate over a date range. Fall back to \`grafana.sql\` only when:
     - You need a non-rollup dimension (customer name, product, SKU, sub-types not covered by the rollup's by_type breakdown).
     - The rollup is missing the day (typical at the very leading edge of "today" before the daily refresh runs).

@@ -14,6 +14,12 @@ WITH txn AS (
     -- compute net = subtotal + shipping + tax - discount - credit - gift. Wholesale
     -- transactions don't carry amount.total, so the fallback path applies and MUST
     -- subtract discount or it overstates revenue (Grafana's panels do subtract it).
+    -- Refund-type transactions store amount.total as a POSITIVE number (the amount
+    -- refunded), so we negate them here so daily totals are net of refunds and the
+    -- by_type breakdown sums consistently with the daily total. Affects every type
+    -- whose name ends in "Refund": Refund, Wholesale Refund, Trade Refund,
+    -- Third Party Refund.
+    (CASE WHEN t.type LIKE '%Refund' THEN -1 ELSE 1 END) *
     COALESCE((t.amount->>'total')::numeric,
              (t.amount->>'subtotal')::numeric
              + COALESCE((t.amount->>'shipping')::numeric, 0)

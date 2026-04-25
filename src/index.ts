@@ -8,6 +8,7 @@ import { ConnectorRegistry } from './connectors/base/registry.js';
 import { NorthbeamConnector } from './connectors/northbeam/northbeam-connector.js';
 import { ReportsConnector } from './connectors/reports/reports-connector.js';
 import { GantriPorterConnector } from './connectors/gantri-porter/gantri-porter-connector.js';
+import { GrafanaConnector } from './connectors/grafana/grafana-connector.js';
 import { Orchestrator } from './orchestrator/orchestrator.js';
 import { buildSlackApp } from './slack/app.js';
 
@@ -18,6 +19,7 @@ async function main() {
   const [
     email, password, dashboardId,
     porterApiBaseUrl, porterBotEmail, porterBotPassword,
+    grafanaUrl, grafanaToken, grafanaPostgresDsUid,
   ] = await Promise.all([
     readVaultSecret(supabase, 'NORTHBEAM_EMAIL'),
     readVaultSecret(supabase, 'NORTHBEAM_PASSWORD'),
@@ -25,6 +27,9 @@ async function main() {
     readVaultSecret(supabase, 'PORTER_API_BASE_URL'),
     readVaultSecret(supabase, 'PORTER_BOT_EMAIL'),
     readVaultSecret(supabase, 'PORTER_BOT_PASSWORD'),
+    readVaultSecret(supabase, 'GRAFANA_URL'),
+    readVaultSecret(supabase, 'GRAFANA_TOKEN'),
+    readVaultSecret(supabase, 'GRAFANA_POSTGRES_DS_UID'),
   ]);
 
   const registry = new ConnectorRegistry();
@@ -41,6 +46,13 @@ async function main() {
     password: porterBotPassword,
   });
   registry.register(gantriPorter);
+
+  const grafana = new GrafanaConnector({
+    baseUrl: grafanaUrl,
+    token: grafanaToken,
+    postgresDsUid: grafanaPostgresDsUid,
+  });
+  registry.register(grafana);
 
   const claude = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
   const orchestrator = new Orchestrator({
@@ -64,12 +76,13 @@ async function main() {
 
   // Readiness / deep check — exercises downstream auth and DB. Call manually.
   receiver.router.get('/readyz', async (_req, res) => {
-    const [nb, gp] = await Promise.all([
+    const [nb, gp, gf] = await Promise.all([
       northbeam.healthCheck(),
       gantriPorter.healthCheck(),
+      grafana.healthCheck(),
     ]);
-    const ok = nb.ok && gp.ok;
-    res.status(ok ? 200 : 503).json({ ok, northbeam: nb, gantriPorter: gp });
+    const ok = nb.ok && gp.ok && gf.ok;
+    res.status(ok ? 200 : 503).json({ ok, northbeam: nb, gantriPorter: gp, grafana: gf });
   });
 
   await app.start(env.PORT);

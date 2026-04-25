@@ -1,8 +1,9 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { ConnectorRegistry } from '../connectors/base/registry.js';
-import type { ReportPlan } from './plan-types.js';
+import type { ReportPlan, BlockSpec } from './plan-types.js';
 import { PLAN_SCHEMA_VERSION } from './plan-types.js';
 import { executePlan, type ExecutePlanResult } from './plan-executor.js';
+import { getByPath } from './step-refs.js';
 import { logger } from '../logger.js';
 
 export interface CompilePlanOptions {
@@ -13,68 +14,203 @@ export interface CompilePlanOptions {
   /** When validating, the runAt used to resolve TimeRefs. */
   validationRunAt?: Date;
   timezone?: string;
-  maxIterations?: number;
+  /** Max compile attempts (initial + N retries with feedback). Default 3. */
+  maxAttempts?: number;
 }
 
 export interface CompilePlanResult {
   plan: ReportPlan;
   validation: ExecutePlanResult;
+  attempts: number;
 }
 
 /**
  * Compile a user's natural-language intent into a validated ReportPlan.
  *
- * Uses a single non-tool call to Claude to generate the JSON, then runs the
- * plan once via the executor as the validation step. If validation produces
- * an "error" status (zero successful steps), throws — the caller surfaces
- * that to the user. "partial" is acceptable on first compile.
+ * Each attempt asks Claude for a JSON plan, runs it through the executor,
+ * and then validates that:
+ *   1. No tool step errored.
+ *   2. Every `${alias.path}` placeholder in text/header blocks resolves to
+ *      a real value (the LLM tends to invent field names like `orderCount`
+ *      that don't match the actual tool result shape).
+ *   3. Every `from:` reference in table/csv blocks points to a real alias.
  *
- * The compiler does not give Claude tool access on purpose — we want one
- * deterministic JSON output, not exploratory iteration. The validation step
- * exercises the tools end-to-end via the executor.
+ * If anything fails, we feed the issue list + the actual alias-map shape
+ * back to Claude so it can correct the paths. Up to `maxAttempts` total.
  */
 export async function compilePlan(opts: CompilePlanOptions): Promise<CompilePlanResult> {
   const tools = opts.registry.getAllTools();
   const toolCatalog = tools
-    .map(
-      (t) =>
-        `- ${t.name}: ${t.description}\n  args: ${JSON.stringify(t.jsonSchema)}`,
-    )
+    .map((t) => `- ${t.name}: ${t.description}\n  args: ${JSON.stringify(t.jsonSchema)}`)
     .join('\n');
 
-  const compilerPrompt = buildCompilerPrompt({
-    intent: opts.intent,
-    toolCatalog,
-  });
-
-  const resp = await opts.claude.messages.create({
-    model: opts.model,
-    max_tokens: 4000,
-    messages: [{ role: 'user', content: compilerPrompt }],
-  });
-
-  const text = extractText(resp.content);
-  const plan = parsePlanJson(text);
-
-  // Validate by executing once.
   const runAt = opts.validationRunAt ?? new Date();
   const tz = opts.timezone ?? 'America/Los_Angeles';
-  const validation = await executePlan({ plan, registry: opts.registry, runAt, timezone: tz });
+  const maxAttempts = opts.maxAttempts ?? 3;
 
-  if (validation.status === 'error') {
-    const errMsgs = validation.errors.map((e) => `${e.alias}: ${e.message}`).join('; ');
-    throw new Error(`Plan validation failed (no steps succeeded): ${errMsgs}`);
+  let feedback: string | null = null;
+  let lastPlan: ReportPlan | null = null;
+  let lastValidation: ExecutePlanResult | null = null;
+  let lastIssues: string[] = [];
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const prompt = buildCompilerPrompt({ intent: opts.intent, toolCatalog, feedback });
+    const resp = await opts.claude.messages.create({
+      model: opts.model,
+      max_tokens: 4000,
+      messages: [{ role: 'user', content: prompt }],
+    });
+    const text = extractText(resp.content);
+    const plan = parsePlanJson(text);
+    lastPlan = plan;
+
+    const validation = await executePlan({ plan, registry: opts.registry, runAt, timezone: tz });
+    lastValidation = validation;
+
+    if (validation.status === 'error') {
+      const errMsgs = validation.errors.map((e) => `${e.alias}: ${e.message}`).join('; ');
+      if (attempt === maxAttempts) {
+        throw new Error(`Plan validation failed after ${attempt} attempts (no steps succeeded): ${errMsgs}`);
+      }
+      feedback = `On the previous attempt, ${validation.errors.length} step${validation.errors.length === 1 ? '' : 's'} threw an error. Errors: ${errMsgs}.\nFix the args (probably wrong shape against the tool's input schema) and try again.`;
+      lastIssues = validation.errors.map((e) => `step ${e.alias}: ${e.message}`);
+      logger.warn({ attempt, errMsgs }, 'plan compile attempt failed (step errors)');
+      continue;
+    }
+
+    const issues = findRenderingIssues(plan, validation.aliasMap);
+    if (issues.length === 0) {
+      logger.info(
+        { intent: opts.intent, stepCount: plan.steps.length, status: validation.status, attempt },
+        'plan compiled',
+      );
+      return { plan, validation, attempts: attempt };
+    }
+
+    lastIssues = issues;
+    if (attempt === maxAttempts) {
+      throw new Error(
+        `Plan validation failed after ${attempt} attempts. Rendering issues: ${issues.join(' | ')}`,
+      );
+    }
+
+    feedback = buildFeedback(plan, validation, issues);
+    logger.warn({ attempt, issueCount: issues.length }, 'plan compile attempt has rendering issues, retrying');
   }
 
-  logger.info(
-    { intent: opts.intent, stepCount: plan.steps.length, status: validation.status },
-    'plan compiled',
+  // Unreachable, but keeps TS happy.
+  throw new Error(
+    `Plan compile exhausted attempts. Last issues: ${lastIssues.join(' | ')}. Last plan steps: ${lastPlan?.steps.length}, validation status: ${lastValidation?.status}`,
   );
-
-  return { plan, validation };
 }
 
-function buildCompilerPrompt(args: { intent: string; toolCatalog: string }): string {
+/**
+ * Walk the plan's output blocks and identify references that don't resolve
+ * against the actual alias map produced by the validation run. The compiler
+ * uses these to give the LLM concrete feedback on what to fix.
+ */
+function findRenderingIssues(
+  plan: ReportPlan,
+  aliasMap: Record<string, unknown>,
+): string[] {
+  const issues: string[] = [];
+  for (let i = 0; i < plan.output.blocks.length; i++) {
+    const block = plan.output.blocks[i];
+    issues.push(...issuesInBlock(block, i, aliasMap));
+  }
+  // narrativeWrapup template (if present)
+  if (plan.narrativeWrapup) {
+    for (const path of extractPlaceholders(plan.narrativeWrapup.promptTemplate)) {
+      const v = getByPath(aliasMap, path);
+      if (v === undefined) {
+        issues.push(`narrativeWrapup template references \${${path}} which does not resolve.`);
+      }
+    }
+  }
+  return issues;
+}
+
+function issuesInBlock(
+  block: BlockSpec,
+  index: number,
+  aliasMap: Record<string, unknown>,
+): string[] {
+  const out: string[] = [];
+  switch (block.type) {
+    case 'header':
+      // headers are static text; no interpolation, nothing to validate.
+      return [];
+    case 'text': {
+      for (const path of extractPlaceholders(block.text)) {
+        const v = getByPath(aliasMap, path);
+        if (v === undefined) {
+          out.push(`block #${index} (text): placeholder \${${path}} resolves to undefined.`);
+        }
+      }
+      return out;
+    }
+    case 'table':
+    case 'csv_attachment': {
+      const v = getByPath(aliasMap, block.from);
+      if (!Array.isArray(v)) {
+        const aliasNames = Object.keys(aliasMap).join(', ');
+        out.push(
+          `block #${index} (${block.type}): from "${block.from}" did not resolve to an array. Available aliases: [${aliasNames}].`,
+        );
+      }
+      return out;
+    }
+  }
+}
+
+function extractPlaceholders(template: string): string[] {
+  const re = /\$\{([^}]+)\}/g;
+  const out: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(template)) !== null) {
+    out.push(m[1].trim());
+  }
+  return out;
+}
+
+function buildFeedback(
+  _plan: ReportPlan,
+  validation: ExecutePlanResult,
+  issues: string[],
+): string {
+  const aliasShapes = Object.entries(validation.aliasMap)
+    .map(([alias, value]) => {
+      let preview: string;
+      try {
+        preview = JSON.stringify(value);
+      } catch {
+        preview = String(value);
+      }
+      if (preview.length > 800) preview = preview.slice(0, 800) + '… (truncated)';
+      return `  ${alias}: ${preview}`;
+    })
+    .join('\n');
+
+  return [
+    'Your previous plan had rendering issues. Fix the paths and re-output the corrected plan.',
+    '',
+    'Issues found:',
+    ...issues.map((i) => `- ${i}`),
+    '',
+    'Here is the actual shape of each step result (so you know which field names exist):',
+    aliasShapes || '  (no successful step results)',
+    '',
+    'Common pitfalls:',
+    '- gantri.order_stats returns: totalOrders, totalRevenueDollars, avgOrderValueDollars, statusBreakdown, typeBreakdown — NOT orderCount or totalRevenue.',
+    '- grafana.sql returns: { fields: string[], rows: unknown[][], rowCount: number } — to count rows use ${alias.rowCount}, to read a value use ${alias.rows[0][0]}; tables use from: "alias.rows" only when each row is an OBJECT, otherwise use a text block.',
+    '- For wow_compare_pt, results land under ${alias.current.*} and ${alias.previous.*}.',
+    '- "from:" must point at an array of OBJECTS. If your data is rows-of-arrays (grafana.sql) or a flat object (gantri.order_stats), prefer text blocks instead.',
+    '',
+    'Re-output the entire corrected plan as a single JSON object, no prose.',
+  ].join('\n');
+}
+
+function buildCompilerPrompt(args: { intent: string; toolCatalog: string; feedback: string | null }): string {
   return `You are compiling a deterministic execution plan for a recurring scheduled report inside Gantri's internal Slack bot.
 
 USER REQUEST (this is what the report should produce on every fire):
@@ -135,6 +271,20 @@ CONSTRAINTS:
 - Default to \`t.type IN ('Order','Wholesale','Trade','Third Party')\` for "sold" questions.
 - output.blocks should be tight and Slack-friendly; ASCII tables render in Slack code blocks.
 - Skip narrativeWrapup unless the user explicitly asked for analysis or commentary.
+
+KNOWN TOOL RESULT SHAPES (use these field names exactly):
+- gantri.order_stats: { period, typesFilter, totalOrders, totalRevenueDollars, avgOrderValueDollars, statusBreakdown: [{status, count, revenueDollars}], typeBreakdown: [{type, count, revenueDollars}], truncated }
+- gantri.orders_query: { totalMatching, maxPages, page, returnedCount, orders: [{id, type, status, customerName, email, userId, totalDollars, subtotalDollars, shippingDollars, taxDollars, createdAt, shipsAt, completedAt, adminLink, ...}] }
+- grafana.sql: { period, fields: string[], rowCount, rows: unknown[][], durationMs }   // rows are arrays-of-cells in column order; for tables build a derived shape via SQL aliases or use a text block
+- grafana.run_dashboard: { dashboard, period, panels: [{ panelId, title, fields, rows, error? }] }
+- northbeam.overview: top-level metrics object (spend, revenue, ROAS, …) — names depend on the metric ids selected
+- northbeam.sales: { rows: [...], summary: {...} }
+- northbeam.orders_summary: per-period rollup
+- northbeam.orders_list: { orders: [...], allOrders, page, ... }
+
+OUTPUT TIPS:
+- For table blocks, "from" must point at an array of OBJECTS. grafana.sql returns rows as arrays-of-cells, so wrap aggregations into named columns (e.g. \`SELECT count(*) AS order_count, sum(...) AS revenue\`) and run two separate steps for current/previous, then use TEXT blocks to render. Or build a single 2-row query and use a table.
+- For comparing two periods, the simplest pattern is two grafana.sql steps with rich SELECTs and a text block that interpolates from each.${args.feedback ? `\n\nFEEDBACK FROM PREVIOUS ATTEMPT:\n${args.feedback}` : ''}
 
 Output the JSON now.`;
 }

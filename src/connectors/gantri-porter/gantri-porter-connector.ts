@@ -139,7 +139,10 @@ type OrderGetArgs = z.infer<typeof OrderGetArgs>;
 
 const OrderStatsArgs = z.object({
   dateRange: DateRange,
-  types: z.array(z.enum(TRANSACTION_TYPES)).default(['Order']),
+  types: z.array(z.enum(TRANSACTION_TYPES)).optional()
+    .describe('Transaction types to include. Omit to include all types (useful for wholesale-customer aggregates that span Wholesale + Third Party + refunds).'),
+  search: z.string().min(1).max(200).optional()
+    .describe('Free-text search (customer name, email, order id). Applies to the same field as gantri.orders_query.'),
 });
 type OrderStatsArgs = z.infer<typeof OrderStatsArgs>;
 
@@ -284,6 +287,7 @@ function buildPorterTools(conn: GantriPorterConnector): ToolDef[] {
           },
         },
         types: { type: 'array', items: { type: 'string', enum: TRANSACTION_TYPES as unknown as string[] } },
+        search: { type: 'string', description: 'Free-text search (customer name, email, order id).' },
       },
     },
     async execute(args) {
@@ -307,7 +311,8 @@ function buildPorterTools(conn: GantriPorterConnector): ToolDef[] {
           body: JSON.stringify({
             page,
             count: pageSize,
-            types: args.types,
+            ...(args.types?.length ? { types: args.types } : {}),
+            ...(args.search ? { search: args.search } : {}),
             startDate: startDateStr,
             endDate: endDateStr,
           }),

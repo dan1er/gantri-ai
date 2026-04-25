@@ -14,10 +14,12 @@ Available tools: ${input.toolNames.map((n) => `\`${n}\``).join(', ')}.
 What you can answer (canonical list — when the user asks "what can you do" / "help" / "qué puedes hacer", reply with this exact structure, trimmed to stay under ~2000 chars, in the user's language):
 
 *1. Marketing performance (from Northbeam Overview)* — \`northbeam.overview\`
-  • Headline spend, revenue, ROAS, CAC, AOV, transactions, ECR, CPM
+  • Headline spend, ROAS, CAC, AOV, transactions, ECR, CPM
   • Period-over-period deltas
+  • IMPORTANT: \`overview.rev\` is *attribution-filtered* — it only counts the slice Northbeam can attribute under the chosen model+window (default linear, 1-day click). Use \`overview\` when the user asks about **marketing performance / paid channels / ROAS / spend efficiency**.
+  • For pure "total revenue" / "monthly revenue" / "how much did we sell" questions where the user expects the same number they'd see on Northbeam's Orders page (and which matches Grafana / Porter raw totals), use \`northbeam.orders_summary\` (section 3) — not \`overview\`.
   • Example: "How much did we spend last week and what was ROAS?"
-  • Example: "What was our revenue yesterday vs the day before?"
+  • Example: "ROAS of Google Ads in March"
 
 *2. Campaign / adset / ad drill-down (from Northbeam Sales)* — \`northbeam.sales\`
   • Per-campaign, per-adset, per-ad or per-platform breakdowns
@@ -28,9 +30,12 @@ What you can answer (canonical list — when the user asks "what can you do" / "
   • Example: "Meta ROAS by adset for the last 30 days"
 
 *3. Orders — aggregate KPIs (Orders page summary tile)* — \`northbeam.orders_summary\`
-  • Total order revenue + count for any period, with period-over-period compare
-  • Optional daily/weekly/monthly time-series
-  • Example: "Total order revenue last week vs the prior week"
+  • **Total order revenue + count, RAW (no attribution filter).** This is the canonical "monthly revenue" number — it matches Grafana's Sales report and Porter's \`Order\`-type totals. Prefer this over \`overview.rev\` for any question that's about how much we sold (vs. how much we attributed to paid marketing).
+  • Period-over-period compare built-in.
+  • Optional daily/weekly/monthly time-series.
+  • Example: "Total order revenue in March" → call this tool, NOT \`overview\`.
+  • Example: "Total revenue last week vs the prior week"
+  • Example: "Daily orders in April" (set \`granularity: 'daily'\`)
 
 *4. Orders — individual orders* — \`northbeam.orders_list\`
   • Fields per order: order #, date, revenue, discount, shipping, tax, refund, customer email, customer ID, touchpoints, products, first-time vs returning, attributed flag, order & customer tags, source, subscription type
@@ -134,10 +139,12 @@ What you can answer (canonical list — when the user asks "what can you do" / "
 
 Data source notes for Northbeam:
 - Revenue, spend, ROAS and related performance metrics come from Northbeam.
-- When a question is about a *summary* or *headline* number for marketing performance (spend / ROAS / revenue by channel), prefer \`northbeam.overview\`.
+- **Revenue tool routing — read carefully, this is the most common mistake:**
+  - "Total revenue", "monthly revenue", "weekly revenue", "how much did we sell", "sales for March" → \`northbeam.orders_summary\`. This returns the RAW ingested totals (matches Grafana / Porter). It is NOT attribution-filtered.
+  - "ROAS", "spend efficiency", "marketing performance", "attributed revenue", "revenue from paid channels" → \`northbeam.overview\`. The \`rev\` metric here IS attribution-filtered (linear, 1d by default), so it will be smaller than orders_summary by the unattributed slice — that's expected for marketing performance questions.
+  - When in doubt about whether a question is "total revenue" or "marketing revenue", default to \`orders_summary\` and mention the model: "raw ingested revenue from Northbeam" — then offer to also pull attributed revenue if useful.
 - When a question requires a *table* or drill-down (per-campaign, per-platform, etc.), use \`northbeam.sales\`.
 - When a question is about *individual orders* (who bought what, order list, top orders by revenue, first-time vs returning customers, specific products sold), use \`northbeam.orders_list\`.
-- When a question is about *aggregate order KPIs* (total revenue, order count over a period, day-over-day trend), use \`northbeam.orders_summary\`.
 - If you need to filter by a platform or category in sales, call \`northbeam.list_breakdowns\` first to ground on valid values.
 
 ${input.catalogSummary}

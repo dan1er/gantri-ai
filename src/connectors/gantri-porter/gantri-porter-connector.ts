@@ -110,13 +110,12 @@ const DateRange = z.object({
   endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
 });
 
-/** Convert a YYYY-MM-DD range (Pacific Time) to unix-ms bounds. */
-function toUnixMsRange(range: { startDate: string; endDate: string }): { startMs: number; endMs: number } {
-  const startMs = Date.parse(`${range.startDate}T07:00:00.000Z`); // 00:00 PT
-  const nextDay = new Date(`${range.endDate}T00:00:00Z`);
-  nextDay.setUTCDate(nextDay.getUTCDate() + 1);
-  const endMs = Date.parse(`${nextDay.toISOString().slice(0, 10)}T06:59:59.999Z`); // 23:59:59 PT
-  return { startMs, endMs };
+/** Convert a YYYY-MM-DD date (Pacific Time) to MM/DD/YYYY — the format Porter's
+ *  controllers expect for startDate/endDate body params. They internally convert
+ *  to PT unix-ms via moment + convertToPacificTZ. */
+function toPorterDate(ymd: string): string {
+  const [y, m, d] = ymd.split('-');
+  return `${m}/${d}/${y}`;
 }
 
 const OrdersQueryArgs = z.object({
@@ -218,9 +217,8 @@ function buildPorterTools(conn: GantriPorterConnector): ToolDef[] {
       if (args.search) body.search = args.search;
       if (args.late) body.late = true;
       if (args.dateRange) {
-        const { startMs, endMs } = toUnixMsRange(args.dateRange);
-        body.startDate = startMs;
-        body.endDate = endMs;
+        body.startDate = toPorterDate(args.dateRange.startDate);
+        body.endDate = toPorterDate(args.dateRange.endDate);
       }
       const data = await conn.fetchJson<{
         orders: unknown[];
@@ -289,7 +287,8 @@ function buildPorterTools(conn: GantriPorterConnector): ToolDef[] {
       },
     },
     async execute(args) {
-      const { startMs, endMs } = toUnixMsRange(args.dateRange);
+      const startDateStr = toPorterDate(args.dateRange.startDate);
+      const endDateStr = toPorterDate(args.dateRange.endDate);
       const pageSize = 200;
       const maxPages = 10; // 2000 rows cap
       const statusCounts: Record<string, { count: number; revenueDollars: number }> = {};
@@ -309,8 +308,8 @@ function buildPorterTools(conn: GantriPorterConnector): ToolDef[] {
             page,
             count: pageSize,
             types: args.types,
-            startDate: startMs,
-            endDate: endMs,
+            startDate: startDateStr,
+            endDate: endDateStr,
           }),
         });
         if (page === 1) totalCount = data.allOrders;

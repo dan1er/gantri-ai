@@ -138,8 +138,16 @@ function issuesInBlock(
   const out: string[] = [];
   switch (block.type) {
     case 'header':
-      // headers are static text; no interpolation, nothing to validate.
-      return [];
+      // Headers are static text. Validate any ${alias.path} placeholders the
+      // user may have embedded in the header text since the renderer now
+      // interpolates them.
+      for (const path of extractPlaceholders(block.text)) {
+        const v = getByPath(aliasMap, path);
+        if (v === undefined) {
+          out.push(`block #${index} (header): placeholder \${${path}} resolves to undefined.`);
+        }
+      }
+      return out;
     case 'text': {
       for (const path of extractPlaceholders(block.text)) {
         const v = getByPath(aliasMap, path);
@@ -160,16 +168,15 @@ function issuesInBlock(
       return out;
     }
     case 'table':
-    case 'csv_attachment': {
-      const v = getByPath(aliasMap, block.from);
-      if (!Array.isArray(v)) {
-        const aliasNames = Object.keys(aliasMap).join(', ');
-        out.push(
-          `block #${index} (${block.type}): from "${block.from}" did not resolve to an array. Available aliases: [${aliasNames}].`,
-        );
-      }
+      out.push(
+        `block #${index} is a \`table\` block in chat output. Chat output.blocks MUST contain ONLY \`header\` and \`text\` block types. Per-row tables go in the CANVAS via the \`reports.create_canvas\` step's \`tables\` arg + \`<<table:NAME>>\` markers in the canvas markdown — never inline in chat.`,
+      );
       return out;
-    }
+    case 'csv_attachment':
+      out.push(
+        `block #${index} is a \`csv_attachment\` block in chat output. CSV exports go through the \`reports.attach_file\` tool as a separate plan step (with format=\\'csv\\') — not as an output block. Chat output.blocks MUST contain ONLY \`header\` and \`text\` block types.`,
+      );
+      return out;
   }
 }
 
@@ -279,7 +286,7 @@ CONSTRAINTS:
 - Prefer grafana.sql for aggregations across the Porter schema (Transactions, StockAssociations, Stocks, Users, Products). Use Porter API tools only when you need data the read-replica doesn't expose.
 - Money in Porter SQL is JSON cents: divide \`(amount->>'total')::bigint\` by 100 for dollars.
 - Default to \`t.type IN ('Order','Wholesale','Trade','Third Party')\` for "sold" questions.
-- output.blocks should be tight and Slack-friendly; ASCII tables render in Slack code blocks.
+- **\`output.blocks\` MAY ONLY contain \`header\` and \`text\` block types.** \`table\` and \`csv_attachment\` block types in chat output are HARD-REJECTED by the compiler (validation will fail and you will be asked to retry). Per-row tables go in the canvas via the \`reports.create_canvas\` step's \`tables\` arg + \`<<table:NAME>>\` markers in the canvas markdown. CSV exports are a separate \`reports.attach_file\` step (with \`format: 'csv'\`).
 - Skip narrativeWrapup unless the user explicitly asked for analysis or commentary.
 
 KNOWN TOOL RESULT SHAPES (use these field names exactly):

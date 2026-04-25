@@ -10,10 +10,17 @@ WITH txn AS (
     t.type,
     t.status,
     COALESCE(t."organizationId"::text, 'null') AS org_key,
+    -- Net revenue per transaction. Use amount.total when set (retail orders), else
+    -- compute net = subtotal + shipping + tax - discount - credit - gift. Wholesale
+    -- transactions don't carry amount.total, so the fallback path applies and MUST
+    -- subtract discount or it overstates revenue (Grafana's panels do subtract it).
     COALESCE((t.amount->>'total')::numeric,
              (t.amount->>'subtotal')::numeric
              + COALESCE((t.amount->>'shipping')::numeric, 0)
-             + COALESCE((t.amount->>'tax')::numeric, 0)) AS revenue_cents
+             + COALESCE((t.amount->>'tax')::numeric, 0)
+             - COALESCE((t.amount->>'discount')::numeric, 0)
+             - COALESCE((t.amount->>'credit')::numeric, 0)
+             - COALESCE((t.amount->>'gift')::numeric, 0)) AS revenue_cents
   FROM "Transactions" t
   WHERE t."createdAt" >= ($__timeFrom())::timestamp
     AND t."createdAt" <  ($__timeTo())::timestamp

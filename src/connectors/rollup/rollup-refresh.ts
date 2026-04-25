@@ -180,13 +180,20 @@ function normalizeDay(value: unknown): string | null {
   return null;
 }
 
+/**
+ * Convert an epoch-ms value (as Grafana wire-formats Postgres DATE columns)
+ * back to its YYYY-MM-DD label. Critical: Postgres DATE values are serialized
+ * as midnight UTC of the date. We must format in UTC, NOT in PT — formatting
+ * in PT would shift each date back one day (midnight UTC = previous evening
+ * in PT) and silently corrupt every row in the rollup.
+ *
+ * The SQL's `DATE_TRUNC('day', t."createdAt" AT TIME ZONE 'America/Los_Angeles')`
+ * already produces the correct PT calendar day; the wire serialization just
+ * carries it as `<day>T00:00:00Z`. Reading it as a UTC instant preserves
+ * the day; reading it as a PT instant loses one.
+ */
 function msToDay(ms: number): string {
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: PT_TZ,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(new Date(ms));
+  return new Date(ms).toISOString().slice(0, 10);
 }
 
 function parseJson(value: unknown): Record<string, { orders: number; revenueCents: number }> {

@@ -146,6 +146,7 @@ export class ReportsConnector implements Connector {
       name: 'reports.create_canvas',
       description:
         'Create a Slack Canvas (a rich document with native markdown rendering — real tables, headings, bullets, code blocks) and grant the calling user read access. Returns the canvas URL; the bot should then put a SHORT summary in the chat reply and link the canvas (e.g. "📋 Full report: <URL|View canvas>") — never duplicate the per-row data inline.\n' +
+        '**IMPORTANT:** the `title` arg is rendered by Slack as the canvas\\'s H1 heading automatically. **Do NOT repeat the title as a `# Heading` line inside the `markdown` body** — that produces a duplicated header. Start `markdown` with the first SUB-section (a `## H2` for the first chunk of content), not another H1.\n' +
         'Per-row tables go in the canvas via the `tables` arg:\n' +
         '- Pass `tables: [{ placeholder: "myTable", rows: { $ref: "alias.path" }, columns: [...] }]` and reference it inside `markdown` as `<<table:myTable>>`.\n' +
         '- The connector renders each entry as a GitHub-flavored markdown pipe-table that Slack Canvas displays natively.\n' +
@@ -218,7 +219,7 @@ export class ReportsConnector implements Connector {
     // Substitute `<<table:NAME>>` markers in the markdown body with the
     // rendered GFM pipe-tables. Slack Canvas renders these natively; this is
     // how per-row tables get into the canvas (chat output stays a short summary).
-    let body = args.markdown;
+    let body = stripDuplicateTitle(args.markdown, args.title);
     for (const t of args.tables ?? []) {
       const limited = t.rows.slice(0, t.maxRows ?? 100);
       const md = renderMarkdownTable(limited, t.columns);
@@ -312,6 +313,28 @@ function renderMarkdownTable(
     return `| ${cells.join(' | ')} |`;
   });
   return [headerRow, sepRow, ...bodyRows].join('\n');
+}
+
+/**
+ * Slack Canvas already renders the `title` arg of canvases.create as the
+ * document's H1. If the LLM also opens the markdown body with `# <title>` we
+ * end up with a duplicated heading. Strip the leading H1 from the body when
+ * its text (after dropping leading emoji + whitespace) matches the title in
+ * the same normalized form.
+ */
+function stripDuplicateTitle(markdown: string, title: string): string {
+  const lines = markdown.split('\n');
+  // Skip leading blank lines.
+  let i = 0;
+  while (i < lines.length && lines[i].trim() === '') i++;
+  if (i >= lines.length) return markdown;
+  const m = lines[i].match(/^#\s+(.+?)\s*$/);
+  if (!m) return markdown;
+  const norm = (s: string) => s.replace(/[\p{Extended_Pictographic}\p{Emoji}]+/gu, '').replace(/\s+/g, ' ').trim().toLowerCase();
+  if (norm(m[1]) !== norm(title)) return markdown;
+  // Drop the duplicated H1 line, plus a single blank line below it if present.
+  const drop = i + 1 + (lines[i + 1]?.trim() === '' ? 1 : 0);
+  return lines.slice(drop).join('\n');
 }
 
 /** Convert Slack mrkdwn links `<url|label>` to GitHub-flavored `[label](url)`.

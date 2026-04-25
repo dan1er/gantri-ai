@@ -146,7 +146,7 @@ export class ReportsConnector implements Connector {
       name: 'reports.create_canvas',
       description:
         'Create a Slack Canvas (a rich document with native markdown rendering — real tables, headings, bullets, code blocks) and grant the calling user read access. Returns the canvas URL; the bot should then put a SHORT summary in the chat reply and link the canvas (e.g. "📋 Full report: <URL|View canvas>") — never duplicate the per-row data inline.\n' +
-        '**IMPORTANT:** the `title` arg is rendered by Slack as the canvas\\'s H1 heading automatically. **Do NOT repeat the title as a `# Heading` line inside the `markdown` body** — that produces a duplicated header. Start `markdown` with the first SUB-section (a `## H2` for the first chunk of content), not another H1.\n' +
+        '**IMPORTANT:** the `title` arg is rendered by Slack as the canvas\\u2019s H1 heading automatically. **Do NOT repeat the title as a `# Heading` line inside the `markdown` body** — that produces a duplicated header. Start `markdown` with the first SUB-section (a `## H2` for the first chunk of content), not another H1.\n' +
         'Per-row tables go in the canvas via the `tables` arg:\n' +
         '- Pass `tables: [{ placeholder: "myTable", rows: { $ref: "alias.path" }, columns: [...] }]` and reference it inside `markdown` as `<<table:myTable>>`.\n' +
         '- The connector renders each entry as a GitHub-flavored markdown pipe-table that Slack Canvas displays natively.\n' +

@@ -82,14 +82,28 @@ export function markdownToMrkdwn(md: string): string {
   const out: string[] = [];
   const lines = md.split('\n');
   let inFence = false;
+  let fenceBuf: string[] = [];
+  let fenceOpener = '```';
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (line.startsWith('```')) {
-      inFence = !inFence;
-      out.push(line);
+      if (!inFence) {
+        // Opening fence — start buffering content.
+        inFence = true;
+        fenceBuf = [];
+        fenceOpener = line;
+      } else {
+        // Closing fence — re-align if the buffered content looks like a table.
+        const realigned = maybeRealignAsciiTable(fenceBuf);
+        out.push(fenceOpener);
+        out.push(...realigned);
+        out.push(line);
+        inFence = false;
+        fenceBuf = [];
+      }
       continue;
     }
-    if (inFence) { out.push(line); continue; }
+    if (inFence) { fenceBuf.push(line); continue; }
 
     // Markdown pipe-table detection: header + separator row
     if (isTableHeader(line) && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
@@ -115,7 +129,50 @@ export function markdownToMrkdwn(md: string): string {
 
     out.push(transformed);
   }
+  // If the input ended with an unclosed fence, flush it as-is (no realignment —
+  // we'd be guessing at boundaries).
+  if (inFence) {
+    out.push(fenceOpener);
+    out.push(...fenceBuf);
+  }
   return out.join('\n');
+}
+
+/**
+ * Detect ASCII-aligned tables that the LLM pre-formatted itself (against our
+ * instructions) and re-render them with proper visual-width alignment via
+ * `renderAsciiTable`.
+ *
+ * Why: when the LLM emits something like:
+ *   ```
+ *   Tipo         Ord  Revenue
+ *   Wholesale    10   $11,466
+ *   Wholesale Ref 3   $   497
+ *   ```
+ * its column-width math drifts (longer cells like "Wholesale Ref" stick out)
+ * and we can't trust it. We detect tabular shape (≥2 lines split by 2+ spaces
+ * into the same column count) and rewrite with string-width-based padding.
+ *
+ * If the fence content doesn't look tabular, return as-is.
+ */
+function maybeRealignAsciiTable(fenceLines: string[]): string[] {
+  if (fenceLines.length < 2) return fenceLines;
+  // Split each non-empty line on runs of 2+ spaces.
+  const tokenized = fenceLines.map((l) => {
+    if (!l.trim()) return null;
+    return l.split(/ {2,}/).map((t) => t.trim()).filter((t) => t.length > 0);
+  });
+  const tableRows = tokenized.filter((r): r is string[] => r !== null);
+  if (tableRows.length < 2) return fenceLines;
+  const ncol = tableRows[0].length;
+  if (ncol < 2) return fenceLines; // not tabular
+  // Every non-empty row must have the same column count to be a table.
+  if (!tableRows.every((r) => r.length === ncol)) return fenceLines;
+  const widths = new Array(ncol).fill(0);
+  for (const r of tableRows) for (let c = 0; c < ncol; c++) widths[c] = Math.max(widths[c], stringWidth(r[c]));
+  return tableRows.map((cells) =>
+    cells.map((cell, c) => padToWidth(cell, widths[c])).join('  ').trimEnd(),
+  );
 }
 
 function isTableHeader(line: string): boolean {

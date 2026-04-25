@@ -45,6 +45,29 @@ describe('markdownToSlackBlocks', () => {
     expect(texts).toEqual(['Before', 'After']);
   });
 
+  it('realigns LLM pre-formatted ASCII tables when columns drift (e.g. "Wholesale Ref" sticks out past "Wholesale")', () => {
+    // This is the actual bug from the screenshot: the LLM hand-pads each row,
+    // but its math is per-row, so longer first-column cells push the data column
+    // out of alignment with shorter rows above.
+    const md = [
+      '```',
+      'Tipo         Ord  Revenue',
+      'Wholesale    10   $11,466',
+      'Wholesale Ref 3   $   497',
+      'Trade Refund  1   $ 1,339',
+      '```',
+    ].join('\n');
+    const blocks = markdownToSlackBlocks(md);
+    const text = (blocks[0] as any).text.text;
+    const lines = text.split('\n').filter((l: string) => l && !l.startsWith('```'));
+    // After realignment, every row's second column ("Ord") must start at the same column.
+    const ordStarts = lines.map((l: string) => {
+      const m = l.match(/^(.*?)( {2,})/);
+      return m ? m[1].length + m[2].length : -1;
+    });
+    expect(ordStarts.every((n: number) => n === ordStarts[0])).toBe(true);
+  });
+
   it('aligns ASCII columns by visual width, not UTF-16 length, so cells with emojis/em-dashes line up on every device', () => {
     // Emojis (🚨 = 2 cols visual, length 2), em-dash (— = 1 col visual, length 1),
     // and ellipsis (… = 1 col visual, length 1) used to misalign because padEnd

@@ -229,6 +229,12 @@ Slack formatting rules (CRITICAL — Slack uses "mrkdwn", NOT standard markdown)
     \`\`\`
     (5 columns, ~70 chars wide, comparison still visible at a glance.)
 - If the data legitimately needs more columns or rows than fit in 80 chars × 50 rows, attach a CSV via \`reports.attach_file\` and put a short summary in the message body — don't force a too-wide table.
+- **For rich tabular comparisons (especially YoY / WoW / multi-period), prefer \`reports.create_canvas\` over an in-message ASCII table.** Slack Canvas renders REAL markdown tables that wrap cleanly on every device. Trigger conditions:
+  - >5 columns, OR
+  - >15 rows, OR
+  - the user explicitly asks for "report", "summary", "canvas", "rich format", OR
+  - you'd otherwise be tempted to truncate/abbreviate.
+  When you call \`reports.create_canvas\`, the tool returns \`{canvasId, title, webUrl}\`. Your chat reply must then be SHORT (2–4 lines): a one-line headline, 1–2 bullet takeaways, and a clickable canvas link in the form \`<\${webUrl}|📋 \${title}>\`. Do NOT also include the same data inline in the chat reply — let the canvas carry it. Canvas markdown is GitHub-flavored: use \`**bold**\` (double asterisk), \`# H1\`, \`## H2\`, \`| col | col |\` tables with \`|---|---|\` separator. The chat reply itself is still Slack mrkdwn — keep the two formats separate in your head.
 - Links: write \`<https://example.com|label>\` if you need an inline link; otherwise just paste the URL.
 - Keep responses under ~2000 characters unless strictly necessary; prefer one tight summary plus one code-block table over long prose.`;
 }

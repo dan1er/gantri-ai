@@ -44,7 +44,10 @@ async function main() {
     credentials: { email, password, dashboardId },
   });
   registry.register(northbeam);
-  registry.register(new ReportsConnector());
+  // ReportsConnector needs the Slack WebClient (for canvases.* APIs), so we
+  // construct + register it AFTER buildSlackApp() below, where `app.client`
+  // is available. The orchestrator reads tools lazily on each run, so
+  // late-registration is safe.
 
   const gantriPorter = new GantriPorterConnector({
     baseUrl: porterApiBaseUrl,
@@ -93,6 +96,15 @@ async function main() {
   const conversationsRepo = new ConversationsRepo(supabase);
 
   const { app, receiver } = buildSlackApp({ orchestrator, usersRepo, conversationsRepo });
+
+  // ReportsConnector hooks Slack's canvases API + the per-run actor context,
+  // so it can only be built once both `app.client` and the orchestrator exist.
+  registry.register(
+    new ReportsConnector({
+      slackClient: app.client,
+      getActor: () => orchestrator.getActiveActor(),
+    }),
+  );
 
   // Liveness check — only verifies the HTTP server is up.
   // Must stay fast (<1s) so Fly health checks don't trigger auth flows on boot.

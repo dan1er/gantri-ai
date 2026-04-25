@@ -46,17 +46,28 @@ export class Orchestrator {
     // the registry entry when Claude calls the tool back.
     const toSafeName = (n: string) => n.replace(/\./g, '_');
     const nameMap = new Map(tools.map((t) => [toSafeName(t.name), t.name]));
-    const claudeTools = tools.map((t) => ({
+    const claudeTools: any[] = tools.map((t) => ({
       name: toSafeName(t.name),
       description: t.description,
       input_schema: t.jsonSchema as any,
     }));
+    // Cache the system prompt + tools as one ephemeral block (5-minute TTL).
+    // Each tool-use iteration re-sends the full system + tools — without
+    // caching this blows past the 30k ITPM tier limit on multi-step questions.
+    // Marking the last tool with cache_control caches everything up to and
+    // including the tools array.
+    if (claudeTools.length > 0) {
+      claudeTools[claudeTools.length - 1].cache_control = { type: 'ephemeral' };
+    }
 
-    const system = buildSystemPrompt({
+    const systemText = buildSystemPrompt({
       todayISO: new Date().toISOString().slice(0, 10),
       toolNames: tools.map((t) => t.name),
       catalogSummary: describeCatalog(),
     });
+    const system = [
+      { type: 'text' as const, text: systemText, cache_control: { type: 'ephemeral' as const } },
+    ];
 
     const messages: any[] = [];
     for (const turn of input.threadHistory) {

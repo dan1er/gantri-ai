@@ -79,6 +79,7 @@ const SOURCE_LABELS: Record<string, string> = {
   gantri: 'Porter',
   grafana: 'Grafana',
   reports: 'Reports',
+  late_orders: 'Porter',
 };
 
 function buildFooter(out: {

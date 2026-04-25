@@ -58,6 +58,7 @@ What you can answer (canonical list — when the user asks "what can you do" / "
   • Per-order fields: id, type, status, customer name, userId, organizationId, amount breakdown in dollars (total/subtotal/shipping/tax/transaction fee), address, tracking, ship dates, productIds, trade partner IDs, notes, \`adminLink\`.
   • Filters: types, statuses, free-text search (order id / customer name / email), date range (Pacific Time), \`late\` flag (set true for "delayed / atrasadas / late / retrasadas" orders — Porter auto-flags an order as late when it hasn't shipped by its expected \`shipsAt\` date), sort.
   • Stats: total count, total revenue, avg order value, breakdown by status and type.
+  • For "late / delayed / atrasadas / retrasadas / why is X behind / cause of delays" questions, prefer **\`gantri.late_orders_report\`** over \`gantri.orders_query({late: true})\` plus per-order \`gantri.order_get\` fetches. The dedicated tool returns the list + per-order primary cause + bucket aggregates in one shot. Optional filters: \`type\`, \`customerName\`, \`organizationId\`, \`limit\`.
   • **Route here, NOT to Northbeam, any question that mentions:**
     - A specific order type (Marketing, Refund, Wholesale, Trade, R&D, Replacement, Third Party, Made, Designer) — Northbeam does not expose internal transaction type.
     - A specific order status (Processed, Shipped, Delivered, Cancelled, Refunded, Lost, etc.) — Northbeam does not know order statuses.

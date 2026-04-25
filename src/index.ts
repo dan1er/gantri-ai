@@ -11,6 +11,7 @@ import { TtlCache } from './storage/cache.js';
 import { RollupRepo } from './storage/rollup-repo.js';
 import { RollupConnector } from './connectors/rollup/rollup-connector.js';
 import { RollupRefreshJob } from './connectors/rollup/rollup-refresh.js';
+import { LateOrdersConnector } from './connectors/late-orders/late-orders-connector.js';
 import { NorthbeamConnector } from './connectors/northbeam/northbeam-connector.js';
 import { ReportsConnector } from './connectors/reports/reports-connector.js';
 import { GantriPorterConnector } from './connectors/gantri-porter/gantri-porter-connector.js';
@@ -71,6 +72,8 @@ async function main() {
 
   const rollupRepo = new RollupRepo(supabase);
   registry.register(new RollupConnector({ repo: rollupRepo }));
+
+  registry.register(new LateOrdersConnector({ grafana }));
 
   const claude = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
   const orchestrator = new Orchestrator({

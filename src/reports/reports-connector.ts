@@ -71,7 +71,10 @@ const IdArgs = z.object({ id: z.string().uuid() });
 type IdArgs = z.infer<typeof IdArgs>;
 
 export class ScheduledReportsConnector implements Connector {
-  readonly name = 'reports';
+  // The legacy ReportsConnector (reports.attach_file) already owns the
+  // 'reports' connector slot. Tool names still share the `reports.*` namespace —
+  // only the connector identity differs.
+  readonly name = 'scheduled_reports';
   readonly tools: readonly ToolDef[];
 
   constructor(private readonly deps: ScheduledReportsConnectorDeps) {

@@ -302,16 +302,30 @@ function renderMarkdownTable(
   rows: Array<Record<string, unknown>>,
   columns: Array<{ header: string; field: string; format?: ColumnFmt }>,
 ): string {
-  const headerRow = `| ${columns.map((c) => escapePipe(c.header)).join(' | ')} |`;
+  const headerRow = `| ${columns.map((c) => escapeCell(c.header)).join(' | ')} |`;
   const sepRow = `| ${columns.map(() => '---').join(' | ')} |`;
   const bodyRows = rows.map((r) => {
-    const cells = columns.map((c) => escapePipe(formatCell(getByPath(r, c.field), c.format)));
+    const cells = columns.map((c) => {
+      const raw = formatCell(getByPath(r, c.field), c.format);
+      return escapeCell(slackLinkToGfm(raw));
+    });
     return `| ${cells.join(' | ')} |`;
   });
   return [headerRow, sepRow, ...bodyRows].join('\n');
 }
 
-/** Escape pipes (which break GFM table cells) and newlines (which break rows). */
-function escapePipe(s: string): string {
+/** Convert Slack mrkdwn links `<url|label>` to GitHub-flavored `[label](url)`.
+ *  Slack Canvas renders GFM, NOT Slack mrkdwn — leaving the angle-bracket
+ *  form makes the URL appear as raw text and the embedded `|` shreds the
+ *  pipe-table cell. */
+function slackLinkToGfm(s: string): string {
+  return s.replace(/<([^|>]+)\|([^>]+)>/g, (_m, url, label) => `[${label}](${url})`);
+}
+
+/** Escape characters that break GFM table cells.
+ *  - `|` would be parsed as a column separator.
+ *  - newlines would split the row.
+ *  Backslash-pipe is the standard GFM escape. */
+function escapeCell(s: string): string {
   return s.replace(/\|/g, '\\|').replace(/\n/g, ' ');
 }

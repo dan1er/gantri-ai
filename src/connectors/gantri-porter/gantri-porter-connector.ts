@@ -149,15 +149,28 @@ type OrderStatsArgs = z.infer<typeof OrderStatsArgs>;
 // ============================================================================
 
 function buildPorterTools(conn: GantriPorterConnector): ToolDef[] {
-  /** Normalize an order row: extract dollar amounts, unwrap nested fields. */
+  /** Normalize an order row: extract dollar amounts, unwrap nested fields.
+   *  Handles both response shapes — the paginated list nests user info under
+   *  `user.{id,email,firstName,lastName}` and drops `customerName`, while the
+   *  detail endpoint has a top-level `customerName`/`userId` plus a richer
+   *  `user` object. We surface `email` either way so the caller can filter
+   *  by exact email (Porter's `search` param is a substring match, not an
+   *  email filter, so the email field is the only way to disambiguate). */
   function normalizeOrder(o: any) {
     const amt = o.amount ?? {};
+    const user = o.user ?? {};
+    const email = user.email ?? o.email ?? null;
+    const customerName =
+      o.customerName ??
+      ([user.firstName, user.lastName].filter(Boolean).join(' ') || null);
+    const userId = o.userId ?? user.id ?? null;
     return {
       id: o.id,
       type: o.type,
       status: o.status,
-      customerName: o.customerName,
-      userId: o.userId,
+      customerName,
+      email,
+      userId,
       organizationId: o.organizationId,
       shopifyOrderId: o.shopifyOrderId ?? null,
       productIds: o.productIds ?? [],

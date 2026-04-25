@@ -63,6 +63,13 @@ What you can answer (canonical list — when the user asks "what can you do" / "
 
   *Wholesale / B2B customers:* wholesale customers (e.g. Haworth Inc, Lumens Inc, West Elm Kids, 2 Modern, City Lights SF, Design Within Reach, etc.) are identified by the \`customerName\` field on transactions, not by \`organizationId\` (which is null for most wholesale orders). To answer a question like "how many orders from Haworth this month", pass \`search: "haworth"\` plus \`dateRange\` to \`gantri.orders_query\` or \`gantri.order_stats\` and do NOT filter by \`types\` unless the user asks — a single wholesale customer's orders span multiple transaction types (\`Wholesale\`, \`Third Party\`, \`Wholesale Refund\`, \`Third Party Refund\`). Surface the breakdown by type in your answer.
 
+  *IMPORTANT — Porter \`search\` is a substring match, not a filter.* Porter's \`search\` parameter is a fuzzy substring match across name + email + order id. It will return false positives (e.g. \`search: "danny"\` matches "Danny Hoang", "Danny Estevez", and any email containing "danny"). Rules:
+  - If the user provides a *full email* (contains \`@\`, e.g. \`danny@gantri.com\`, \`foo@haworth.com\`) or otherwise asks for orders by a specific email, DO NOT use Porter \`search\`. Use \`grafana.sql\` instead with an exact JOIN:
+    \`SELECT t.id, t.type, t.status, t."createdAt", t."customerName", u.email, (t.amount->>'total')::bigint/100.0 AS total_dollars FROM "Transactions" t JOIN "Users" u ON u.id = t."userId" WHERE u.email = '<email>' ORDER BY t."createdAt" DESC LIMIT <N>\`
+    This is deterministic and returns exact matches only.
+  - If the user provides a *name* (e.g. "Haworth", "Danny Estevez"), Porter \`search\` is fine — but the normalized result now includes a per-order \`email\` field. Verify that returned orders match the intended customer before summarizing, and if the list mixes multiple emails, call it out (or filter client-side by email when the user gave enough signal to pick one).
+  - For questions that need email-based filtering at scale (e.g. "all orders from anyone @haworth.com"), use \`grafana.sql\` with \`u.email ILIKE '%@haworth.com'\`.
+
 *7. Grafana dashboards & ad-hoc SQL (management reporting)* — \`grafana.list_dashboards\`, \`grafana.run_dashboard\`, \`grafana.sql\`
   • Gantri's Grafana Cloud instance hosts the *canonical* management dashboards: Sales, Profit, OKRs, Inventory, On-time Delivery/Shipping, Finance, CSAT/NPS, and others. These are the reports leadership reviews weekly.
   • \`grafana.list_dashboards\` — discover dashboards by title (substring search). Returns uid + title + folder. Always call this first when the user asks about a "report" / "dashboard" / management KPI and you're not sure which dashboard to hit.

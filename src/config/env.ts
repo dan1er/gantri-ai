@@ -13,6 +13,7 @@ const envSchema = z.object({
     .default(false),
   PORT: z.coerce.number().int().positive().default(3000),
   INTERNAL_SHARED_SECRET: z.string().optional(),
+  MAINTAINER_SLACK_USER_ID: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

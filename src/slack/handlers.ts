@@ -80,6 +80,7 @@ const SOURCE_LABELS: Record<string, string> = {
   grafana: 'Grafana',
   reports: 'Reports',
   late_orders: 'Porter',
+  feedback: 'Feedback',
 };
 
 function buildFooter(out: {
@@ -176,6 +177,7 @@ export function createDmHandler(deps: HandlerDeps) {
         question: event.text,
         threadHistory,
         actor: { slackUserId: event.user, slackChannelId: event.channel },
+        thread: { channelId: event.channel, threadTs },
         onToolCall,
       });
       if (pendingUpdate) {

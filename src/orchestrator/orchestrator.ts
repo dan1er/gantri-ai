@@ -10,11 +10,21 @@ export interface ActorContext {
   slackChannelId?: string;
 }
 
+/** Slack thread anchor for the in-flight run — used by tools (e.g. feedback.flag_response)
+ *  that need to pin the active thread regardless of where the question came from. */
+export interface ThreadContext {
+  channelId: string;
+  threadTs: string;
+}
+
 export interface OrchestratorInput {
   question: string;
   threadHistory: Array<{ question: string; response: string | null }>;
   /** Identifies the user driving this run; threaded into per-call context for tools that need it (reports.* tools). Optional for back-compat with scripted callers. */
   actor?: ActorContext;
+  /** Slack thread context for the in-flight run; consumed by feedback.* tools that
+   *  need to capture or link back to the active thread. */
+  thread?: ThreadContext;
   /**
    * Fired right before each tool execution starts. Used by the Slack handler
    * to update the in-progress placeholder with the connectors actually being
@@ -47,6 +57,7 @@ export class Orchestrator {
   private readonly maxIterations: number;
   private readonly maxOutputTokens: number;
   private activeActor: ActorContext | undefined;
+  private activeThread: ThreadContext | undefined;
 
   constructor(private readonly opts: OrchestratorOptions) {
     this.maxIterations = opts.maxIterations ?? 5;
@@ -68,6 +79,16 @@ export class Orchestrator {
     this.activeActor = undefined;
   }
 
+  getActiveThread(): ThreadContext | undefined {
+    return this.activeThread;
+  }
+  setActiveThread(ctx: ThreadContext | undefined): void {
+    this.activeThread = ctx;
+  }
+  clearActiveThread(): void {
+    this.activeThread = undefined;
+  }
+
   /** Replace the registry used for tool execution. Used by index.ts to swap
    *  in a CachingRegistry after all connectors are registered. The orchestrator
    *  reads tools lazily on each run, so late replacement is safe. */
@@ -80,6 +101,7 @@ export class Orchestrator {
 
   async run(input: OrchestratorInput): Promise<OrchestratorOutput> {
     this.activeActor = input.actor;
+    this.activeThread = input.thread;
     try {
       const tools = this.opts.registry.getAllTools();
       // Anthropic requires tool names to match ^[a-zA-Z0-9_-]+$. Our internal
@@ -216,6 +238,7 @@ export class Orchestrator {
       };
     } finally {
       this.activeActor = undefined;
+      this.activeThread = undefined;
     }
   }
 }

@@ -14,6 +14,8 @@ import { RollupRefreshJob } from './connectors/rollup/rollup-refresh.js';
 import { LateOrdersConnector } from './connectors/late-orders/late-orders-connector.js';
 import { NorthbeamConnector } from './connectors/northbeam/northbeam-connector.js';
 import { ReportsConnector } from './connectors/reports/reports-connector.js';
+import { FeedbackConnector } from './connectors/feedback/feedback-connector.js';
+import { FeedbackRepo } from './storage/repositories/feedback.js';
 import { GantriPorterConnector } from './connectors/gantri-porter/gantri-porter-connector.js';
 import { GrafanaConnector } from './connectors/grafana/grafana-connector.js';
 import { Orchestrator } from './orchestrator/orchestrator.js';
@@ -115,6 +117,21 @@ async function main() {
     new ReportsConnector({
       slackClient: app.client,
       getActor: () => orchestrator.getActiveActor(),
+    }),
+  );
+
+  // Feedback connector — same pattern: needs Slack client + per-run actor +
+  // per-run thread context. Registered after Reports, before CachingRegistry
+  // wraps the registry.
+  const feedbackRepo = new FeedbackRepo(supabase);
+  registry.register(
+    new FeedbackConnector({
+      repo: feedbackRepo,
+      conversationsRepo,
+      slackClient: app.client,
+      maintainerSlackUserId: env.MAINTAINER_SLACK_USER_ID,
+      getActor: () => orchestrator.getActiveActor(),
+      getThread: () => orchestrator.getActiveThread(),
     }),
   );
 

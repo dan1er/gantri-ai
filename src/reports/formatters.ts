@@ -37,6 +37,11 @@ export function formatCell(value: unknown, format?: ColumnSpec['format']): strin
       return ptWallClock(d, true);
     }
     default:
+      // Floats like 627.2000000000001 leak from upstream FP arithmetic.
+      // Cap at 2 decimals when no explicit format was requested.
+      if (typeof value === 'number' && Number.isFinite(value) && !Number.isInteger(value)) {
+        return value.toFixed(2);
+      }
       return String(value);
   }
 }

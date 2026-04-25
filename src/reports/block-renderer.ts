@@ -50,7 +50,13 @@ function renderBlock(
 function interpolate(template: string, aliasMap: Record<string, unknown>): string {
   return template.replace(/\$\{([^}]+)\}/g, (_match, path: string) => {
     const v = getByPath(aliasMap, path.trim());
-    return v === undefined || v === null ? '—' : String(v);
+    if (v === undefined || v === null) return '—';
+    // Numbers like 627.2000000000001 leak from float arithmetic upstream.
+    // Always cap at 2 decimals; integers pass through unchanged.
+    if (typeof v === 'number' && Number.isFinite(v) && !Number.isInteger(v)) {
+      return v.toFixed(2);
+    }
+    return String(v);
   });
 }
 

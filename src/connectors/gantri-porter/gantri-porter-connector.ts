@@ -181,11 +181,11 @@ function buildPorterTools(conn: GantriPorterConnector): ToolDef[] {
       shipmentStatus: o.shipmentStatus ?? null,
       shippingTrackingNumber: o.shippingTrackingNumber ?? null,
       shippingProvider: o.shippingProvider ?? null,
-      totalDollars: totalCents === null ? null : totalCents / 100,
-      subtotalDollars: typeof amt.subtotal === 'number' ? amt.subtotal / 100 : null,
-      shippingDollars: typeof amt.shipping === 'number' ? amt.shipping / 100 : null,
-      taxDollars: typeof amt.tax === 'number' ? amt.tax / 100 : null,
-      transactionFeeDollars: typeof amt.transactionFee === 'number' ? amt.transactionFee / 100 : null,
+      totalDollars: totalCents === null ? null : round2(totalCents / 100),
+      subtotalDollars: typeof amt.subtotal === 'number' ? round2(amt.subtotal / 100) : null,
+      shippingDollars: typeof amt.shipping === 'number' ? round2(amt.shipping / 100) : null,
+      taxDollars: typeof amt.tax === 'number' ? round2(amt.tax / 100) : null,
+      transactionFeeDollars: typeof amt.transactionFee === 'number' ? round2(amt.transactionFee / 100) : null,
       address: o.address ?? null,
       tradeOrderId: o.tradeOrderId ?? null,
       tradePartnerId: o.tradePartnerId ?? null,
@@ -456,13 +456,13 @@ function buildPorterTools(conn: GantriPorterConnector): ToolDef[] {
         if (page === maxPages && data.maxPages > maxPages) truncated = true;
       }
 
-      const totalRevenueDollars = totalRevenueCents / 100;
+      const totalRevenueDollars = round2(totalRevenueCents / 100);
       return {
         period: args.dateRange,
         typesFilter: args.types,
         totalOrders: totalCount,
         totalRevenueDollars,
-        avgOrderValueDollars: totalCount > 0 ? totalRevenueDollars / totalCount : 0,
+        avgOrderValueDollars: totalCount > 0 ? round2(totalRevenueDollars / totalCount) : 0,
         statusBreakdown: Object.entries(statusCounts)
           .map(([status, v]) => ({ status, ...v, revenueDollars: round2(v.revenueDollars) }))
           .sort((a, b) => b.count - a.count),

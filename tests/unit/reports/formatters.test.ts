@@ -39,4 +39,11 @@ describe('formatCell', () => {
     expect(formatCell('hello', undefined)).toBe('hello');
     expect(formatCell(42, undefined)).toBe('42');
   });
+
+  it('caps floating-point noise at 2 decimals even without an explicit format', () => {
+    expect(formatCell(627.2000000000001, undefined)).toBe('627.20');
+    expect(formatCell(116097.56999999993, undefined)).toBe('116097.57');
+    // Whole numbers stay clean.
+    expect(formatCell(1234, undefined)).toBe('1234');
+  });
 });

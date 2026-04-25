@@ -28,7 +28,7 @@ export class LateOrdersConnector implements Connector {
     const tool: ToolDef<Args> = {
       name: 'gantri.late_orders_report',
       description:
-        'One-shot report of currently-late, in-flight orders (Porter\'s `Transactions.isLateOrder = true`, excluding shipped/delivered/cancelled/lost/refunded statuses, capped at last 365 days to skip zombie data). Returns per-order: id, type, status, customerName, **deliveryBy** (customer-facing committed delivery date), shipsAt (internal manufacturing target), **daysPastDeliveryBy** (positive = N days past the customer commitment), **deadlineMissed** (boolean), daysLate (vs shipsAt), totalDollars, primaryCause (category), **causeSummary** (one-line table-friendly), job-level counts (attention/rework/late/exceeded), sample of flagged job descriptions. Also returns aggregate buckets: by days-late range, by primaryCause, by type, AND **buckets.byDeadline = { missed, onTrack, noDeadline }** so you can lead the chat summary with the missed count. Results are sorted with deadline-missed orders first (most-overdue first), then plain late. **When rendering a table, ALWAYS include a "Cause" column from `order.causeSummary`. When summarizing in chat, ALWAYS lead with `buckets.byDeadline.missed` if > 0** — that\\u2019s the actionable customer-facing signal. Use whenever the user asks about late / delayed / atrasadas / retrasadas orders. Backed by a single Grafana SQL query — fast and consistent.',
+        'One-shot report of currently-late, in-flight orders (Porter\'s `Transactions.isLateOrder = true`, excluding shipped/delivered/cancelled/lost/refunded statuses, capped at last 365 days to skip zombie data). Returns per-order: id, type, status, customerName, **deliveryBy** (customer-facing committed delivery date), shipsAt (internal manufacturing target), **daysPastDeliveryBy**, **deadlineMissed**, daysLate, totalDollars, primaryCause, **causeSummary**, job-level counts, **notes** (raw Transactions.notes — customer comments, PO refs, project names, hold dates, etc.), **noteFlags** (regex-extracted important segments from notes — date hints, rush/hold/expedite keywords). Also returns aggregate buckets: byDaysLate, byPrimaryCause, byType, **byDeadline = { missed, onTrack, noDeadline }**. Results are sorted deadline-missed first.\\n\\n**Required behavior when answering:**\\n1. Lead the chat summary with `buckets.byDeadline.missed` if > 0 — that\\u2019s the actionable customer-facing signal.\\n2. **For every order with non-empty `noteFlags`, surface those flags in the canvas table\\u2019s Cause/Notes column AND mention any deadline-bearing notes in the chat summary headline** — these are customer commitments and special instructions (\\"need by 5/11\\", \\"hold shipment 4/30\\", \\"rush\\", \\"PO #...\\", project names) that are NOT captured in `deliveryBy` and would otherwise be missed. Treat note-flagged orders as just as urgent as `deadlineMissed=true` ones.\\n3. When rendering the per-row canvas table, include a column for `noteFlags` (or merge into `causeSummary`) so the maintainer sees these at a glance.',
       schema: Args as z.ZodType<Args>,
       jsonSchema: {
         type: 'object',
@@ -97,6 +97,17 @@ interface OrderOut {
   /** Top failure-mode keys derived from Jobs.failedReason.reason where status='Fail',
    *  cleaned up: e.g. ['Print: gunk', 'Print: layer lines'] sorted by count desc. */
   failureModes: string[];
+  /** Free-text notes from Transactions.notes (truncated to 500 chars). Often
+   *  contains delivery commitments ("need by 5/11"), project names, PO refs,
+   *  hold instructions, special routing — anything that doesn't fit a
+   *  structured field. The bot is instructed to scan these and surface
+   *  important context in the report. */
+  notes: string | null;
+  /** Pre-extracted "important looking" segments from `notes` — date-like
+   *  hints, rush/hold keywords, PO references, requested ship dates, etc.
+   *  Regex-extracted server-side so the LLM can't miss them. Empty array
+   *  means notes either are empty or contain no actionable phrases. */
+  noteFlags: string[];
   primaryCause: string;
   /** One-line, table-friendly cause description suitable for a single Cause column
    *  (capped at ~90 chars). Examples:
@@ -133,6 +144,7 @@ WITH late AS (
     t."organizationId",
     t."shipsAt",
     t."deliveryBy",
+    t.notes,
     GREATEST(0, EXTRACT(DAY FROM (NOW() - t."shipsAt")))::int AS days_late,
     CASE
       WHEN t."deliveryBy" IS NOT NULL AND t."deliveryBy" < NOW()
@@ -204,6 +216,7 @@ SELECT
   l."organizationId",
   l."shipsAt",
   l."deliveryBy",
+  l.notes,
   l.days_late,
   l.days_past_deadline,
   l.total_dollars,
@@ -243,6 +256,11 @@ function rowsToOrders(fields: string[], rows: unknown[][]): OrderOut[] {
     const daysPastRaw = row[idx('days_past_deadline')];
     const daysPastDeliveryBy = daysPastRaw != null ? Number(daysPastRaw) : null;
     const deadlineMissed = daysPastDeliveryBy !== null && daysPastDeliveryBy > 0;
+    const notesRaw = row[idx('notes')];
+    const notesText = typeof notesRaw === 'string' && notesRaw.trim().length > 0
+      ? notesRaw.length > 500 ? notesRaw.slice(0, 497) + '…' : notesRaw
+      : null;
+    const noteFlags = notesText ? extractNoteFlags(notesText) : [];
     const stats = {
       failedJobCount, cancelledJobCount, reworkJobCount, maxAttempt,
       attentionCount, lostPartCount, failureModes,
@@ -258,6 +276,8 @@ function rowsToOrders(fields: string[], rows: unknown[][]): OrderOut[] {
       deliveryBy: deliveryByRaw != null ? String(deliveryByRaw) : null,
       daysPastDeliveryBy,
       deadlineMissed,
+      notes: notesText,
+      noteFlags,
       daysLate: Number(row[idx('days_late')] ?? 0),
       totalDollars: row[idx('total_dollars')] != null ? Math.round(Number(row[idx('total_dollars')]) * 100) / 100 : null,
       jobCount: Number(row[idx('job_count')] ?? 0),
@@ -378,6 +398,46 @@ export function deriveCauseSummary(input: CauseStats & { flagged: string[] }): s
   const tail = parts.slice(1).join(', ');
   const summary = tail ? `${lead} — ${tail}` : lead;
   return summary.length > 90 ? summary.slice(0, 87) + '…' : summary;
+}
+
+/**
+ * Pull "important looking" segments from a free-text Transactions.notes
+ * field. Splits on natural separators (\\n, |, ;, " - ", or sentence end)
+ * and keeps any segment that:
+ *   - Mentions a date-ish pattern (M/D, M/D/YYYY, "by <month>", "by N", ISO date)
+ *   - Contains an action keyword (rush, expedite, hold, asap, deadline, deliver,
+ *     promised, project, PO, ship date, requested, need by, no later than)
+ * Each kept segment is trimmed and capped at 140 chars. Up to 6 returned.
+ *
+ * Heuristic by design — false positives are fine, the LLM will use these as
+ * hints, not as ground truth.
+ */
+export function extractNoteFlags(notes: string): string[] {
+  const segments = notes
+    .split(/\n+|\|+|;+|(?<=[.!?])\s+(?=[A-Z])| - /)
+    .map((s) => s.replace(/\s+/g, ' ').trim())
+    .filter((s) => s.length > 0);
+  const datePatterns: RegExp[] = [
+    /\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/, // 5/11, 04/30/2026
+    /\b\d{4}-\d{2}-\d{2}\b/, // ISO
+    /\b(?:by|before|need(?:ed)? by|no later than|requested|due|delivered? by)\b[^.]{0,50}/i,
+    /\b(?:january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\b\s*\d{0,2}/i,
+  ];
+  const keywordPattern = /\b(?:rush|expedite|asap|hold|deadline|promise|project|po\s*(?:#|number|:)|ship\s*date|requested|need\s+by|no later than|priority)\b/i;
+  const flags: string[] = [];
+  const seen = new Set<string>();
+  for (const seg of segments) {
+    if (flags.length >= 6) break;
+    const matchesDate = datePatterns.some((re) => re.test(seg));
+    const matchesKeyword = keywordPattern.test(seg);
+    if (!matchesDate && !matchesKeyword) continue;
+    const trimmed = seg.length > 140 ? seg.slice(0, 137) + '…' : seg;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    flags.push(trimmed);
+  }
+  return flags;
 }
 
 /** Convert a snake_case failure-mode key from failedReason.reason into a

@@ -22,6 +22,11 @@ describe('formatCell', () => {
       .toBe('<http://admin.gantri.com/orders/53981|#53981>');
   });
 
+  it('admin_order_link tolerates being given a full admin URL by extracting the trailing id', () => {
+    expect(formatCell('http://admin.gantri.com/orders/51083', 'admin_order_link'))
+      .toBe('<http://admin.gantri.com/orders/51083|#51083>');
+  });
+
   it('datetime_pt formats ISO timestamp as YYYY-MM-DD HH:MM PT wall-clock', () => {
     expect(formatCell('2026-04-20T01:22:03.775Z', 'datetime_pt')).toBe('2026-04-19 18:22');
   });

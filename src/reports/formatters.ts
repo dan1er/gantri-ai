@@ -23,7 +23,15 @@ export function formatCell(value: unknown, format?: ColumnSpec['format']): strin
       return `${(n * 100).toFixed(1)}%`;
     }
     case 'admin_order_link': {
-      const id = String(value);
+      // Tolerant: accept either a bare numeric id ("51083") or a full
+      // admin URL ("http://admin.gantri.com/orders/51083") and extract the
+      // tail integer in either case. Plans sometimes wire field=adminLink
+      // (already a URL) into a column with admin_order_link format; without
+      // this fallback we'd stack URLs and the rendered cell would show the
+      // full URL as the label.
+      const raw = String(value);
+      const m = raw.match(/(\d+)\s*$/);
+      const id = m ? m[1] : raw;
       return `<http://admin.gantri.com/orders/${id}|#${id}>`;
     }
     case 'datetime_pt': {

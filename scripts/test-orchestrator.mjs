@@ -12,20 +12,25 @@ import { getSupabase, readVaultSecret } from '../dist/storage/supabase.js';
 import { ConnectorRegistry } from '../dist/connectors/base/registry.js';
 import { NorthbeamConnector } from '../dist/connectors/northbeam/northbeam-connector.js';
 import { ReportsConnector } from '../dist/connectors/reports/reports-connector.js';
+import { GantriPorterConnector } from '../dist/connectors/gantri-porter/gantri-porter-connector.js';
 import { Orchestrator } from '../dist/orchestrator/orchestrator.js';
 
 const question = process.argv.slice(2).join(' ') || 'How much did we spend in Google Ads last week and what was the ROAS?';
 
 const supabase = getSupabase();
-const [email, password, dashboardId] = await Promise.all([
+const [email, password, dashboardId, porterUrl, porterBotEmail, porterBotPw] = await Promise.all([
   readVaultSecret(supabase, 'NORTHBEAM_EMAIL'),
   readVaultSecret(supabase, 'NORTHBEAM_PASSWORD'),
   readVaultSecret(supabase, 'NORTHBEAM_DASHBOARD_ID'),
+  readVaultSecret(supabase, 'PORTER_API_BASE_URL'),
+  readVaultSecret(supabase, 'PORTER_BOT_EMAIL'),
+  readVaultSecret(supabase, 'PORTER_BOT_PASSWORD'),
 ]);
 
 const registry = new ConnectorRegistry();
 registry.register(new NorthbeamConnector({ supabase, credentials: { email, password, dashboardId } }));
 registry.register(new ReportsConnector());
+registry.register(new GantriPorterConnector({ baseUrl: porterUrl, email: porterBotEmail, password: porterBotPw }));
 
 const claude = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const orch = new Orchestrator({

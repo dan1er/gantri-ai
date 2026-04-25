@@ -7,7 +7,7 @@ import { ConversationsRepo } from './storage/repositories/conversations.js';
 import { ConnectorRegistry } from './connectors/base/registry.js';
 import { NorthbeamConnector } from './connectors/northbeam/northbeam-connector.js';
 import { ReportsConnector } from './connectors/reports/reports-connector.js';
-import { GantriDbConnector } from './connectors/gantri-db/gantri-db-connector.js';
+import { GantriPorterConnector } from './connectors/gantri-porter/gantri-porter-connector.js';
 import { Orchestrator } from './orchestrator/orchestrator.js';
 import { buildSlackApp } from './slack/app.js';
 
@@ -17,17 +17,14 @@ async function main() {
 
   const [
     email, password, dashboardId,
-    porterDbHost, porterDbPort, porterDbName, porterDbUser, porterDbPassword, porterDbSsl,
+    porterApiBaseUrl, porterBotEmail, porterBotPassword,
   ] = await Promise.all([
     readVaultSecret(supabase, 'NORTHBEAM_EMAIL'),
     readVaultSecret(supabase, 'NORTHBEAM_PASSWORD'),
     readVaultSecret(supabase, 'NORTHBEAM_DASHBOARD_ID'),
-    readVaultSecret(supabase, 'PORTER_DB_HOST'),
-    readVaultSecret(supabase, 'PORTER_DB_PORT'),
-    readVaultSecret(supabase, 'PORTER_DB_NAME'),
-    readVaultSecret(supabase, 'PORTER_DB_USER'),
-    readVaultSecret(supabase, 'PORTER_DB_PASSWORD'),
-    readVaultSecret(supabase, 'PORTER_DB_SSL'),
+    readVaultSecret(supabase, 'PORTER_API_BASE_URL'),
+    readVaultSecret(supabase, 'PORTER_BOT_EMAIL'),
+    readVaultSecret(supabase, 'PORTER_BOT_PASSWORD'),
   ]);
 
   const registry = new ConnectorRegistry();
@@ -38,15 +35,12 @@ async function main() {
   registry.register(northbeam);
   registry.register(new ReportsConnector());
 
-  const gantriDb = new GantriDbConnector({
-    host: porterDbHost,
-    port: Number(porterDbPort),
-    database: porterDbName,
-    user: porterDbUser,
-    password: porterDbPassword,
-    ssl: porterDbSsl === 'true' || porterDbSsl === '1',
+  const gantriPorter = new GantriPorterConnector({
+    baseUrl: porterApiBaseUrl,
+    email: porterBotEmail,
+    password: porterBotPassword,
   });
-  registry.register(gantriDb);
+  registry.register(gantriPorter);
 
   const claude = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
   const orchestrator = new Orchestrator({
@@ -70,12 +64,12 @@ async function main() {
 
   // Readiness / deep check — exercises downstream auth and DB. Call manually.
   receiver.router.get('/readyz', async (_req, res) => {
-    const [nb, db] = await Promise.all([
+    const [nb, gp] = await Promise.all([
       northbeam.healthCheck(),
-      gantriDb.healthCheck(),
+      gantriPorter.healthCheck(),
     ]);
-    const ok = nb.ok && db.ok;
-    res.status(ok ? 200 : 503).json({ ok, northbeam: nb, gantriDb: db });
+    const ok = nb.ok && gp.ok;
+    res.status(ok ? 200 : 503).json({ ok, northbeam: nb, gantriPorter: gp });
   });
 
   await app.start(env.PORT);

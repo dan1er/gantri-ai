@@ -132,12 +132,55 @@ export function createDmHandler(deps: HandlerDeps) {
 
     const threadHistory = await deps.conversationsRepo.loadRecentByThread(threadTs, 10);
     const started = Date.now();
+
+    // Live progress: as the orchestrator hits each connector, update the
+    // placeholder text so the user can see whether the right source was
+    // chosen (e.g., "Querying Northbeam, Grafana…"). We only update when
+    // the set of unique connectors grows, and we throttle edits to no
+    // more than one per 500ms to stay well under chat.update rate limits.
+    const seenSources = new Set<string>();
+    let lastUpdateAt = 0;
+    let pendingUpdate: NodeJS.Timeout | null = null;
+    const flushSourcesUpdate = () => {
+      if (!placeholder.ts) return;
+      const labels = [...seenSources].map((s) => SOURCE_LABELS[s] ?? s.charAt(0).toUpperCase() + s.slice(1));
+      const text = `🔍 Querying ${labels.join(', ')}…`;
+      lastUpdateAt = Date.now();
+      void client.chat.update({
+        channel: event.channel,
+        ts: placeholder.ts,
+        text,
+      }).catch((err: unknown) => {
+        logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'progress chat.update failed');
+      });
+    };
+    const onToolCall = (toolName: string) => {
+      const prefix = toolName.split('.')[0];
+      if (!prefix || seenSources.has(prefix)) return;
+      seenSources.add(prefix);
+      const elapsed = Date.now() - lastUpdateAt;
+      if (pendingUpdate) clearTimeout(pendingUpdate);
+      if (elapsed >= 500) {
+        flushSourcesUpdate();
+      } else {
+        pendingUpdate = setTimeout(() => {
+          pendingUpdate = null;
+          flushSourcesUpdate();
+        }, 500 - elapsed);
+      }
+    };
+
     try {
       const out = await deps.orchestrator.run({
         question: event.text,
         threadHistory,
         actor: { slackUserId: event.user, slackChannelId: event.channel },
+        onToolCall,
       });
+      if (pendingUpdate) {
+        clearTimeout(pendingUpdate);
+        pendingUpdate = null;
+      }
       const blocks = markdownToSlackBlocks(out.response, {
         footer: buildFooter(out),
       });

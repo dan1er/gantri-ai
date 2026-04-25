@@ -15,6 +15,13 @@ export interface OrchestratorInput {
   threadHistory: Array<{ question: string; response: string | null }>;
   /** Identifies the user driving this run; threaded into per-call context for tools that need it (reports.* tools). Optional for back-compat with scripted callers. */
   actor?: ActorContext;
+  /**
+   * Fired right before each tool execution starts. Used by the Slack handler
+   * to update the in-progress placeholder with the connectors actually being
+   * queried. Errors thrown by the callback are caught and logged — they never
+   * block the underlying tool call.
+   */
+  onToolCall?: (toolName: string) => void | Promise<void>;
 }
 
 export interface OrchestratorOutput {
@@ -126,6 +133,13 @@ export class Orchestrator {
         for (const block of resp.content) {
           if (block.type !== 'tool_use') continue;
           const registryName = nameMap.get(block.name) ?? block.name;
+          if (input.onToolCall) {
+            try {
+              await Promise.resolve(input.onToolCall(registryName));
+            } catch (err) {
+              logger.warn({ err: err instanceof Error ? err.message : String(err), tool: registryName }, 'onToolCall callback threw');
+            }
+          }
           const result = await this.opts.registry.execute(registryName, block.input);
           toolCalls.push({
             name: registryName,

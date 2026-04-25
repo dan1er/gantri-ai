@@ -80,9 +80,18 @@ describe('deriveCauseSummary', () => {
 });
 
 describe('computeBuckets', () => {
-  const sample = (daysLate: number, primaryCause: string, type: string) => ({
+  const sample = (
+    daysLate: number,
+    primaryCause: string,
+    type: string,
+    overrides: Partial<{ deliveryBy: string | null; daysPastDeliveryBy: number | null; deadlineMissed: boolean }> = {},
+  ) => ({
     id: 1, type, status: 'Processed', customerName: 'X', organizationId: null,
-    shipsAt: null, daysLate, totalDollars: 100,
+    shipsAt: null,
+    deliveryBy: overrides.deliveryBy ?? null,
+    daysPastDeliveryBy: overrides.daysPastDeliveryBy ?? null,
+    deadlineMissed: overrides.deadlineMissed ?? false,
+    daysLate, totalDollars: 100,
     jobCount: 0, failedJobCount: 0, cancelledJobCount: 0, reworkJobCount: 0,
     maxAttempt: 1, lostPartCount: 0, attentionCount: 0, failureModes: [],
     primaryCause, causeSummary: primaryCause, flaggedJobs: [], adminLink: 'x',
@@ -92,5 +101,27 @@ describe('computeBuckets', () => {
     expect(r.byDaysLate).toEqual({ '0-3': 1, '4-7': 1, '8-14': 1, '15+': 1 });
     expect(r.byPrimaryCause).toEqual({ A: 2, B: 2 });
     expect(r.byType).toEqual({ Order: 3, Wholesale: 1 });
+    expect(r.byDeadline).toEqual({ missed: 0, onTrack: 0, noDeadline: 4 });
+  });
+  it('counts deadline buckets', () => {
+    const r = computeBuckets([
+      sample(20, 'A', 'Order', { deliveryBy: '2026-04-01', daysPastDeliveryBy: 24, deadlineMissed: true }),
+      sample(15, 'A', 'Order', { deliveryBy: '2026-04-01', daysPastDeliveryBy: 5, deadlineMissed: true }),
+      sample(2, 'A', 'Order', { deliveryBy: '2026-05-15', daysPastDeliveryBy: null, deadlineMissed: false }),
+      sample(2, 'A', 'Order'),
+    ]);
+    expect(r.byDeadline).toEqual({ missed: 2, onTrack: 1, noDeadline: 1 });
+  });
+});
+
+describe('derivePrimaryCause — deadline missed promotion', () => {
+  it('beats every other production cause when deadline is missed', () => {
+    expect(
+      derivePrimaryCause({
+        attentionCount: 50, reworkJobCount: 5, lostPartCount: 3,
+        failedJobCount: 4, cancelledJobCount: 0, maxAttempt: 4,
+        failureModes: ['gunk'], daysPastDeliveryBy: 7,
+      }),
+    ).toBe('🚨 Deadline missed (7d)');
   });
 });

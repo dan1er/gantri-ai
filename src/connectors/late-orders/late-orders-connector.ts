@@ -28,7 +28,7 @@ export class LateOrdersConnector implements Connector {
     const tool: ToolDef<Args> = {
       name: 'gantri.late_orders_report',
       description:
-        'One-shot report of currently-late, in-flight orders (Porter\'s `Transactions.isLateOrder = true`, excluding shipped/delivered/cancelled/lost/refunded statuses, capped at last 365 days to skip zombie data). Returns per-order: id, type, status, customerName, shipsAt, daysLate, totalDollars, primaryCause (category), **causeSummary** (one-line table-friendly: "<category>: <top flagged jobs> (<text causes>)"), job-level counts (attention/rework/late/exceeded), sample of flagged job descriptions, distinct text causes. Also returns aggregate buckets: by days-late range (0-3 / 4-7 / 8-14 / 15+), by primaryCause, by type. **When rendering a table for the user, ALWAYS include a "Cause" column populated from `order.causeSummary` (NOT just `primaryCause`, which alone is too coarse).** Use this whenever the user asks about late / delayed / atrasadas / retrasadas orders, or wants a summary of why orders are running behind. Backed by a single Grafana SQL query — fast and consistent.',
+        'One-shot report of currently-late, in-flight orders (Porter\'s `Transactions.isLateOrder = true`, excluding shipped/delivered/cancelled/lost/refunded statuses, capped at last 365 days to skip zombie data). Returns per-order: id, type, status, customerName, **deliveryBy** (customer-facing committed delivery date), shipsAt (internal manufacturing target), **daysPastDeliveryBy** (positive = N days past the customer commitment), **deadlineMissed** (boolean), daysLate (vs shipsAt), totalDollars, primaryCause (category), **causeSummary** (one-line table-friendly), job-level counts (attention/rework/late/exceeded), sample of flagged job descriptions. Also returns aggregate buckets: by days-late range, by primaryCause, by type, AND **buckets.byDeadline = { missed, onTrack, noDeadline }** so you can lead the chat summary with the missed count. Results are sorted with deadline-missed orders first (most-overdue first), then plain late. **When rendering a table, ALWAYS include a "Cause" column from `order.causeSummary`. When summarizing in chat, ALWAYS lead with `buckets.byDeadline.missed` if > 0** — that\\u2019s the actionable customer-facing signal. Use whenever the user asks about late / delayed / atrasadas / retrasadas orders. Backed by a single Grafana SQL query — fast and consistent.',
       schema: Args as z.ZodType<Args>,
       jsonSchema: {
         type: 'object',
@@ -79,6 +79,13 @@ interface OrderOut {
   organizationId: number | null;
   shipsAt: string | null;
   daysLate: number;
+  /** Customer-facing committed delivery date (Transactions.deliveryBy).
+   *  Distinct from `shipsAt` — that's an internal manufacturing target. */
+  deliveryBy: string | null;
+  /** Positive = N days past the committed deliveryBy; 0/null = on track or no commitment. */
+  daysPastDeliveryBy: number | null;
+  /** Convenience flag: deliveryBy is set AND has already passed. */
+  deadlineMissed: boolean;
   totalDollars: number | null;
   jobCount: number;
   failedJobCount: number;        // Jobs.status='Failed'
@@ -125,7 +132,13 @@ WITH late AS (
     t."customerName",
     t."organizationId",
     t."shipsAt",
+    t."deliveryBy",
     GREATEST(0, EXTRACT(DAY FROM (NOW() - t."shipsAt")))::int AS days_late,
+    CASE
+      WHEN t."deliveryBy" IS NOT NULL AND t."deliveryBy" < NOW()
+        THEN EXTRACT(DAY FROM (NOW() - t."deliveryBy"))::int
+      ELSE NULL
+    END AS days_past_deadline,
     COALESCE((amount->>'total')::numeric,
              (amount->>'subtotal')::numeric
              + COALESCE((amount->>'shipping')::numeric, 0)
@@ -190,7 +203,9 @@ SELECT
   l."customerName",
   l."organizationId",
   l."shipsAt",
+  l."deliveryBy",
   l.days_late,
+  l.days_past_deadline,
   l.total_dollars,
   COALESCE(js.job_count, 0) AS job_count,
   COALESCE(js.failed_job_count, 0) AS failed_job_count,
@@ -205,7 +220,8 @@ FROM late l
 LEFT JOIN job_summary js ON js."orderId" = l.id
 LEFT JOIN stock_summary ss ON ss."orderId" = l.id
 LEFT JOIN failure_modes fm ON fm."orderId" = l.id
-ORDER BY l.days_late DESC
+-- Sort: deadline-missed first (largest miss first), then plain days-late.
+ORDER BY (l.days_past_deadline IS NOT NULL) DESC, l.days_past_deadline DESC NULLS LAST, l.days_late DESC
 LIMIT ${args.limit};
 `;
 }
@@ -223,9 +239,14 @@ function rowsToOrders(fields: string[], rows: unknown[][]): OrderOut[] {
     const attentionCount = Number(row[idx('attention_count')] ?? 0);
     const lostPartCount = Number(row[idx('lost_part_count')] ?? 0);
     const failureModes = parseStringArray(row[idx('failure_modes')]).map(humanizeFailureMode);
+    const deliveryByRaw = row[idx('deliveryBy')];
+    const daysPastRaw = row[idx('days_past_deadline')];
+    const daysPastDeliveryBy = daysPastRaw != null ? Number(daysPastRaw) : null;
+    const deadlineMissed = daysPastDeliveryBy !== null && daysPastDeliveryBy > 0;
     const stats = {
       failedJobCount, cancelledJobCount, reworkJobCount, maxAttempt,
       attentionCount, lostPartCount, failureModes,
+      daysPastDeliveryBy,
     };
     out.push({
       id,
@@ -234,6 +255,9 @@ function rowsToOrders(fields: string[], rows: unknown[][]): OrderOut[] {
       customerName: (row[idx('customerName')] as string | null) ?? null,
       organizationId: row[idx('organizationId')] != null ? Number(row[idx('organizationId')]) : null,
       shipsAt: (row[idx('shipsAt')] as string | null) ?? null,
+      deliveryBy: deliveryByRaw != null ? String(deliveryByRaw) : null,
+      daysPastDeliveryBy,
+      deadlineMissed,
       daysLate: Number(row[idx('days_late')] ?? 0),
       totalDollars: row[idx('total_dollars')] != null ? Math.round(Number(row[idx('total_dollars')]) * 100) / 100 : null,
       jobCount: Number(row[idx('job_count')] ?? 0),
@@ -275,11 +299,15 @@ export interface CauseStats {
   attentionCount: number;
   lostPartCount: number;
   failureModes: string[];
+  /** Set when the customer-facing `deliveryBy` deadline has been missed.
+   *  Promoted above all production causes — this is the most actionable signal. */
+  daysPastDeliveryBy?: number | null;
 }
 
 /**
  * Pick the dominant cause category for an order. Priority reflects what's
  * actionable for ops:
+ *   0. Customer-facing deadline missed — promoted above everything else.
  *   1. Lost parts (stocks scrapped) — biggest production hit, longest tail.
  *   2. Heavy rework (≥2 attempts on the same op) — quality issues compounding.
  *   3. Failed jobs with concrete failure modes — actively blocked on rework.
@@ -288,6 +316,9 @@ export interface CauseStats {
  *   6. Unknown.
  */
 export function derivePrimaryCause(s: CauseStats): string {
+  if (s.daysPastDeliveryBy != null && s.daysPastDeliveryBy > 0) {
+    return `🚨 Deadline missed (${s.daysPastDeliveryBy}d)`;
+  }
   if (s.lostPartCount > 0) return 'Part scrapped';
   if (s.maxAttempt >= 3) return `Reworked ${s.maxAttempt}×`;
   if (s.failedJobCount > 0 && s.failureModes.length > 0) return s.failureModes[0];
@@ -312,7 +343,11 @@ export function derivePrimaryCause(s: CauseStats): string {
 export function deriveCauseSummary(input: CauseStats & { flagged: string[] }): string {
   const parts: string[] = [];
 
-  // Lead with the most actionable signal.
+  // Customer-facing deadline missed always leads — it's the signal ops needs to act on.
+  if (input.daysPastDeliveryBy != null && input.daysPastDeliveryBy > 0) {
+    parts.push(`🚨 Deadline missed by ${input.daysPastDeliveryBy}d`);
+  }
+  // Lead with the most actionable production signal.
   if (input.lostPartCount > 0) {
     parts.push(`Part scrapped (${input.lostPartCount})`);
   }
@@ -358,11 +393,25 @@ export function computeBuckets(orders: OrderOut[]) {
   const byDaysLate: Record<string, number> = { '0-3': 0, '4-7': 0, '8-14': 0, '15+': 0 };
   const byPrimaryCause: Record<string, number> = {};
   const byType: Record<string, number> = {};
+  let deadlineMissed = 0;
+  let deadlineOnTrack = 0;
+  let noDeadline = 0;
   for (const o of orders) {
     const bucket = o.daysLate <= 3 ? '0-3' : o.daysLate <= 7 ? '4-7' : o.daysLate <= 14 ? '8-14' : '15+';
     byDaysLate[bucket]++;
     byPrimaryCause[o.primaryCause] = (byPrimaryCause[o.primaryCause] ?? 0) + 1;
     byType[o.type] = (byType[o.type] ?? 0) + 1;
+    if (o.deadlineMissed) deadlineMissed++;
+    else if (o.deliveryBy) deadlineOnTrack++;
+    else noDeadline++;
   }
-  return { byDaysLate, byPrimaryCause, byType };
+  return {
+    byDaysLate,
+    byPrimaryCause,
+    byType,
+    /** Customer-deadline rollup. `missed` is the actionable count to lead with
+     *  in any chat summary; `onTrack` are late on shipsAt but still inside
+     *  the customer-promised window. */
+    byDeadline: { missed: deadlineMissed, onTrack: deadlineOnTrack, noDeadline },
+  };
 }

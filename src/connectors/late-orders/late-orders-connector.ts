@@ -28,7 +28,7 @@ export class LateOrdersConnector implements Connector {
     const tool: ToolDef<Args> = {
       name: 'gantri.late_orders_report',
       description:
-        'One-shot report of currently-late, in-flight orders (Porter\'s `Transactions.isLateOrder = true`, excluding shipped/delivered/cancelled/lost/refunded statuses, capped at last 365 days to skip zombie data). Returns per-order: id, type, status, customerName, **deliveryBy** (customer-facing committed delivery date), shipsAt (internal manufacturing target), **daysPastDeliveryBy**, **deadlineMissed**, daysLate, totalDollars, primaryCause, **causeSummary**, job-level counts, **notes** (raw Transactions.notes — customer comments, PO refs, project names, hold dates, etc.), **noteFlags** (regex-extracted important segments from notes — date hints, rush/hold/expedite keywords). Also returns aggregate buckets: byDaysLate, byPrimaryCause, byType, **byDeadline = { missed, onTrack, noDeadline }**. Results are sorted deadline-missed first.\\n\\n**Required behavior when answering:**\\n1. Lead the chat summary with `buckets.byDeadline.missed` if > 0 — that\\u2019s the actionable customer-facing signal.\\n2. **For every order with non-empty `noteFlags`, surface those flags in the canvas table\\u2019s Cause/Notes column AND mention any deadline-bearing notes in the chat summary headline** — these are customer commitments and special instructions (\\"need by 5/11\\", \\"hold shipment 4/30\\", \\"rush\\", \\"PO #...\\", project names) that are NOT captured in `deliveryBy` and would otherwise be missed. Treat note-flagged orders as just as urgent as `deadlineMissed=true` ones.\\n3. When rendering the per-row canvas table, include a column for `noteFlags` (or merge into `causeSummary`) so the maintainer sees these at a glance.',
+        'One-shot report of currently-late, in-flight orders (Porter\'s `Transactions.isLateOrder = true`, excluding shipped/delivered/cancelled/lost/refunded statuses, capped at last 365 days to skip zombie data). Returns per-order: id, type, status, customerName, **deliveryBy** (customer-facing committed delivery date), shipsAt (internal manufacturing target), **daysPastDeliveryBy**, **deadlineMissed**, daysLate, totalDollars, primaryCause, **causeSummary**, job-level counts, **notes** (raw Transactions.notes — customer comments, PO refs, project names, hold dates, etc.), **noteFlags** (regex-extracted important segments from notes). Also returns aggregate buckets: byDaysLate, byPrimaryCause, byType, **byDeadline = { customerDeadlineMissed, withinCustomerWindow, noCustomerDeadline }**. Results are sorted customer-deadline-missed first.\\n\\n**Required behavior when answering:**\\n1. Lead the chat summary with `buckets.byDeadline.customerDeadlineMissed` if > 0 — that is the actionable customer-facing signal.\\n2. **For every order with non-empty `noteFlags`, surface those flags in the canvas table\\u2019s Cause/Notes column AND mention any deadline-bearing notes in the chat summary headline** — these are customer commitments and special instructions (\\"need by 5/11\\", \\"hold shipment 4/30\\", \\"rush\\", \\"PO #...\\", project names) that are NOT captured in `deliveryBy` and would otherwise be missed. Treat note-flagged orders as just as urgent as `deadlineMissed=true` ones.\\n3. **NEVER label any of these orders \\"on track\\" — they are ALL late by construction (the report filters for `isLateOrder=true`).** When rendering the deadline breakdown, use phrasing like \\"customer deadline missed\\" / \\"still within customer window\\" / \\"no customer deadline set\\". The fact that an order is internally late but the customer hasn\\u2019t been let down yet is NOT \\"on track\\".\\n4. When rendering the per-row canvas table, include a column for `noteFlags` (or merge into `causeSummary`) so the maintainer sees these at a glance.',
       schema: Args as z.ZodType<Args>,
       jsonSchema: {
         type: 'object',
@@ -454,24 +454,35 @@ export function computeBuckets(orders: OrderOut[]) {
   const byPrimaryCause: Record<string, number> = {};
   const byType: Record<string, number> = {};
   let deadlineMissed = 0;
-  let deadlineOnTrack = 0;
-  let noDeadline = 0;
+  let withinCustomerWindow = 0;
+  let noCustomerDeadline = 0;
   for (const o of orders) {
     const bucket = o.daysLate <= 3 ? '0-3' : o.daysLate <= 7 ? '4-7' : o.daysLate <= 14 ? '8-14' : '15+';
     byDaysLate[bucket]++;
     byPrimaryCause[o.primaryCause] = (byPrimaryCause[o.primaryCause] ?? 0) + 1;
     byType[o.type] = (byType[o.type] ?? 0) + 1;
     if (o.deadlineMissed) deadlineMissed++;
-    else if (o.deliveryBy) deadlineOnTrack++;
-    else noDeadline++;
+    else if (o.deliveryBy) withinCustomerWindow++;
+    else noCustomerDeadline++;
   }
   return {
     byDaysLate,
     byPrimaryCause,
     byType,
-    /** Customer-deadline rollup. `missed` is the actionable count to lead with
-     *  in any chat summary; `onTrack` are late on shipsAt but still inside
-     *  the customer-promised window. */
-    byDeadline: { missed: deadlineMissed, onTrack: deadlineOnTrack, noDeadline },
+    /** Customer-deadline rollup. ALL orders here are already late vs the
+     *  internal `shipsAt` target — that's the report's filter. The split
+     *  reflects how late they are RELATIVE TO THE CUSTOMER COMMITMENT only:
+     *  - `customerDeadlineMissed`: deliveryBy already passed (lead with this).
+     *  - `withinCustomerWindow`: deliveryBy is set but still in the future,
+     *    so we're internally late but the customer hasn't been let down YET.
+     *  - `noCustomerDeadline`: no deliveryBy on the order at all.
+     *  Phrasing matters in the canvas — never call these "on track", because
+     *  every order in the report is late vs ops by construction.
+     */
+    byDeadline: {
+      customerDeadlineMissed: deadlineMissed,
+      withinCustomerWindow,
+      noCustomerDeadline,
+    },
   };
 }

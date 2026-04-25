@@ -101,7 +101,7 @@ describe('computeBuckets', () => {
     expect(r.byDaysLate).toEqual({ '0-3': 1, '4-7': 1, '8-14': 1, '15+': 1 });
     expect(r.byPrimaryCause).toEqual({ A: 2, B: 2 });
     expect(r.byType).toEqual({ Order: 3, Wholesale: 1 });
-    expect(r.byDeadline).toEqual({ missed: 0, onTrack: 0, noDeadline: 4 });
+    expect(r.byDeadline).toEqual({ customerDeadlineMissed: 0, withinCustomerWindow: 0, noCustomerDeadline: 4 });
   });
   it('counts deadline buckets', () => {
     const r = computeBuckets([
@@ -110,7 +110,7 @@ describe('computeBuckets', () => {
       sample(2, 'A', 'Order', { deliveryBy: '2026-05-15', daysPastDeliveryBy: null, deadlineMissed: false }),
       sample(2, 'A', 'Order'),
     ]);
-    expect(r.byDeadline).toEqual({ missed: 2, onTrack: 1, noDeadline: 1 });
+    expect(r.byDeadline).toEqual({ customerDeadlineMissed: 2, withinCustomerWindow: 1, noCustomerDeadline: 1 });
   });
 });
 

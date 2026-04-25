@@ -276,7 +276,115 @@ function buildPorterTools(conn: GantriPorterConnector): ToolDef[] {
       if (!data.order) {
         return { ok: false, error: { code: 'NOT_FOUND', message: `Order ${args.id} not found` } };
       }
-      return { order: { ...normalizeOrder(data.order), raw: data.order } };
+      const o = data.order;
+      // Slim the response: the raw payload includes every job's full metadata
+      // (machine state, gcode, instructions, etc.) which can balloon to 100k+
+      // tokens for a multi-part order. Surface only the fields useful for
+      // human-facing analysis (status, lateness, blockers, notes).
+      // A single order can carry thousands of jobs (1 stock = many parts × many
+      // QC/print/sand attempts). Returning them all blows the model context
+      // (we've seen 1.6k jobs / 2.3M tokens). Strategy:
+      //  - Aggregate stats per stock (counts by status, lateness, attention)
+      //  - Surface only "interesting" jobs flagged by the workflow
+      //    (attention / rework / late / exceeding cycle time / has comment)
+      //  - Cap the interesting set at 30 per order, sorted most-recent-first
+      const isInteresting = (j: any) =>
+        j.hasAttention || j.isRework || j.isLateOrder ||
+        (j.reasonsForExceeding && Object.keys(j.reasonsForExceeding).length > 0) ||
+        (typeof j.exceededCycleTime === 'number' && j.exceededCycleTime > 0) ||
+        (j.comment && String(j.comment).trim().length > 0) ||
+        (j.cause && String(j.cause).trim().length > 0) ||
+        (j.failedReason && Object.keys(j.failedReason).length > 0 && j.status !== 'Completed');
+      const slimJob = (j: any, stockId: number) => ({
+        stockId,
+        id: j.id,
+        description: j.description ?? null,
+        status: j.status ?? null,
+        attempt: j.attempt ?? null,
+        isRework: j.isRework ?? false,
+        isLateOrder: j.isLateOrder ?? false,
+        hasAttention: j.hasAttention ?? false,
+        highPriority: j.highPriority ?? false,
+        machineName: j.machineName ?? null,
+        machineType: j.machineType ?? null,
+        assignedTo: j.assignedTo ?? null,
+        startDate: j.startDate ?? null,
+        endDate: j.endDate ?? null,
+        completedAt: j.failedReason?.completedAt ?? j.completedAt ?? null,
+        notes: j.notes ?? null,
+        comment: j.comment ?? null,
+        cause: j.cause ?? null,
+        reasonsForExceeding: j.reasonsForExceeding && Object.keys(j.reasonsForExceeding).length ? j.reasonsForExceeding : null,
+        exceededCycleTime: j.exceededCycleTime ?? null,
+      });
+      const allInteresting: any[] = [];
+      let totalJobs = 0, interestingTotal = 0;
+      const stocksSummary = Array.isArray(o.stocks)
+        ? o.stocks.map((s: any) => {
+            const jobs = Array.isArray(s.jobs) ? s.jobs : [];
+            totalJobs += jobs.length;
+            const byStatus: Record<string, number> = {};
+            let attention = 0, rework = 0, late = 0, exceeded = 0;
+            for (const j of jobs) {
+              const st = j.status ?? 'Unknown';
+              byStatus[st] = (byStatus[st] ?? 0) + 1;
+              if (j.hasAttention) attention++;
+              if (j.isRework) rework++;
+              if (j.isLateOrder) late++;
+              if (typeof j.exceededCycleTime === 'number' && j.exceededCycleTime > 0) exceeded++;
+              if (isInteresting(j)) {
+                interestingTotal++;
+                allInteresting.push(slimJob(j, s.id));
+              }
+            }
+            return {
+              id: s.id,
+              sku: s.sku ?? null,
+              color: s.color ?? null,
+              size: s.size ?? null,
+              productId: s.productId ?? null,
+              status: s.status ?? null,
+              isLateOrder: s.isLateOrder ?? null,
+              completedJobPercent: s.completedJobPercent ?? null,
+              jobCount: jobs.length,
+              jobsByStatus: byStatus,
+              attentionCount: attention,
+              reworkCount: rework,
+              lateJobCount: late,
+              exceededCount: exceeded,
+            };
+          })
+        : [];
+      // Sort interesting jobs by endDate (most recent first), cap at 30.
+      allInteresting.sort((a, b) => String(b.endDate ?? '').localeCompare(String(a.endDate ?? '')));
+      const interestingJobs = allInteresting.slice(0, 30);
+      const shipmentsSummary = Array.isArray(o.shipments)
+        ? o.shipments.map((sh: any) => ({
+            id: sh.id,
+            status: sh.status ?? null,
+            shipsAt: sh.shipsAt ?? null,
+            shippingTrackingNumber: sh.shippingTrackingNumber ?? null,
+            shippingProvider: sh.shippingProvider ?? null,
+            stocks: Array.isArray(sh.stocks)
+              ? sh.stocks.map((st: any) => ({ sku: st.sku, stockName: st.stockName }))
+              : [],
+          }))
+        : [];
+      return {
+        order: {
+          ...normalizeOrder(o),
+          additionalEmails: o.additionalEmails ?? null,
+          billingAddress: o.billingAddress ?? null,
+          payment: o.payment
+            ? { type: o.payment.type ?? null, number: o.payment.number ?? null, nameOnCard: o.payment.nameOnCard ?? null }
+            : null,
+          stocks: stocksSummary,
+          shipments: shipmentsSummary,
+          jobsTotal: totalJobs,
+          jobsInterestingTotal: interestingTotal,
+          interestingJobs,
+        },
+      };
     },
   };
 

@@ -166,16 +166,28 @@ export class ReportsConnector implements Connector {
           'canvases.access.set failed (canvas created but user may not be able to view)',
         );
       }
-      // Slack's docs URL pattern. We don't know the team's vanity domain from
-      // here without an extra auth.test call, but the workspace-relative
-      // `/docs/<team_id>/<canvas_id>` form opens correctly when clicked from
-      // a Slack message regardless of vanity-vs-default URL.
+      // Slack canvases need a team-id-qualified permalink to open. Don't try
+      // to construct the URL by hand — `files.info` returns the real one
+      // (e.g. `https://gantri.slack.com/docs/T03KJCV1P/F0AV63MCKT7`). If that
+      // probe fails, fall back to a deep link which Slack's desktop app
+      // resolves but which is fragile in the browser.
+      let permalink: string | null = null;
+      try {
+        const info = await this.deps.slackClient.apiCall('files.info', { file: canvasId });
+        const file = (info as { file?: { permalink?: string } }).file;
+        if (info.ok && file?.permalink) permalink = file.permalink;
+      } catch (err) {
+        logger.warn(
+          { canvasId, err: err instanceof Error ? err.message : String(err) },
+          'files.info failed for canvas — falling back to deep link',
+        );
+      }
+      const fallback = `slack://docs/${canvasId}`;
       return {
         canvasId,
         title: args.title,
-        url: `slack://docs/${canvasId}`,
-        deepLinkUrl: `slack://docs/${canvasId}`,
-        webUrl: `https://app.slack.com/docs/${canvasId}`,
+        url: permalink ?? fallback,
+        webUrl: permalink ?? fallback,
       };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

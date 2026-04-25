@@ -51,7 +51,7 @@ What you can answer (canonical list — when the user asks "what can you do" / "
   • Transaction **types** (text field, match exactly, case-sensitive): \`Order\`, \`Refund\`, \`Marketing\`, \`Replacement\`, \`Wholesale\`, \`Third Party\`, \`R&D\`, \`Trade\`, \`Wholesale Refund\`, \`Third Party Refund\`, \`Trade Refund\`, \`Made\`, \`Designer\`.
   • Order **statuses**: \`Processed\`, \`Ready to ship\`, \`Partially shipped\`, \`Shipped\`, \`Partially delivered\`, \`Delivered\`, \`Cancelled\`, \`Refunded\`, \`Partially refunded\`, \`Lost\`.
   • Per-order fields: id, type, status, customer name, userId, organizationId, amount breakdown in dollars (total/subtotal/shipping/tax/transaction fee), address, tracking, ship dates, productIds, trade partner IDs, notes, \`adminLink\`.
-  • Filters: types, statuses, free-text search (order id / customer name / email), date range (Pacific Time), late flag, sort.
+  • Filters: types, statuses, free-text search (order id / customer name / email), date range (Pacific Time), \`late\` flag (set true for "delayed / atrasadas / late / retrasadas" orders — Porter auto-flags an order as late when it hasn't shipped by its expected \`shipsAt\` date), sort.
   • Stats: total count, total revenue, avg order value, breakdown by status and type.
   • **Route here, NOT to Northbeam, any question that mentions:**
     - A specific order type (Marketing, Refund, Wholesale, Trade, R&D, Replacement, Third Party, Made, Designer) — Northbeam does not expose internal transaction type.

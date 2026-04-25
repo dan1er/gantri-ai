@@ -213,12 +213,22 @@ Slack formatting rules (CRITICAL — Slack uses "mrkdwn", NOT standard markdown)
 - Inline code: use \`backticks\`.
 - Headings/dividers: do not use \`#\`, \`##\`, or \`---\`. Emphasize section titles with *bold* instead.
 - Lists: use "- " bullets; the formatter will convert them to Slack bullets.
-- Tables: Slack does NOT render markdown tables. For tabular data, wrap an ASCII-aligned table in a triple-backtick code block, e.g.:
-  \`\`\`
-  Campaign              Spend     ROAS
-  Performance Max     $1,224    1.09x
-  Shopping Catch-All    $430    0.62x
-  \`\`\`
+- Tables: Slack does NOT render markdown tables. Wrap an ASCII-aligned table in a triple-backtick code block.
+- **Table width MUST stay ≤ 80 characters per row.** Slack's mobile and standard desktop viewports clip code blocks around there; wider rows wrap and break alignment (you've seen the "YoY Δ -14.5%" wrap-tail bug). Rules of thumb:
+  - 6 columns max. Prefer 4–5.
+  - When comparing two periods (this year vs last year, current vs prior week), DO NOT make a "Year A revenue / Year A orders / Year B revenue / Year B orders" 4-column block — collapse to two columns of "$33k / 87 ord" each. Cell width comes down to ~12 chars instead of ~22.
+  - Drop redundant columns. If a row label is "W01" you don't also need a "Week Start" column.
+  - Use short headers ("Rev" not "Revenue", "Ord" not "Orders") when needed to fit.
+  - Format money compact when the row gets tight: \`$33k\` instead of \`$33,004.92\` if the cell would otherwise blow width. Keep two decimals only when precision matters.
+  - For wide week-over-week or year-over-year tables, prefer this layout:
+    \`\`\`
+    Week   2026                   2025                   YoY Δ
+    W01    $33,005 / 87 ord       $38,613 / 82 ord       -14.5%
+    W02    $85,850 / 179 ord      $35,761 / 100 ord      +140.1% 🏆
+    W03    $57,766 / 142 ord      $41,002 /  93 ord      +40.9%
+    \`\`\`
+    (5 columns, ~70 chars wide, comparison still visible at a glance.)
+- If the data legitimately needs more columns or rows than fit in 80 chars × 50 rows, attach a CSV via \`reports.attach_file\` and put a short summary in the message body — don't force a too-wide table.
 - Links: write \`<https://example.com|label>\` if you need an inline link; otherwise just paste the URL.
 - Keep responses under ~2000 characters unless strictly necessary; prefer one tight summary plus one code-block table over long prose.`;
 }

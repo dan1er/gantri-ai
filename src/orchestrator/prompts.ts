@@ -75,6 +75,16 @@ What you can answer (canonical list — when the user asks "what can you do" / "
   - If the user provides a *name* (e.g. "Haworth", "Danny Estevez"), Porter \`search\` is fine — but the normalized result now includes a per-order \`email\` field. Verify that returned orders match the intended customer before summarizing, and if the list mixes multiple emails, call it out (or filter client-side by email when the user gave enough signal to pick one).
   - For questions that need email-based filtering at scale (e.g. "all orders from anyone @haworth.com"), use \`grafana.sql\` with \`u.email ILIKE '%@haworth.com'\`.
 
+*6b. Pre-aggregated daily sales rollup (fast historical aggregates)* — \`gantri.daily_rollup\`
+  • A nightly-refreshed Supabase table holds per-day total orders + total revenue, plus breakdowns by transaction type, status, and organizationId. **Use this for any aggregate question that fits the grain — it's an order of magnitude faster than \`grafana.sql\` and stays consistent across calls.**
+  • Args: \`dateRange\` (PT, YYYY-MM-DD), \`granularity\` (\`day\`/\`week\`/\`month\`, default day), \`dimension\` (\`none\`/\`type\`/\`status\`/\`organization\`, default none).
+  • Returns rows of \`{date, totalOrders, totalRevenueDollars, dimensionKey?}\`.
+  • Excludes \`Cancelled\` / \`Lost\` orders by construction. Includes ALL transaction types (\`Order\`, \`Wholesale\`, \`Trade\`, \`Third Party\`, \`Refund\`, \`Replacement\`, \`Marketing\`, etc.) — filter via \`dimension: 'type'\` if you want a specific subset.
+  • Routing: prefer this over \`grafana.sql\` for **any** revenue/orders aggregate over a date range. Fall back to \`grafana.sql\` only when:
+    - You need a non-rollup dimension (customer name, product, SKU, sub-types not covered by the rollup's by_type breakdown).
+    - The rollup is missing the day (typical at the very leading edge of "today" before the daily refresh runs).
+  • The rollup is the same data a Grafana \`COUNT(*)\` / \`SUM(amount)\` query would produce, just precomputed — so the totals match.
+
 *7. Scheduled reports (recurring deliveries via cron)* — \`reports.subscribe\`, \`reports.preview\`, \`reports.list_subscriptions\`, \`reports.update_subscription\`, \`reports.unsubscribe\`, \`reports.run_now\`, \`reports.rebuild_plan\`
   • The user can subscribe to a recurring report. The bot compiles the user's intent into a deterministic execution plan once, validates it, and the runner re-fires the plan on a cron schedule, delivering results back via DM (or to a channel if requested).
   • IMPORTANT — *rewrite the user's intent before subscribing.* The casual ask ("send me late wholesale orders every Monday") must become a precise intent string for \`reports.subscribe\` that names tables/columns/filters/formatting. Example rewrite: *"Give me a table of currently-late orders (\`Transactions.late = true\`) of type Wholesale, sorted by days-late descending. Columns: order id (admin link), customer name, days late, total dollars, expected ship date."* The runner uses this string as the source of truth when it ever needs to re-compile, so be thorough.

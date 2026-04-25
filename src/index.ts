@@ -5,6 +5,12 @@ import { getSupabase, readVaultSecret } from './storage/supabase.js';
 import { AuthorizedUsersRepo } from './storage/repositories/authorized-users.js';
 import { ConversationsRepo } from './storage/repositories/conversations.js';
 import { ConnectorRegistry } from './connectors/base/registry.js';
+import { CachingRegistry } from './connectors/base/caching-registry.js';
+import { DEFAULT_CACHE_POLICIES } from './connectors/base/default-policies.js';
+import { TtlCache } from './storage/cache.js';
+import { RollupRepo } from './storage/rollup-repo.js';
+import { RollupConnector } from './connectors/rollup/rollup-connector.js';
+import { RollupRefreshJob } from './connectors/rollup/rollup-refresh.js';
 import { NorthbeamConnector } from './connectors/northbeam/northbeam-connector.js';
 import { ReportsConnector } from './connectors/reports/reports-connector.js';
 import { GantriPorterConnector } from './connectors/gantri-porter/gantri-porter-connector.js';
@@ -63,6 +69,9 @@ async function main() {
   });
   registry.register(grafana);
 
+  const rollupRepo = new RollupRepo(supabase);
+  registry.register(new RollupConnector({ repo: rollupRepo }));
+
   const claude = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
   const orchestrator = new Orchestrator({
     registry,
@@ -106,6 +115,17 @@ async function main() {
     }),
   );
 
+  // Wrap the populated registry with a caching layer. Every subsequent
+  // `cachingRegistry.execute(...)` consults the per-tool CachePolicy and
+  // short-circuits closed-period queries to the cache. The Orchestrator was
+  // already wired with the raw `registry` — that's fine because it reads
+  // tools lazily and we want the caching layer in front of execute calls.
+  const cache = new TtlCache(supabase);
+  const cachingRegistry = new CachingRegistry(registry, cache, DEFAULT_CACHE_POLICIES);
+  // Switch the orchestrator over to the caching layer. From this point on all
+  // orchestrator.run() calls go through cachingRegistry.execute(...).
+  orchestrator.setRegistry(cachingRegistry as unknown as ConnectorRegistry);
+
   // Liveness check — only verifies the HTTP server is up.
   // Must stay fast (<1s) so Fly health checks don't trigger auth flows on boot.
   receiver.router.get('/healthz', (_req, res) => {
@@ -145,6 +165,9 @@ async function main() {
   logger.info({ port: env.PORT }, 'gantri-ai-bot listening');
 
   reportsRunner.start();
+
+  const rollupJob = new RollupRefreshJob({ grafana, repo: rollupRepo });
+  rollupJob.start();
 }
 
 main().catch((err) => {

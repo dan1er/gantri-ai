@@ -57,6 +57,16 @@ export class Orchestrator {
     return this.activeActor;
   }
 
+  /** Replace the registry used for tool execution. Used by index.ts to swap
+   *  in a CachingRegistry after all connectors are registered. The orchestrator
+   *  reads tools lazily on each run, so late replacement is safe. */
+  setRegistry(registry: ConnectorRegistry): void {
+    // Cast through unknown because CachingRegistry implements the same surface
+    // structurally but isn't a class extension. We rely on the orchestrator's
+    // narrow use of `getAllTools()` and `execute()`.
+    (this as unknown as { opts: { registry: ConnectorRegistry } }).opts.registry = registry;
+  }
+
   async run(input: OrchestratorInput): Promise<OrchestratorOutput> {
     this.activeActor = input.actor;
     try {

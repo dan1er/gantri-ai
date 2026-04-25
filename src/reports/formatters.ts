@@ -1,0 +1,58 @@
+import type { ColumnSpec } from './plan-types.js';
+
+const NA = '—';
+const PT_TZ = 'America/Los_Angeles';
+
+/** Format a single cell value according to a ColumnSpec.format (or pass through). */
+export function formatCell(value: unknown, format?: ColumnSpec['format']): string {
+  if (value === null || value === undefined) return NA;
+  switch (format) {
+    case 'currency_dollars': {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return NA;
+      return `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    }
+    case 'integer': {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return NA;
+      return Math.round(n).toLocaleString('en-US');
+    }
+    case 'percent': {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return NA;
+      return `${(n * 100).toFixed(1)}%`;
+    }
+    case 'admin_order_link': {
+      const id = String(value);
+      return `<http://admin.gantri.com/orders/${id}|#${id}>`;
+    }
+    case 'datetime_pt': {
+      const d = new Date(value as string | number);
+      if (Number.isNaN(d.getTime())) return NA;
+      return ptWallClock(d, false);
+    }
+    case 'date_pt': {
+      const d = new Date(value as string | number);
+      if (Number.isNaN(d.getTime())) return NA;
+      return ptWallClock(d, true);
+    }
+    default:
+      return String(value);
+  }
+}
+
+function ptWallClock(d: Date, dateOnly: boolean): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: PT_TZ,
+    hour12: false,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    ...(dateOnly ? {} : { hour: '2-digit', minute: '2-digit' }),
+  }).formatToParts(d);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '';
+  const date = `${get('year')}-${get('month')}-${get('day')}`;
+  if (dateOnly) return date;
+  const hour = get('hour') === '24' ? '00' : get('hour');
+  return `${date} ${hour}:${get('minute')}`;
+}

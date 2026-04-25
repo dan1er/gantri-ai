@@ -1,5 +1,3 @@
-import stringWidth from 'string-width';
-
 export interface FormatterOptions {
   footer?: string;
 }
@@ -74,9 +72,11 @@ function splitOverlongParagraph(text: string, maxChars: number): string[] {
  *   - `# heading` lines → `*heading*`
  *   - `---` horizontal rules → removed
  *   - `- item` bullets → `• item`
- *   - Markdown pipe-tables (header / separator / rows) → a triple-backtick code block
- *     with ASCII-aligned columns (Slack renders fixed-width code blocks).
- *   - Code fences are preserved verbatim.
+ *   - Markdown pipe-tables (header / separator / rows) → bullet list (Slack mrkdwn
+ *     does NOT render tables, and ASCII-aligned tables drift between desktop and
+ *     mobile fonts; tabular data should go to canvas — this is the in-chat fallback).
+ *   - Code fences with tabular shape → bullet list (same reason).
+ *   - Other code fences pass through verbatim.
  */
 export function markdownToMrkdwn(md: string): string {
   const out: string[] = [];
@@ -88,16 +88,18 @@ export function markdownToMrkdwn(md: string): string {
     const line = lines[i];
     if (line.startsWith('```')) {
       if (!inFence) {
-        // Opening fence — start buffering content.
         inFence = true;
         fenceBuf = [];
         fenceOpener = line;
       } else {
-        // Closing fence — re-align if the buffered content looks like a table.
-        const realigned = maybeRealignAsciiTable(fenceBuf);
-        out.push(fenceOpener);
-        out.push(...realigned);
-        out.push(line);
+        const tableBullets = maybeConvertCodeFenceToBulletList(fenceBuf);
+        if (tableBullets) {
+          out.push(...tableBullets);
+        } else {
+          out.push(fenceOpener);
+          out.push(...fenceBuf);
+          out.push(line);
+        }
         inFence = false;
         fenceBuf = [];
       }
@@ -105,7 +107,7 @@ export function markdownToMrkdwn(md: string): string {
     }
     if (inFence) { fenceBuf.push(line); continue; }
 
-    // Markdown pipe-table detection: header + separator row
+    // Markdown pipe-table detection: header + separator row → bullet list.
     if (isTableHeader(line) && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
       const tableLines: string[] = [line];
       let j = i + 2;
@@ -113,9 +115,8 @@ export function markdownToMrkdwn(md: string): string {
         tableLines.push(lines[j]);
         j++;
       }
-      out.push('```');
-      out.push(...renderAsciiTable(tableLines));
-      out.push('```');
+      const rows = tableLines.map(splitRow).filter((r) => !r.every((c) => /^-+$/.test(c) || c === ''));
+      out.push(...renderTableAsBullets(rows));
       i = j - 1;
       continue;
     }
@@ -129,8 +130,6 @@ export function markdownToMrkdwn(md: string): string {
 
     out.push(transformed);
   }
-  // If the input ended with an unclosed fence, flush it as-is (no realignment —
-  // we'd be guessing at boundaries).
   if (inFence) {
     out.push(fenceOpener);
     out.push(...fenceBuf);
@@ -139,40 +138,44 @@ export function markdownToMrkdwn(md: string): string {
 }
 
 /**
- * Detect ASCII-aligned tables that the LLM pre-formatted itself (against our
- * instructions) and re-render them with proper visual-width alignment via
- * `renderAsciiTable`.
+ * If a code fence's content looks like tabular ASCII (≥2 non-empty lines, at least
+ * 2 of them have an internal 2+-space gap typical of ASCII column padding), strip
+ * the fence and emit each line as a bullet with collapsed whitespace. Returns null
+ * if the content doesn't look tabular (then it stays as a code fence — preserves
+ * real code blocks).
  *
- * Why: when the LLM emits something like:
- *   ```
- *   Tipo         Ord  Revenue
- *   Wholesale    10   $11,466
- *   Wholesale Ref 3   $   497
- *   ```
- * its column-width math drifts (longer cells like "Wholesale Ref" stick out)
- * and we can't trust it. We detect tabular shape (≥2 lines split by 2+ spaces
- * into the same column count) and rewrite with string-width-based padding.
- *
- * If the fence content doesn't look tabular, return as-is.
+ * We do NOT try to parse column boundaries here: ASCII spacing is ambiguous (the
+ * LLM right-pads currency cells like "$   497", so 3-space runs can be inside a
+ * cell, not between cells). Once the fence is stripped Slack renders in proportional
+ * font and collapses runs of whitespace anyway, so just bulleting each line gives a
+ * readable result without losing data — and it's identical on mobile and desktop.
  */
-function maybeRealignAsciiTable(fenceLines: string[]): string[] {
-  if (fenceLines.length < 2) return fenceLines;
-  // Split each non-empty line on runs of 2+ spaces.
-  const tokenized = fenceLines.map((l) => {
-    if (!l.trim()) return null;
-    return l.split(/ {2,}/).map((t) => t.trim()).filter((t) => t.length > 0);
+function maybeConvertCodeFenceToBulletList(fenceLines: string[]): string[] | null {
+  if (fenceLines.length < 2) return null;
+  const nonEmpty = fenceLines.filter((l) => l.trim().length > 0);
+  if (nonEmpty.length < 2) return null;
+  const linesWithMultiSpace = nonEmpty.filter((l) => / {2,}/.test(l));
+  if (linesWithMultiSpace.length < 2) return null;
+  return nonEmpty.map((l) => `• ${l.trim().replace(/\s+/g, ' ')}`);
+}
+
+/**
+ * Render parsed rows as a bullet list. The first row is treated as the header
+ * and dropped (its values are usually field names like "Tipo / Ord / Revenue"
+ * that aren't useful as a bullet). Each subsequent row becomes:
+ *   `• *<col1>*: <col2>, <col3>, …`
+ * so the first column reads as a label and the rest follows as a comma list.
+ */
+function renderTableAsBullets(rows: string[][]): string[] {
+  if (rows.length === 0) return [];
+  const dataRows = rows.length >= 2 ? rows.slice(1) : rows;
+  return dataRows.map((cells) => {
+    const [first, ...rest] = cells;
+    const label = (first ?? '').trim();
+    const values = rest.map((c) => c.trim()).filter((c) => c.length > 0);
+    if (values.length === 0) return `• ${label}`;
+    return `• *${label}*: ${values.join(', ')}`;
   });
-  const tableRows = tokenized.filter((r): r is string[] => r !== null);
-  if (tableRows.length < 2) return fenceLines;
-  const ncol = tableRows[0].length;
-  if (ncol < 2) return fenceLines; // not tabular
-  // Every non-empty row must have the same column count to be a table.
-  if (!tableRows.every((r) => r.length === ncol)) return fenceLines;
-  const widths = new Array(ncol).fill(0);
-  for (const r of tableRows) for (let c = 0; c < ncol; c++) widths[c] = Math.max(widths[c], stringWidth(r[c]));
-  return tableRows.map((cells) =>
-    cells.map((cell, c) => padToWidth(cell, widths[c])).join('  ').trimEnd(),
-  );
 }
 
 function isTableHeader(line: string): boolean {
@@ -190,29 +193,6 @@ function splitRow(row: string): string[] {
     .replace(/^\||\|$/g, '')
     .split('|')
     .map((c) => c.trim().replace(/\*\*(.+?)\*\*/g, '$1'));
-}
-
-/**
- * Pad `cell` with trailing spaces until its rendered width (via string-width) is `target`.
- * `string.padEnd` uses `.length` (UTF-16 code units), which silently misaligns columns
- * whenever a cell contains an emoji, em-dash, ellipsis, or any wide/zero-width character.
- * Slack mobile and desktop monospace fonts disagree on those characters' widths, so the
- * misalignment shows up only on one platform.
- */
-function padToWidth(cell: string, target: number): string {
-  const pad = target - stringWidth(cell);
-  return pad <= 0 ? cell : cell + ' '.repeat(pad);
-}
-
-function renderAsciiTable(rows: string[]): string[] {
-  const parsed = rows.map(splitRow).filter((r) => !r.every((c) => /^-+$/.test(c) || c === ''));
-  if (parsed.length === 0) return [];
-  const ncol = Math.max(...parsed.map((r) => r.length));
-  const widths = new Array(ncol).fill(0);
-  for (const r of parsed) for (let c = 0; c < r.length; c++) widths[c] = Math.max(widths[c], stringWidth(r[c]));
-  return parsed.map((r) =>
-    r.map((cell, c) => padToWidth(cell, widths[c])).join('  ').trimEnd(),
-  );
 }
 
 function splitParagraphs(md: string): string[] {

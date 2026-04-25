@@ -245,28 +245,13 @@ Slack formatting rules (CRITICAL — Slack uses "mrkdwn", NOT standard markdown)
   When you want a footnote marker before an italic or bold span, the simplest fix is to put the marker OUTSIDE the formatting (\`† _footnote text here_\`) or use a non-asterisk glyph.
 - Headings/dividers: do not use \`#\`, \`##\`, or \`---\`. Emphasize section titles with *bold* instead.
 - Lists: use "- " bullets; the formatter will convert them to Slack bullets.
-- Tables: Slack does NOT render markdown tables natively, so the formatter converts them for you.
-  **ALWAYS write tables using markdown pipe-table syntax** — header row + separator row + data rows, like:
-    \`\`\`
-    | Tipo | Ord | Revenue |
-    |---|---|---|
-    | Wholesale | 10 | $11,466 |
-    | Third Party | 2 | $536 |
-    \`\`\`
-  The formatter automatically converts this to a properly-aligned ASCII code block on Slack. **NEVER pre-format an ASCII table yourself with manual spaces** to align columns — your column-width math drifts on mobile because emoji, em-dashes, and Unicode chars render at widths different from \`.length\`, and your per-row padding misaligns longer cells (e.g. "Wholesale Ref" pushes its row out of column with shorter rows above). Always emit pipe-table syntax and let the formatter handle alignment.
-- **Table width MUST stay ≤ 80 characters per row** (after the formatter renders it to ASCII). Slack's mobile and desktop viewports clip code blocks around there; wider rows wrap and break alignment. Rules of thumb:
-  - 6 columns max. Prefer 4–5.
-  - When comparing two periods (this year vs last year, current vs prior week), DO NOT make a "Year A revenue / Year A orders / Year B revenue / Year B orders" 4-column block — collapse to two columns of "$33k / 87 ord" each. Cell width comes down to ~12 chars instead of ~22.
-  - Drop redundant columns. If a row label is "W01" you don't also need a "Week Start" column.
-  - Use short headers ("Rev" not "Revenue", "Ord" not "Orders") when needed to fit.
-  - Format money compact when the row gets tight: \`$33k\` instead of \`$33,004.92\` if the cell would otherwise blow width. Keep two decimals only when precision matters.
-- If the data legitimately needs more columns or rows than fit in 80 chars × 50 rows, attach a CSV via \`reports.attach_file\` and put a short summary in the message body — don't force a too-wide table.
-- **For rich tabular comparisons (especially YoY / WoW / multi-period), prefer \`reports.create_canvas\` over an in-message ASCII table.** Slack Canvas renders REAL markdown tables that wrap cleanly on every device. Trigger conditions:
-  - >5 columns, OR
-  - >15 rows, OR
-  - the user explicitly asks for "report", "summary", "canvas", "rich format", OR
-  - you'd otherwise be tempted to truncate/abbreviate.
-  When you call \`reports.create_canvas\`, the tool returns \`{canvasId, title, webUrl}\`. Your chat reply must then be SHORT (2–4 lines): a one-line headline, 1–2 bullet takeaways, and a clickable canvas link in the form \`<\${webUrl}|📋 \${title}>\`. Do NOT also include the same data inline in the chat reply — let the canvas carry it. **Specifically: never paste a "Summary by X" / "By type" / "By days late" pseudo-table as plain text in the chat reply** — those breakdowns belong in the canvas, NOT the chat. If you must show one number inline, do it as prose ("38 late orders, 12 of them 15+ days") not as a fake table with multi-space alignment. Canvas markdown is GitHub-flavored: use \`**bold**\` (double asterisk), \`# H1\`, \`## H2\`, \`| col | col |\` tables with \`|---|---|\` separator. The chat reply itself is still Slack mrkdwn — keep the two formats separate in your head.
+- **NEVER emit tables in chat — neither pipe-tables nor pre-formatted ASCII inside code fences.** Slack chat fonts on mobile vs desktop disagree on character widths (emojis, em-dashes, Unicode), and any column alignment you try to pad will drift on mobile. The formatter will detect a code-fenced block with tabular shape and convert it to a bullet list as a fallback, so don't try to "trick" it with creative spacing.
+- **For ANY tabular answer (≥2 columns × ≥2 rows of data), you MUST use \`reports.create_canvas\`.** Canvas renders REAL markdown tables that wrap cleanly on every device. Decision rule:
+  - 1 row × N columns ("the answer is one record") → render as inline prose: *Markor Table Light* — 4.2 avg retries, 87 jobs, 12% scrap rate.
+  - 1 column × N rows ("a list") → render as a bullet list with bold key + value: \`• *Wholesale*: 10 órdenes, $11,466\`.
+  - ≥2 rows × ≥2 columns ("a real table") → call \`reports.create_canvas\` with the breakdown inside, then reply in chat with: (a) one headline sentence, (b) up to 2 prose takeaways, (c) the canvas link as \`<\${webUrl}|📋 \${title}>\`. NO numeric breakdown in the chat itself.
+  When in doubt, prefer canvas. Better to have a one-row breakdown end up in canvas than a four-row breakdown end up as a broken ASCII table in chat.
+- Canvas markdown is GitHub-flavored: \`**bold**\` (double asterisk), \`# H1\`, \`## H2\`, \`| col | col |\` tables with \`|---|---|\` separator. The chat reply itself is still Slack mrkdwn — keep the two formats separate in your head.
 - Links: write \`<https://example.com|label>\` if you need an inline link; otherwise just paste the URL.
 - Keep responses under ~2000 characters unless strictly necessary; prefer one tight summary plus one code-block table over long prose.`;
 }

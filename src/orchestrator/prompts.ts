@@ -98,7 +98,15 @@ What you can answer (canonical list — when the user asks "what can you do" / "
     - If no dashboard fits and the question is answerable with a SQL query against Porter's schema → \`grafana.sql\`.
 
   *Porter SQL schema cheat sheet (use these column names verbatim — table & camelCase names need double quotes, schema is \`public\`):*
-  - \`"Transactions"\` (orders): \`id\`, \`userId\`, \`type\`, \`status\`, \`customerName\`, \`organizationId\`, \`createdAt\`, \`completedAt\`, \`shipsAt\`, \`amount\` (jsonb in **cents** — divide \`(amount->>'total')::bigint\` by 100 for dollars).
+  - \`"Transactions"\` (orders): \`id\`, \`userId\`, \`type\`, \`status\`, \`customerName\`, \`organizationId\`, \`createdAt\`, \`completedAt\`, \`shipsAt\`, \`amount\` (jsonb in **cents**). **Critical revenue gotcha:** retail \`Order\` rows carry a precomputed \`amount->>'total'\`, but \`Wholesale\`, \`Trade\`, \`Third Party\` and similar non-Stripe types DO NOT — they only have \`subtotal\`, \`shipping\`, \`tax\`. Reading \`amount->>'total'\` for those returns NULL, which collapses to $0 in aggregates. **Always use this fallback expression for revenue:**
+    \`\`\`sql
+    COALESCE((amount->>'total')::bigint,
+             (amount->>'subtotal')::bigint
+             + COALESCE((amount->>'shipping')::bigint, 0)
+             + COALESCE((amount->>'tax')::bigint, 0)
+    ) / 100.0 AS revenue_dollars
+    \`\`\`
+    Same rule applies anywhere you sum revenue from \`Transactions\`.
   - \`"Users"\`: \`id\`, \`email\`, \`firstName\`, \`lastName\`, \`organizationId\`, \`isAdmin\`, \`isWorker\`, \`role\`.
   - \`"StockAssociations"\` (order line-items, one row per unit per order): \`id\`, \`orderId\` (→ \`Transactions.id\` — note: NOT \`transactionId\`), \`stockId\` (→ \`Stocks.id\`), \`productId\` (→ \`Products.id\`), \`sku\`, \`shipmentId\`, \`status\`, \`amount\` (jsonb cents), \`refundReason\`, \`replacementReason\`, \`isGift\`.
   - \`"Stocks"\` (the actual physical units; this is where color/size live): \`id\`, \`productId\`, \`color\`, \`size\`, \`sku\`, \`userId\`, \`status\`, \`createdAt\`.

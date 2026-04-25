@@ -164,6 +164,7 @@ function buildPorterTools(conn: GantriPorterConnector): ToolDef[] {
       o.customerName ??
       ([user.firstName, user.lastName].filter(Boolean).join(' ') || null);
     const userId = o.userId ?? user.id ?? null;
+    const totalCents = computeTotalCents(amt);
     return {
       id: o.id,
       type: o.type,
@@ -180,7 +181,7 @@ function buildPorterTools(conn: GantriPorterConnector): ToolDef[] {
       shipmentStatus: o.shipmentStatus ?? null,
       shippingTrackingNumber: o.shippingTrackingNumber ?? null,
       shippingProvider: o.shippingProvider ?? null,
-      totalDollars: typeof amt.total === 'number' ? amt.total / 100 : null,
+      totalDollars: totalCents === null ? null : totalCents / 100,
       subtotalDollars: typeof amt.subtotal === 'number' ? amt.subtotal / 100 : null,
       shippingDollars: typeof amt.shipping === 'number' ? amt.shipping / 100 : null,
       taxDollars: typeof amt.tax === 'number' ? amt.tax / 100 : null,
@@ -440,7 +441,7 @@ function buildPorterTools(conn: GantriPorterConnector): ToolDef[] {
         });
         if (page === 1) totalCount = data.allOrders;
         for (const o of data.orders) {
-          const total = typeof o.amount?.total === 'number' ? o.amount.total : 0;
+          const total = computeTotalCents(o.amount ?? {}) ?? 0;
           totalRevenueCents += total;
           const sKey = o.status ?? 'unknown';
           statusCounts[sKey] ??= { count: 0, revenueDollars: 0 };
@@ -478,4 +479,27 @@ function buildPorterTools(conn: GantriPorterConnector): ToolDef[] {
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
+}
+
+/**
+ * Compute the order total in cents from the Porter `amount` JSON.
+ *
+ * Retail `Order` transactions store a precomputed `total` (already net of
+ * discounts, including tax + shipping). Wholesale, Trade, and some other
+ * non-Stripe transaction types skip `total` entirely — they just carry the
+ * component pieces. Falling through to 0 in those cases makes wholesale
+ * revenue collapse to $0 in any aggregate.
+ *
+ * Resolution order:
+ *  1. `amount.total` if present → already the right number.
+ *  2. Sum of `subtotal + shipping + tax` (the canonical billed components).
+ *  3. null when nothing is parseable.
+ */
+function computeTotalCents(amt: Record<string, unknown>): number | null {
+  if (typeof amt.total === 'number') return amt.total;
+  const sub = typeof amt.subtotal === 'number' ? amt.subtotal : null;
+  const ship = typeof amt.shipping === 'number' ? amt.shipping : 0;
+  const tax = typeof amt.tax === 'number' ? amt.tax : 0;
+  if (sub === null) return null;
+  return sub + ship + tax;
 }

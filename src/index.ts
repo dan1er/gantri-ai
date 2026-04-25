@@ -11,6 +11,12 @@ import { GantriPorterConnector } from './connectors/gantri-porter/gantri-porter-
 import { GrafanaConnector } from './connectors/grafana/grafana-connector.js';
 import { Orchestrator } from './orchestrator/orchestrator.js';
 import { buildSlackApp } from './slack/app.js';
+import { ReportSubscriptionsRepo } from './reports/reports-repo.js';
+import { ScheduledReportsConnector } from './reports/reports-connector.js';
+import { compilePlan } from './reports/plan-compiler.js';
+import { executePlan } from './reports/plan-executor.js';
+import { computeNextFireAt } from './reports/cron-utils.js';
+import { ReportsRunner } from './reports/runner.js';
 
 async function main() {
   const env = loadEnv();
@@ -63,6 +69,26 @@ async function main() {
     maxOutputTokens: 16384,
   });
 
+  const reportsRepo = new ReportSubscriptionsRepo(supabase);
+  const reportsConnector = new ScheduledReportsConnector({
+    repo: reportsRepo,
+    getActor: () => {
+      const actor = orchestrator.getActiveActor();
+      if (!actor) throw new Error('reports.* tool called without an actor context');
+      return actor;
+    },
+    compile: (intent) =>
+      compilePlan({
+        intent,
+        registry,
+        claude,
+        model: 'claude-sonnet-4-6',
+      }),
+    execute: (plan, runAt, timezone) => executePlan({ plan, registry, runAt, timezone }),
+    nextFireAt: (cron, tz, after) => computeNextFireAt(cron, tz, after),
+  });
+  registry.register(reportsConnector);
+
   const usersRepo = new AuthorizedUsersRepo(supabase);
   const conversationsRepo = new ConversationsRepo(supabase);
 
@@ -85,8 +111,28 @@ async function main() {
     res.status(ok ? 200 : 503).json({ ok, northbeam: nb, gantriPorter: gp, grafana: gf });
   });
 
+  const reportsRunner = new ReportsRunner({
+    repo: reportsRepo,
+    registry,
+    slackClient: app.client,
+    slackBotToken: env.SLACK_BOT_TOKEN,
+    claude,
+    compilerModel: 'claude-sonnet-4-6',
+  });
+
+  receiver.router.post('/internal/run-due-reports', async (req, res) => {
+    const auth = req.header('x-internal-secret');
+    if (!process.env.INTERNAL_SHARED_SECRET || auth !== process.env.INTERNAL_SHARED_SECRET) {
+      return res.status(403).json({ ok: false, error: 'forbidden' });
+    }
+    const result = await reportsRunner.tick();
+    res.json({ ok: true, result });
+  });
+
   await app.start(env.PORT);
   logger.info({ port: env.PORT }, 'gantri-ai-bot listening');
+
+  reportsRunner.start();
 }
 
 main().catch((err) => {

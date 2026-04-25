@@ -147,6 +147,16 @@ function issuesInBlock(
           out.push(`block #${index} (text): placeholder \${${path}} resolves to undefined.`);
         }
       }
+      // Detect hand-built ASCII tables (≥3 lines with pipe-delimited cells).
+      // Slack does not align them and the columns visibly misregister; the
+      // LLM must use a `table` block instead.
+      const lines = block.text.split('\n');
+      const pipeRows = lines.filter((l) => /\|.*\|/.test(l)).length;
+      if (pipeRows >= 3) {
+        out.push(
+          `block #${index} (text) contains a hand-built ASCII table (${pipeRows} pipe-delimited rows). Slack will not align it. Use a \`table\` block whose \`from\` points at an array-of-objects, OR rewrite as plain prose / multiple short text blocks.`,
+        );
+      }
       return out;
     }
     case 'table':
@@ -283,8 +293,23 @@ KNOWN TOOL RESULT SHAPES (use these field names exactly):
 - northbeam.orders_list: { orders: [...], allOrders, page, ... }
 
 OUTPUT TIPS:
-- For table blocks, "from" must point at an array of OBJECTS. grafana.sql returns rows as arrays-of-cells, so wrap aggregations into named columns (e.g. \`SELECT count(*) AS order_count, sum(...) AS revenue\`) and run two separate steps for current/previous, then use TEXT blocks to render. Or build a single 2-row query and use a table.
-- For comparing two periods, the simplest pattern is two grafana.sql steps with rich SELECTs and a text block that interpolates from each.${args.feedback ? `\n\nFEEDBACK FROM PREVIOUS ATTEMPT:\n${args.feedback}` : ''}
+- **NEVER hand-build ASCII tables inside a text block.** Do not write \`| col | col |\` rows or \`---\` dividers in a text. Slack will not align them and the columns will visibly misregister. If you want tabular presentation, ALWAYS use the \`table\` block type — it auto-aligns columns at render time.
+- The \`table\` block requires \`from\` to resolve to an array of OBJECTS, where each object has the fields named in \`columns[].field\`. Two ways to produce that:
+  - **Single grafana.sql step** with one row per period using UNION ALL and explicit aliases. Example for "this week vs last week":
+    \`\`\`sql
+    SELECT 'Current Week' AS period, COUNT(*) AS orders, SUM((amount->>'total')::bigint)/100.0 AS revenue
+    FROM "Transactions" t
+    WHERE t.type IN ('Order','Wholesale','Trade','Third Party')
+      AND t."createdAt" >= timestamp '<this_week_start>' AND t."createdAt" <= timestamp '<this_week_end>'
+    UNION ALL
+    SELECT 'Previous Week', COUNT(*), SUM((amount->>'total')::bigint)/100.0
+    FROM "Transactions" t
+    WHERE t.type IN ('Order','Wholesale','Trade','Third Party')
+      AND t."createdAt" >= timestamp '<prev_week_start>' AND t."createdAt" <= timestamp '<prev_week_end>'
+    \`\`\`
+    Pair this with a \`table\` block whose \`from\` is e.g. \`"comparison.rows"\` and \`columns\` are \`[{header:'Period',field:'period'},{header:'Orders',field:'orders',format:'integer'},{header:'Revenue',field:'revenue',format:'currency_dollars'}]\`. Note: grafana.sql returns rows as arrays-of-cells positioned in column order, so to use a table block you must use a JSON-object-shaped step result instead — see next bullet.
+  - **CAVEAT:** \`grafana.sql\` returns \`{ fields: [...], rows: [[...]] }\` — \`rows\` is an array of CELL ARRAYS, not objects. \`table\` blocks won't pull \`row.period\` from a cell array. To use a \`table\` block with grafana.sql you have two choices: (a) prefer text blocks for grafana.sql results and reference \`\${alias.rows[0][0]}\` style; or (b) use Porter API tools (\`gantri.order_stats\`, \`gantri.orders_query\`) which return proper objects.
+- For comparing two periods of \`gantri.order_stats\` results: run two steps (one per period) and use TWO text blocks (one per period) with bold labels like \`*Current week:* \${current.totalOrders} orders, \${current.totalRevenueDollars} dollars\`. No manual table needed. The deltas can be a third text line written narratively, e.g. \`Net change: \${current.totalOrders} vs \${previous.totalOrders} orders\`. Templates do NOT support arithmetic — do not write \`\${a - b}\` or \`\${a} − \${b} = ...\`.${args.feedback ? `\n\nFEEDBACK FROM PREVIOUS ATTEMPT:\n${args.feedback}` : ''}
 
 Output the JSON now.`;
 }

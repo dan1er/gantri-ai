@@ -82,6 +82,24 @@ What you can answer (canonical list — when the user asks "what can you do" / "
     - A marketing *attribution* question (ROAS, touchpoints, channel-level spend) → Northbeam.
     - If no dashboard fits and the question is answerable with a SQL query against Porter's schema → \`grafana.sql\`.
 
+  *Porter SQL schema cheat sheet (use these column names verbatim — table & camelCase names need double quotes, schema is \`public\`):*
+  - \`"Transactions"\` (orders): \`id\`, \`userId\`, \`type\`, \`status\`, \`customerName\`, \`organizationId\`, \`createdAt\`, \`completedAt\`, \`shipsAt\`, \`amount\` (jsonb in **cents** — divide \`(amount->>'total')::bigint\` by 100 for dollars).
+  - \`"Users"\`: \`id\`, \`email\`, \`firstName\`, \`lastName\`, \`organizationId\`, \`isAdmin\`, \`isWorker\`, \`role\`.
+  - \`"StockAssociations"\` (order line-items, one row per unit per order): \`id\`, \`orderId\` (→ \`Transactions.id\` — note: NOT \`transactionId\`), \`stockId\` (→ \`Stocks.id\`), \`productId\` (→ \`Products.id\`), \`sku\`, \`shipmentId\`, \`status\`, \`amount\` (jsonb cents), \`refundReason\`, \`replacementReason\`, \`isGift\`.
+  - \`"Stocks"\` (the actual physical units; this is where color/size live): \`id\`, \`productId\`, \`color\`, \`size\`, \`sku\`, \`userId\`, \`status\`, \`createdAt\`.
+  - \`"Products"\`: \`id\`, \`name\`, \`colors\` (text[]), \`active\`, \`skuPrices\` (jsonb), \`skuManufacturerPrices\` (jsonb).
+  - \`"Shipments"\`: \`id\`, \`orderId\`, \`status\`, \`shipsAt\`, \`shippingTrackingNumber\`, \`shippingProvider\`.
+  - \`"Organizations"\`: \`id\`, \`name\` (use this when asked about wholesale customers by company name and \`organizationId\` is set on the transaction).
+  - \`"ProductReviews"\`, \`"NpsReviews"\`, \`"PostPurchaseSurveys"\` for sentiment / CSAT data.
+  - Common JOINs:
+    - Order ↔ user: \`JOIN "Users" u ON u.id = t."userId"\`
+    - Order ↔ line items: \`JOIN "StockAssociations" sa ON sa."orderId" = t.id\`
+    - Line items ↔ stocks (color/size/etc.): \`JOIN "Stocks" s ON s.id = sa."stockId"\`
+    - Line items ↔ product: \`JOIN "Products" p ON p.id = sa."productId"\`
+  - To count *units sold* (not orders), aggregate over \`StockAssociations\` (one row per unit) — do NOT count distinct order ids.
+  - Default to \`t.type IN ('Order','Wholesale','Trade','Third Party')\` for "sold" questions to exclude refunds, replacements, marketing, R&D, designer, made.
+  - To exclude cancelled orders use \`t.status NOT IN ('Cancelled','Lost')\`. Most "best selling" / "most popular" questions should also exclude refunds via the type filter above; consider netting refunds via a separate count if accuracy matters.
+
 *8. Catalogs / grounding*
   • \`northbeam.list_breakdowns\` — enumerate valid breakdown keys and their allowed values (Platform, Category, Targeting, Forecast, Revenue Source)
   • \`northbeam.list_metrics\` — enumerate valid metric IDs with descriptions

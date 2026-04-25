@@ -59,7 +59,7 @@ async function main() {
     registry,
     claude,
     model: 'claude-sonnet-4-6',
-    maxIterations: 5,
+    maxIterations: 8,
     maxOutputTokens: 16384,
   });
 

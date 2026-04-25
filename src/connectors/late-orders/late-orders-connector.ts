@@ -81,18 +81,24 @@ interface OrderOut {
   daysLate: number;
   totalDollars: number | null;
   jobCount: number;
-  attentionCount: number;
-  reworkCount: number;
-  lateJobCount: number;
-  exceededCount: number;
+  failedJobCount: number;        // Jobs.status='Failed'
+  cancelledJobCount: number;     // Jobs.status='Cancelled'
+  reworkJobCount: number;        // Jobs with attempt > 1 (true reworks, not the noisy isRework flag)
+  maxAttempt: number;            // worst-case rework number across all jobs
+  lostPartCount: number;         // Stocks.status='Cancelled' for this order's stocks (parts scrapped)
+  attentionCount: number;        // hasAttention flag — kept but deprioritized
+  /** Top failure-mode keys derived from Jobs.failedReason.reason where status='Fail',
+   *  cleaned up: e.g. ['Print: gunk', 'Print: layer lines'] sorted by count desc. */
+  failureModes: string[];
   primaryCause: string;
-  /** One-line, table-friendly cause description. Combines the primaryCause
-   *  category, the most-flagged job descriptions, and any text causes from
-   *  the `Jobs.cause` field. Capped at ~80 chars so it fits cleanly in a
-   *  Slack canvas table cell. */
+  /** One-line, table-friendly cause description suitable for a single Cause column
+   *  (capped at ~90 chars). Examples:
+   *    "Part scrapped (3) + rework gunk, layer lines"
+   *    "Reworked 4× — feature damage, cracking"
+   *    "Has attention (78 jobs)"
+   */
   causeSummary: string;
   flaggedJobs: string[];
-  causes: string[];
   adminLink: string;
 }
 
@@ -126,13 +132,7 @@ WITH late AS (
              + COALESCE((amount->>'tax')::numeric, 0)) / 100.0 AS total_dollars
   FROM "Transactions" t
   WHERE t."isLateOrder" = true
-    -- Exclude completed statuses so we only see actionable in-flight orders.
-    -- "Partially shipped" / "Partially delivered" stay because they still have
-    -- open lines.
     AND t.status NOT IN ('Cancelled', 'Lost', 'Refunded', 'Delivered', 'Shipped', 'Partially refunded')
-    -- Cap to the last 365 days. Orders flagged late but lingering for years
-    -- are zombie data (should have been Cancelled or Lost long ago) and
-    -- aren't actionable.
     AND t."shipsAt" >= NOW() - INTERVAL '365 days'
     ${filterClause}
 ),
@@ -140,15 +140,48 @@ job_summary AS (
   SELECT
     j."orderId",
     COUNT(*)::int AS job_count,
+    COUNT(*) FILTER (WHERE j.status = 'Failed')::int AS failed_job_count,
+    COUNT(*) FILTER (WHERE j.status = 'Cancelled')::int AS cancelled_job_count,
+    COUNT(*) FILTER (WHERE COALESCE(j.attempt, 1) > 1)::int AS rework_job_count,
+    COALESCE(MAX(j.attempt), 1)::int AS max_attempt,
     COUNT(*) FILTER (WHERE j."hasAttention")::int AS attention_count,
-    COUNT(*) FILTER (WHERE j."isRework")::int AS rework_count,
-    COUNT(*) FILTER (WHERE j."isLateOrder")::int AS late_job_count,
-    COUNT(*) FILTER (WHERE j."exceededCycleTime" > 0)::int AS exceeded_count,
-    array_agg(j.description) FILTER (WHERE j."hasAttention" OR j."isRework" OR j."exceededCycleTime" > 0) AS flagged_descriptions,
-    array_agg(DISTINCT j.cause) FILTER (WHERE j.cause IS NOT NULL AND j.cause <> '') AS distinct_causes
+    array_agg(DISTINCT j.description) FILTER (
+      WHERE j.status = 'Failed'
+         OR j.status = 'Cancelled'
+         OR COALESCE(j.attempt, 1) > 1
+         OR j."hasAttention"
+    ) AS flagged_descriptions
   FROM "Jobs" j
   WHERE j."orderId" IN (SELECT id FROM late)
   GROUP BY j."orderId"
+),
+stock_summary AS (
+  SELECT
+    sa."orderId",
+    COUNT(*) FILTER (WHERE s.status = 'Cancelled')::int AS lost_part_count
+  FROM "StockAssociations" sa
+  JOIN "Stocks" s ON s.id = sa."stockId"
+  WHERE sa."orderId" IN (SELECT id FROM late)
+  GROUP BY sa."orderId"
+),
+failure_modes AS (
+  SELECT
+    "orderId",
+    array_agg(failure_key ORDER BY n DESC) AS modes,
+    array_agg(n ORDER BY n DESC) AS mode_counts
+  FROM (
+    SELECT
+      j."orderId",
+      r.failure_key::text AS failure_key,
+      COUNT(*)::int AS n
+    FROM "Jobs" j
+    JOIN late lo ON lo.id = j."orderId"
+    CROSS JOIN LATERAL jsonb_each((j."failedReason"->'reason')::jsonb) AS r(failure_key, failure_val)
+    WHERE j.status = 'Failed'
+      AND failure_val->>'status' = 'Fail'
+    GROUP BY j."orderId", r.failure_key
+  ) per_mode
+  GROUP BY "orderId"
 )
 SELECT
   l.id,
@@ -160,14 +193,18 @@ SELECT
   l.days_late,
   l.total_dollars,
   COALESCE(js.job_count, 0) AS job_count,
+  COALESCE(js.failed_job_count, 0) AS failed_job_count,
+  COALESCE(js.cancelled_job_count, 0) AS cancelled_job_count,
+  COALESCE(js.rework_job_count, 0) AS rework_job_count,
+  COALESCE(js.max_attempt, 1) AS max_attempt,
   COALESCE(js.attention_count, 0) AS attention_count,
-  COALESCE(js.rework_count, 0) AS rework_count,
-  COALESCE(js.late_job_count, 0) AS late_job_count,
-  COALESCE(js.exceeded_count, 0) AS exceeded_count,
   js.flagged_descriptions,
-  js.distinct_causes
+  COALESCE(ss.lost_part_count, 0) AS lost_part_count,
+  fm.modes AS failure_modes
 FROM late l
 LEFT JOIN job_summary js ON js."orderId" = l.id
+LEFT JOIN stock_summary ss ON ss."orderId" = l.id
+LEFT JOIN failure_modes fm ON fm."orderId" = l.id
 ORDER BY l.days_late DESC
 LIMIT ${args.limit};
 `;
@@ -179,11 +216,17 @@ function rowsToOrders(fields: string[], rows: unknown[][]): OrderOut[] {
   for (const row of rows) {
     const id = Number(row[idx('id')]);
     const flagged = parseStringArray(row[idx('flagged_descriptions')]);
-    const causes = parseStringArray(row[idx('distinct_causes')]);
+    const failedJobCount = Number(row[idx('failed_job_count')] ?? 0);
+    const cancelledJobCount = Number(row[idx('cancelled_job_count')] ?? 0);
+    const reworkJobCount = Number(row[idx('rework_job_count')] ?? 0);
+    const maxAttempt = Number(row[idx('max_attempt')] ?? 1);
     const attentionCount = Number(row[idx('attention_count')] ?? 0);
-    const reworkCount = Number(row[idx('rework_count')] ?? 0);
-    const lateJobCount = Number(row[idx('late_job_count')] ?? 0);
-    const exceededCount = Number(row[idx('exceeded_count')] ?? 0);
+    const lostPartCount = Number(row[idx('lost_part_count')] ?? 0);
+    const failureModes = parseStringArray(row[idx('failure_modes')]).map(humanizeFailureMode);
+    const stats = {
+      failedJobCount, cancelledJobCount, reworkJobCount, maxAttempt,
+      attentionCount, lostPartCount, failureModes,
+    };
     out.push({
       id,
       type: String(row[idx('type')] ?? ''),
@@ -194,17 +237,16 @@ function rowsToOrders(fields: string[], rows: unknown[][]): OrderOut[] {
       daysLate: Number(row[idx('days_late')] ?? 0),
       totalDollars: row[idx('total_dollars')] != null ? Math.round(Number(row[idx('total_dollars')]) * 100) / 100 : null,
       jobCount: Number(row[idx('job_count')] ?? 0),
+      failedJobCount,
+      cancelledJobCount,
+      reworkJobCount,
+      maxAttempt,
+      lostPartCount,
       attentionCount,
-      reworkCount,
-      lateJobCount,
-      exceededCount,
-      primaryCause: derivePrimaryCause({ attentionCount, reworkCount, lateJobCount, exceededCount, causes }),
-      causeSummary: deriveCauseSummary({
-        attentionCount, reworkCount, lateJobCount, exceededCount,
-        causes, flagged,
-      }),
+      failureModes,
+      primaryCause: derivePrimaryCause(stats),
+      causeSummary: deriveCauseSummary({ ...stats, flagged }),
       flaggedJobs: flagged.slice(0, 5),
-      causes,
       adminLink: `http://admin.gantri.com/orders/${id}`,
     });
   }
@@ -225,60 +267,91 @@ function parseStringArray(value: unknown): string[] {
   return [];
 }
 
-export function derivePrimaryCause(input: {
+export interface CauseStats {
+  failedJobCount: number;
+  cancelledJobCount: number;
+  reworkJobCount: number;
+  maxAttempt: number;
   attentionCount: number;
-  reworkCount: number;
-  lateJobCount: number;
-  exceededCount: number;
-  causes: string[];
-}): string {
-  if (input.attentionCount > 0) return 'Has attention';
-  if (input.reworkCount > 0) return 'Rework';
-  if (input.exceededCount > 0) return 'Exceeded cycle time';
-  if (input.lateJobCount > 0) return 'Late job(s)';
-  if (input.causes.length > 0) return input.causes[0];
+  lostPartCount: number;
+  failureModes: string[];
+}
+
+/**
+ * Pick the dominant cause category for an order. Priority reflects what's
+ * actionable for ops:
+ *   1. Lost parts (stocks scrapped) — biggest production hit, longest tail.
+ *   2. Heavy rework (≥2 attempts on the same op) — quality issues compounding.
+ *   3. Failed jobs with concrete failure modes — actively blocked on rework.
+ *   4. Mass cancellation (jobs cancelled, parts replaced).
+ *   5. Has attention — generic "needs human review" flag (noisiest).
+ *   6. Unknown.
+ */
+export function derivePrimaryCause(s: CauseStats): string {
+  if (s.lostPartCount > 0) return 'Part scrapped';
+  if (s.maxAttempt >= 3) return `Reworked ${s.maxAttempt}×`;
+  if (s.failedJobCount > 0 && s.failureModes.length > 0) return s.failureModes[0];
+  if (s.failedJobCount > 0) return 'Failed jobs';
+  if (s.reworkJobCount > 0) return 'Reworked';
+  if (s.cancelledJobCount > 0) return 'Cancelled jobs';
+  if (s.attentionCount > 0) return 'Needs attention';
   return 'Unknown';
 }
 
 /**
- * Compose a one-line cause summary suitable for a single table cell.
- * Format: "<category>: <top job descriptions> [(<text causes>)]" capped at
- * ~80 characters. Designed so a row in a Slack canvas's "Cause" column reads
- * like "Has attention: Lid, Paint Tool (duplicate)" rather than a flat
- * categorical label.
+ * Compose a one-line cause summary suitable for a single Cause column cell.
+ * Combines counts (parts scrapped, rework attempts) with concrete failure
+ * modes from the failedReason JSON. Capped at ~90 characters.
+ *
+ * Example outputs:
+ *   "Part scrapped (3) — gunk, layer lines (failed jobs: 12)"
+ *   "Reworked 4× — feature damage, cracking"
+ *   "Failed jobs (5): gunk, overhang texture, warping"
+ *   "Needs attention (78 jobs flagged)"
  */
-export function deriveCauseSummary(input: {
-  attentionCount: number;
-  reworkCount: number;
-  lateJobCount: number;
-  exceededCount: number;
-  causes: string[];
-  flagged: string[];
-}): string {
-  const category = derivePrimaryCause({
-    attentionCount: input.attentionCount,
-    reworkCount: input.reworkCount,
-    lateJobCount: input.lateJobCount,
-    exceededCount: input.exceededCount,
-    causes: input.causes,
-  });
-  // Top distinct flagged job descriptions, normalized + deduped.
-  const seen = new Set<string>();
-  const tops: string[] = [];
-  for (const raw of input.flagged) {
-    const cleaned = raw.replace(/\s+/g, ' ').trim();
-    if (!cleaned) continue;
-    const key = cleaned.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    tops.push(cleaned);
-    if (tops.length >= 3) break;
+export function deriveCauseSummary(input: CauseStats & { flagged: string[] }): string {
+  const parts: string[] = [];
+
+  // Lead with the most actionable signal.
+  if (input.lostPartCount > 0) {
+    parts.push(`Part scrapped (${input.lostPartCount})`);
   }
-  const jobsPart = tops.length > 0 ? tops.join(', ') : '';
-  const causesPart = input.causes.length > 0 ? `(${input.causes.slice(0, 2).join(', ')})` : '';
-  const tail = [jobsPart, causesPart].filter((s) => s.length > 0).join(' ');
-  const full = tail ? `${category}: ${tail}` : category;
-  return full.length > 80 ? full.slice(0, 77) + '…' : full;
+  if (input.maxAttempt >= 3) {
+    parts.push(`reworked ${input.maxAttempt}×`);
+  } else if (input.reworkJobCount > 0 && input.lostPartCount === 0) {
+    parts.push(`reworked (${input.reworkJobCount} job${input.reworkJobCount === 1 ? '' : 's'})`);
+  }
+
+  // Top distinct failure modes from failedReason.reason (these are the real
+  // production-quality causes — gunk, layer lines, cracking, etc.).
+  if (input.failureModes.length > 0) {
+    parts.push(input.failureModes.slice(0, 3).join(', '));
+  } else if (input.failedJobCount > 0) {
+    parts.push(`failed jobs: ${input.failedJobCount}`);
+  }
+
+  // Fallback: only show "Needs attention" if there's nothing more specific.
+  if (parts.length === 0) {
+    if (input.attentionCount > 0) {
+      parts.push(`Needs attention (${input.attentionCount} jobs flagged)`);
+    } else {
+      parts.push('Unknown');
+    }
+  }
+
+  const lead = parts[0];
+  const tail = parts.slice(1).join(', ');
+  const summary = tail ? `${lead} — ${tail}` : lead;
+  return summary.length > 90 ? summary.slice(0, 87) + '…' : summary;
+}
+
+/** Convert a snake_case failure-mode key from failedReason.reason into a
+ *  short, sentence-case string. e.g. `layer_lines` → "layer lines". */
+function humanizeFailureMode(key: string): string {
+  return key
+    .replace(/_/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 export function computeBuckets(orders: OrderOut[]) {

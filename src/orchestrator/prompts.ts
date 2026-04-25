@@ -221,6 +221,11 @@ Slack formatting rules (CRITICAL — Slack uses "mrkdwn", NOT standard markdown)
 - Italic: use _underscores_.
 - Strikethrough: use ~tildes~.
 - Inline code: use \`backticks\`.
+- **Backslash escapes (\\*, \\_, \\~) DO NOT WORK in Slack mrkdwn** — they render literally as \`\\*\`, \`\\_\`, \`\\~\` (visible backslashes). Never write \`\\*footnote\` to display an asterisk; either:
+  - Use a different glyph: \`†\`, \`‡\`, \`★\` (or one of the Unicode asterisk variants \`✱\` U+2731, \`∗\` U+2217).
+  - Wrap a literal asterisk in inline code: \`\` \`*\` \`\` renders as \`*\`.
+  - Slack only treats a bare \`*\` as bold when it's balanced AND adjacent to non-word characters — so a single \`*\` at the very start of a line followed by a space (e.g. \`* text\`) renders as a literal asterisk + space.
+  When you want a footnote marker before an italic or bold span, the simplest fix is to put the marker OUTSIDE the formatting (\`† _footnote text here_\`) or use a non-asterisk glyph.
 - Headings/dividers: do not use \`#\`, \`##\`, or \`---\`. Emphasize section titles with *bold* instead.
 - Lists: use "- " bullets; the formatter will convert them to Slack bullets.
 - Tables: Slack does NOT render markdown tables. Wrap an ASCII-aligned table in a triple-backtick code block.

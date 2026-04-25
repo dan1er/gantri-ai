@@ -57,6 +57,17 @@ export class Orchestrator {
     return this.activeActor;
   }
 
+  /** Set the active actor outside a `run()` call. The reports runner uses
+   *  this to attribute plan execution to the subscription owner so that
+   *  reports.create_canvas (and any other actor-scoped tool) can resolve
+   *  the recipient. Pair with clearActiveActor() in a try/finally. */
+  setActiveActor(actor: ActorContext | undefined): void {
+    this.activeActor = actor;
+  }
+  clearActiveActor(): void {
+    this.activeActor = undefined;
+  }
+
   /** Replace the registry used for tool execution. Used by index.ts to swap
    *  in a CachingRegistry after all connectors are registered. The orchestrator
    *  reads tools lazily on each run, so late replacement is safe. */

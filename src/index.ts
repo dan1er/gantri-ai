@@ -153,6 +153,7 @@ async function main() {
     slackBotToken: env.SLACK_BOT_TOKEN,
     claude,
     compilerModel: 'claude-sonnet-4-6',
+    orchestrator,
   });
 
   receiver.router.post('/internal/run-due-reports', async (req, res) => {

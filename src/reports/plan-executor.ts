@@ -6,7 +6,7 @@ import type {
 } from './plan-types.js';
 import { isTimeRef, isResolvedRangePair } from './plan-types.js';
 import { resolveTimeRef } from './time-refs.js';
-import { resolveStepRefs } from './step-refs.js';
+import { resolveStepRefs, getByPath } from './step-refs.js';
 import { renderOutput, type RenderedAttachment } from './block-renderer.js';
 import { logger } from '../logger.js';
 
@@ -99,13 +99,40 @@ async function runStep(
   if (containsRangePair(argsWithTimes)) {
     const { current, previous } = splitRangePair(argsWithTimes);
     const [cur, prev] = await Promise.all([
-      callTool(step.tool, registry, resolveStepRefs(current, aliasMap)),
-      callTool(step.tool, registry, resolveStepRefs(previous, aliasMap)),
+      callTool(step.tool, registry, interpolateStrings(resolveStepRefs(current, aliasMap), aliasMap)),
+      callTool(step.tool, registry, interpolateStrings(resolveStepRefs(previous, aliasMap), aliasMap)),
     ]);
     return { current: cur, previous: prev };
   }
-  const resolved = resolveStepRefs(argsWithTimes, aliasMap);
+  const resolved = interpolateStrings(resolveStepRefs(argsWithTimes, aliasMap), aliasMap);
   return callTool(step.tool, registry, resolved);
+}
+
+/**
+ * Walk an args tree and replace `${alias.path}` placeholders inside any string
+ * value with the resolved value from `aliasMap`. The block-renderer does this
+ * for output text blocks; we apply the same rule here so that step args (e.g.
+ * the `markdown` body of `reports.create_canvas`) can reference earlier step
+ * results the same way the LLM expects.
+ */
+function interpolateStrings(value: unknown, aliasMap: Record<string, unknown>): unknown {
+  if (typeof value === 'string') {
+    return value.replace(/\$\{([^}]+)\}/g, (_match, path: string) => {
+      const v = getByPath(aliasMap, path.trim());
+      if (v === undefined || v === null) return '—';
+      if (typeof v === 'number' && Number.isFinite(v) && !Number.isInteger(v)) return v.toFixed(2);
+      return String(v);
+    });
+  }
+  if (Array.isArray(value)) return value.map((v) => interpolateStrings(v, aliasMap));
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = interpolateStrings(v, aliasMap);
+    }
+    return out;
+  }
+  return value;
 }
 
 async function callTool(toolName: string, registry: ConnectorRegistry, args: unknown): Promise<unknown> {

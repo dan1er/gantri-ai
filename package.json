@@ -20,6 +20,7 @@
     "@anthropic-ai/sdk": "^0.91.0",
     "@slack/bolt": "^3.19.0",
     "@supabase/supabase-js": "^2.45.0",
+    "cron-parser": "^4.9.0",
     "pg": "^8.20.0",
     "pino": "^9.4.0",
     "playwright": "^1.47.0",

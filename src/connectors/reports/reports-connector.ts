@@ -2,7 +2,14 @@ import { z } from 'zod';
 import type { WebClient } from '@slack/web-api';
 import type { Connector, ToolDef } from '../base/connector.js';
 import type { ActorContext } from '../../orchestrator/orchestrator.js';
+import { formatCell } from '../../reports/formatters.js';
+import { getByPath } from '../../reports/step-refs.js';
+import type { ColumnSpec } from '../../reports/plan-types.js';
 import { logger } from '../../logger.js';
+
+/** ColumnSpec.format codes — kept narrow because the connector formatter is
+ *  the single source of truth for cell rendering. */
+type ColumnFmt = NonNullable<ColumnSpec['format']>;
 
 const FORMAT_TO_EXT: Record<string, string> = {
   markdown: 'md',
@@ -31,12 +38,39 @@ export interface ReportAttachment extends AttachFileArgs {
   normalizedFilename: string;
 }
 
+/** Per-table spec inside `reports.create_canvas`. The connector renders each
+ *  one as a GitHub-flavored markdown pipe-table and substitutes the
+ *  `<<table:placeholder>>` marker(s) inside the canvas markdown. */
+const TableSpec = z.object({
+  /** Token used inside the markdown body, e.g. "fullOrdersTable" → matched as
+   *  `<<table:fullOrdersTable>>`. Restricted to a safe identifier shape so we
+   *  can do a literal split/join substitution without escaping concerns. */
+  placeholder: z.string().min(1).max(60).regex(/^[A-Za-z0-9_]+$/),
+  /** Resolved row data. The plan-compiler points this at an array alias via
+   *  `{ $ref: "alias.path" }`; StepRef resolution happens before the tool
+   *  runs, so by the time we see it here it's a real array of objects. */
+  rows: z.array(z.record(z.unknown())).max(500),
+  columns: z.array(z.object({
+    header: z.string().min(1).max(60),
+    field: z.string().min(1).max(120),
+    format: z.enum(['currency_dollars', 'integer', 'datetime_pt', 'date_pt', 'admin_order_link', 'percent']).optional(),
+  })).min(1).max(20),
+  maxRows: z.number().int().min(1).max(500).optional(),
+});
+type TableSpec = z.infer<typeof TableSpec>;
+
 const CreateCanvasArgs = z.object({
   title: z.string().min(1).max(200),
   /** Standard markdown content. Slack Canvas renders headings, real tables (| col | col |),
    *  bullet lists, code blocks, links, etc. natively. Use real markdown — NOT mrkdwn-flavored
-   *  Slack formatting. */
+   *  Slack formatting.
+   *  May contain `<<table:NAME>>` markers that will be substituted with rendered
+   *  GFM pipe-tables when paired with a matching entry in `tables`. */
   markdown: z.string().min(1).max(900_000),
+  /** Optional per-row tables to render inside the canvas. Each entry's rows
+   *  are rendered as a markdown pipe-table and replace every occurrence of
+   *  `<<table:placeholder>>` in the `markdown` body. */
+  tables: z.array(TableSpec).optional(),
 });
 type CreateCanvasArgs = z.infer<typeof CreateCanvasArgs>;
 
@@ -111,7 +145,12 @@ export class ReportsConnector implements Connector {
     const createCanvas: ToolDef<CreateCanvasArgs> = {
       name: 'reports.create_canvas',
       description:
-        'Create a Slack Canvas (a rich document with native markdown rendering — real tables, headings, bullets, code blocks) and grant the calling user read access. Returns the canvas URL; the bot should then put a brief summary in the chat reply and link the canvas (e.g. "📋 Full report: <URL|View canvas>"). Use this INSTEAD of an ASCII code-block table when: (a) the comparison would need >5 columns, (b) >15 rows, or (c) you would otherwise be tempted to truncate. Real markdown tables in Canvas wrap gracefully and stay aligned on mobile, unlike code blocks. The `markdown` arg accepts standard GitHub-flavored markdown — `# H1`, `## H2`, `| col | col |` table rows with `|---|---|` separator, `*italic*`, `**bold**`, `- bullets`, fenced code, links `[text](url)`. Do NOT use Slack mrkdwn here (no `*single-asterisk-bold*`, use `**double**`).',
+        'Create a Slack Canvas (a rich document with native markdown rendering — real tables, headings, bullets, code blocks) and grant the calling user read access. Returns the canvas URL; the bot should then put a SHORT summary in the chat reply and link the canvas (e.g. "📋 Full report: <URL|View canvas>") — never duplicate the per-row data inline.\n' +
+        'Per-row tables go in the canvas via the `tables` arg:\n' +
+        '- Pass `tables: [{ placeholder: "myTable", rows: { $ref: "alias.path" }, columns: [...] }]` and reference it inside `markdown` as `<<table:myTable>>`.\n' +
+        '- The connector renders each entry as a GitHub-flavored markdown pipe-table that Slack Canvas displays natively.\n' +
+        '- Use `format` codes (currency_dollars / integer / datetime_pt / date_pt / admin_order_link / percent) on columns just like in chat `table` blocks.\n' +
+        'Plain `markdown` still supports `${alias.path}` scalar interpolation, headings, bullets, links — just no JS-style iteration.',
       schema: CreateCanvasArgs as z.ZodType<CreateCanvasArgs>,
       jsonSchema: {
         type: 'object',
@@ -122,7 +161,43 @@ export class ReportsConnector implements Connector {
           markdown: {
             type: 'string',
             description:
-              'Full canvas content as standard GitHub-flavored markdown. Tables, headings, bullets, code, links all render natively. Cap at ~900k chars (Slack hard limit is around 1M).',
+              'Full canvas content as standard GitHub-flavored markdown. Tables, headings, bullets, code, links all render natively. May contain `<<table:NAME>>` markers paired with entries in `tables` — each marker is replaced with a rendered pipe-table. Cap at ~900k chars (Slack hard limit is around 1M).',
+          },
+          tables: {
+            type: 'array',
+            description:
+              'Optional per-row tables to render inside the canvas. Each entry is rendered as a markdown pipe-table (with formatted cells) that replaces every occurrence of `<<table:placeholder>>` in the markdown body.',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['placeholder', 'rows', 'columns'],
+              properties: {
+                placeholder: {
+                  type: 'string',
+                  description: 'Marker name. The connector substitutes `<<table:placeholder>>` in the markdown with the rendered table. Must match `^[A-Za-z0-9_]+$`.',
+                },
+                rows: {
+                  type: 'array',
+                  description: 'Array of row objects. Use `{ "$ref": "alias.path" }` in the plan to point at a step result; StepRef resolution happens before the tool runs.',
+                  items: { type: 'object' },
+                },
+                columns: {
+                  type: 'array',
+                  minItems: 1,
+                  items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    required: ['header', 'field'],
+                    properties: {
+                      header: { type: 'string' },
+                      field: { type: 'string', description: 'Dot-path into a row object.' },
+                      format: { type: 'string', enum: ['currency_dollars', 'integer', 'datetime_pt', 'date_pt', 'admin_order_link', 'percent'] },
+                    },
+                  },
+                },
+                maxRows: { type: 'integer', minimum: 1, maximum: 500, description: 'Cap on rendered rows. Default 100.' },
+              },
+            },
           },
         },
       },
@@ -140,11 +215,20 @@ export class ReportsConnector implements Connector {
         error: { code: 'NO_ACTOR', message: 'reports.create_canvas requires an active actor context.' },
       };
     }
+    // Substitute `<<table:NAME>>` markers in the markdown body with the
+    // rendered GFM pipe-tables. Slack Canvas renders these natively; this is
+    // how per-row tables get into the canvas (chat output stays a short summary).
+    let body = args.markdown;
+    for (const t of args.tables ?? []) {
+      const limited = t.rows.slice(0, t.maxRows ?? 100);
+      const md = renderMarkdownTable(limited, t.columns);
+      body = body.split(`<<table:${t.placeholder}>>`).join(md);
+    }
     let canvasId: string | undefined;
     try {
       const created = await this.deps.slackClient.apiCall('canvases.create', {
         title: args.title,
-        document_content: { type: 'markdown', markdown: args.markdown },
+        document_content: { type: 'markdown', markdown: body },
       });
       if (!created.ok || typeof created.canvas_id !== 'string') {
         return {
@@ -205,4 +289,29 @@ function normalizeFilename(filename: string, format: AttachFileArgs['format']): 
   const dot = filename.lastIndexOf('.');
   const base = dot > 0 ? filename.slice(0, dot) : filename;
   return `${base}.${expectedExt}`;
+}
+
+/**
+ * Render an array of row objects as a GitHub-flavored markdown pipe-table.
+ * Slack Canvas renders these natively (real columns, sticky-aligned) — unlike
+ * the chat block-renderer's monospaced ASCII table, which is for code-block
+ * fixed-width display. Reuses {@link formatCell} so cell formatting is
+ * identical to what scheduled-report `table` blocks produce.
+ */
+function renderMarkdownTable(
+  rows: Array<Record<string, unknown>>,
+  columns: Array<{ header: string; field: string; format?: ColumnFmt }>,
+): string {
+  const headerRow = `| ${columns.map((c) => escapePipe(c.header)).join(' | ')} |`;
+  const sepRow = `| ${columns.map(() => '---').join(' | ')} |`;
+  const bodyRows = rows.map((r) => {
+    const cells = columns.map((c) => escapePipe(formatCell(getByPath(r, c.field), c.format)));
+    return `| ${cells.join(' | ')} |`;
+  });
+  return [headerRow, sepRow, ...bodyRows].join('\n');
+}
+
+/** Escape pipes (which break GFM table cells) and newlines (which break rows). */
+function escapePipe(s: string): string {
+  return s.replace(/\|/g, '\\|').replace(/\n/g, ' ');
 }

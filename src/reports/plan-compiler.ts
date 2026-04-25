@@ -311,10 +311,41 @@ OUTPUT TIPS:
   - **CAVEAT:** \`grafana.sql\` returns \`{ fields: [...], rows: [[...]] }\` — \`rows\` is an array of CELL ARRAYS, not objects. \`table\` blocks won't pull \`row.period\` from a cell array. To use a \`table\` block with grafana.sql you have two choices: (a) prefer text blocks for grafana.sql results and reference \`\${alias.rows[0][0]}\` style; or (b) use Porter API tools (\`gantri.order_stats\`, \`gantri.orders_query\`) which return proper objects.
 - For comparing two periods of \`gantri.order_stats\` results: run two steps (one per period) and use TWO text blocks (one per period) with bold labels like \`*Current week:* \${current.totalOrders} orders, \${current.totalRevenueDollars} dollars\`. No manual table needed. The deltas can be a third text line written narratively, e.g. \`Net change: \${current.totalOrders} vs \${previous.totalOrders} orders\`. Templates do NOT support arithmetic — do not write \`\${a - b}\` or \`\${a} − \${b} = ...\`.
 
-- **\`reports.create_canvas\` markdown is a STATIC string, not a template engine.** Inside the \`markdown\` arg you CAN use \`\${alias.path}\` to inject a SCALAR value (string, number) — the executor interpolates these the same way text blocks do. You CANNOT iterate over arrays inside the markdown — there is no \`for each row\` syntax, no JS expressions, no \`["[" + id + "]" + ...]\` style concatenation. Do NOT try to render a per-row table inside the canvas markdown by listing row template syntax — it will appear as literal text.
-  - **For canvas content:** put summary scalars (\`Total: \${alias.totalLate}\`), section headings, narrative bullets, and inline links built from a SINGLE alias path. Tables in canvas should only be hard-coded text from the data already aggregated into a string.
-  - **For per-row tables:** use a \`table\` block in \`output.blocks\` (NOT inside the canvas markdown). The chat reply will carry the structured table; the canvas can carry a narrative summary + a link back to the chat thread.
-  - **Or, if the user really needs a tabular canvas:** add a step BEFORE the canvas step whose tool produces a pre-formatted markdown table string (e.g., a future \`format.md_table\` tool — none exists yet). For now, push tabular data into a chat \`table\` block instead of the canvas.${args.feedback ? `\n\nFEEDBACK FROM PREVIOUS ATTEMPT:\n${args.feedback}` : ''}
+TABLES POLICY (READ CAREFULLY):
+- **Per-row tables (>3 rows of structured data) ALWAYS belong in the canvas, never inline in chat \`output.blocks\`.** The canvas is where users go for the data; the chat reply is a short summary + a clickable canvas link.
+- To put a per-row table in the canvas, schedule a \`reports.create_canvas\` step and pass a \`tables\` arg with one entry per table:
+  \`\`\`json
+  {
+    "tool": "reports.create_canvas",
+    "args": {
+      "title": "Late wholesale orders — 2026-04-24",
+      "markdown": "# Late wholesale orders\\n\\n**Total late:** \${lateOrders.totalLate}\\n\\n## Full list\\n\\n<<table:fullOrdersTable>>",
+      "tables": [
+        {
+          "placeholder": "fullOrdersTable",
+          "rows": { "$ref": "lateOrders.orders" },
+          "columns": [
+            { "header": "Order", "field": "id", "format": "admin_order_link" },
+            { "header": "Customer", "field": "customerName" },
+            { "header": "Days Late", "field": "daysLate", "format": "integer" },
+            { "header": "Cause", "field": "causeSummary" }
+          ]
+        }
+      ]
+    }
+  }
+  \`\`\`
+  The connector substitutes every \`<<table:fullOrdersTable>>\` marker with a real GFM markdown pipe-table that Slack Canvas renders natively.
+- **The chat \`output.blocks\` for a tabular report should be a SHORT (2–4 line) text block** with the headline numbers + a link to the canvas. Example:
+  \`\`\`json
+  {
+    "type": "text",
+    "text": "*\${lateOrders.totalLate} late wholesale orders* — \${lateOrders.buckets.byDaysLate.15+} are 15+ days late.\\n\\n📋 Full report: <\${canvas.url}|Open canvas>"
+  }
+  \`\`\`
+  No \`table\` block in the chat for the per-row data. No duplicated rows inline. Headline summary + canvas link only.
+- The chat \`table\` block type still exists, but reserve it for tiny pivot tables (≤5 rows, ≤5 columns) that genuinely belong inline — e.g. a 3-row "this week vs last week vs delta" mini-summary. Anything bigger goes in the canvas via the \`tables\` arg.
+- The \`markdown\` arg of \`reports.create_canvas\` is still a static string with \`\${alias.path}\` scalar interpolation only — no JS-style iteration. Per-row data is exclusively rendered via \`tables\` + \`<<table:NAME>>\` markers; do NOT try to hand-build pipe tables out of \`\${alias.rows[0]}\`-style scalar refs.${args.feedback ? `\n\nFEEDBACK FROM PREVIOUS ATTEMPT:\n${args.feedback}` : ''}
 
 Output the JSON now.`;
 }

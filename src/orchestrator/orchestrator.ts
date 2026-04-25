@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type Anthropic from '@anthropic-ai/sdk';
 import type { ConnectorRegistry } from '../connectors/base/registry.js';
 import { buildSystemPrompt } from './prompts.js';
@@ -15,6 +16,40 @@ export interface ActorContext {
 export interface ThreadContext {
   channelId: string;
   threadTs: string;
+}
+
+/**
+ * Per-call run context. Replaces the old singleton-mutable
+ * `Orchestrator.activeActor` / `activeThread` fields. Both `orchestrator.run`
+ * and the reports runner's `processOne` wrap their body in
+ * `runWithContext(...)` so concurrent runs each see their own actor/thread.
+ *
+ * Tool connectors read context via the `getActiveActor()` / `getActiveThread()`
+ * helpers below (which read from this AsyncLocalStorage). This eliminates
+ * the previous race where the runner's `clearActiveActor()` in a `finally`
+ * could wipe an in-flight orchestrator.run's actor.
+ */
+export interface RunContext {
+  actor?: ActorContext;
+  thread?: ThreadContext;
+}
+
+const runContextStorage = new AsyncLocalStorage<RunContext>();
+
+/** Read the actor context for the in-flight call, if any. */
+export function getActiveActor(): ActorContext | undefined {
+  return runContextStorage.getStore()?.actor;
+}
+
+/** Read the Slack thread context for the in-flight call, if any. */
+export function getActiveThread(): ThreadContext | undefined {
+  return runContextStorage.getStore()?.thread;
+}
+
+/** Run `fn` with the given `RunContext` available via the `getActive*` helpers.
+ *  Concurrent calls each get their own ALS frame; nothing leaks across them. */
+export function runWithContext<T>(ctx: RunContext, fn: () => Promise<T> | T): Promise<T> {
+  return Promise.resolve(runContextStorage.run(ctx, fn));
 }
 
 export interface OrchestratorInput {
@@ -56,37 +91,10 @@ export interface OrchestratorOptions {
 export class Orchestrator {
   private readonly maxIterations: number;
   private readonly maxOutputTokens: number;
-  private activeActor: ActorContext | undefined;
-  private activeThread: ThreadContext | undefined;
 
   constructor(private readonly opts: OrchestratorOptions) {
     this.maxIterations = opts.maxIterations ?? 5;
     this.maxOutputTokens = opts.maxOutputTokens ?? 4096;
-  }
-
-  getActiveActor(): ActorContext | undefined {
-    return this.activeActor;
-  }
-
-  /** Set the active actor outside a `run()` call. The reports runner uses
-   *  this to attribute plan execution to the subscription owner so that
-   *  reports.create_canvas (and any other actor-scoped tool) can resolve
-   *  the recipient. Pair with clearActiveActor() in a try/finally. */
-  setActiveActor(actor: ActorContext | undefined): void {
-    this.activeActor = actor;
-  }
-  clearActiveActor(): void {
-    this.activeActor = undefined;
-  }
-
-  getActiveThread(): ThreadContext | undefined {
-    return this.activeThread;
-  }
-  setActiveThread(ctx: ThreadContext | undefined): void {
-    this.activeThread = ctx;
-  }
-  clearActiveThread(): void {
-    this.activeThread = undefined;
   }
 
   /** Replace the registry used for tool execution. Used by index.ts to swap
@@ -100,9 +108,7 @@ export class Orchestrator {
   }
 
   async run(input: OrchestratorInput): Promise<OrchestratorOutput> {
-    this.activeActor = input.actor;
-    this.activeThread = input.thread;
-    try {
+    return runWithContext({ actor: input.actor, thread: input.thread }, async () => {
       const tools = this.opts.registry.getAllTools();
       // Anthropic requires tool names to match ^[a-zA-Z0-9_-]+$. Our internal
       // convention uses "." as a namespace separator (e.g. "northbeam.overview").
@@ -236,10 +242,7 @@ export class Orchestrator {
         iterations: this.maxIterations,
         attachments,
       };
-    } finally {
-      this.activeActor = undefined;
-      this.activeThread = undefined;
-    }
+    });
   }
 }
 

@@ -1,7 +1,7 @@
 import type { WebClient } from '@slack/web-api';
 import type { ReportSubscriptionsRepo, ReportSubscriptionRow } from './reports-repo.js';
 import type { ConnectorRegistry } from '../connectors/base/registry.js';
-import type { Orchestrator } from '../orchestrator/orchestrator.js';
+import { runWithContext } from '../orchestrator/orchestrator.js';
 import { executePlan } from './plan-executor.js';
 import { compilePlan } from './plan-compiler.js';
 import type Anthropic from '@anthropic-ai/sdk';
@@ -16,10 +16,6 @@ export interface RunnerDeps {
   slackBotToken: string;
   claude: Anthropic;
   compilerModel: string;
-  /** Used to set the per-fire actor context so actor-scoped tools
-   *  (reports.create_canvas, reports.attach_file's recipient, etc.)
-   *  resolve to the subscription owner. */
-  orchestrator: Orchestrator;
   /** How often the in-process loop ticks. Default 30000ms. */
   tickIntervalMs?: number;
   /** Max subscriptions claimed per tick. Default 50. */
@@ -77,16 +73,18 @@ export class ReportsRunner {
 
     // If plan is stale, attempt re-compile from original_intent first.
     if (validationStatus === 'stale') {
-      this.deps.orchestrator.setActiveActor({ slackUserId: sub.slack_user_id });
       try {
-        const compiled = await compilePlan({
-          intent: sub.original_intent,
-          registry: this.deps.registry,
-          claude: this.deps.claude,
-          model: this.deps.compilerModel,
-          validationRunAt: runAt,
-          timezone: sub.timezone,
-        });
+        const compiled = await runWithContext(
+          { actor: { slackUserId: sub.slack_user_id }, thread: undefined },
+          () => compilePlan({
+            intent: sub.original_intent,
+            registry: this.deps.registry,
+            claude: this.deps.claude,
+            model: this.deps.compilerModel,
+            validationRunAt: runAt,
+            timezone: sub.timezone,
+          }),
+        );
         plan = compiled.plan;
         validationStatus = 'ok';
         await this.deps.repo.update(sub.id, {
@@ -97,28 +95,25 @@ export class ReportsRunner {
       } catch (err) {
         await this.markBroken(sub, err);
         return;
-      } finally {
-        this.deps.orchestrator.clearActiveActor();
       }
     } else if (validationStatus === 'broken') {
       logger.info({ subId: sub.id }, 'skipping broken subscription');
       return;
     }
 
-    // Execute the plan.
+    // Execute the plan with actor context scoped to this single fire via
+    // AsyncLocalStorage. Concurrent fires + concurrent user-driven runs each
+    // get their own ALS frame, so the actor read by `reports.create_canvas`
+    // can never get clobbered mid-flight by another caller.
     let executeError: unknown = null;
     let result: Awaited<ReturnType<typeof executePlan>> | null = null;
-    // Set the actor context to the subscription owner so actor-scoped tools
-    // like reports.create_canvas resolve correctly during the plan run.
-    // The orchestrator's activeActor is shared state used by the connectors'
-    // getActor() closures.
-    this.deps.orchestrator.setActiveActor({ slackUserId: sub.slack_user_id });
     try {
-      result = await executePlan({ plan, registry: this.deps.registry, runAt, timezone: sub.timezone });
+      result = await runWithContext(
+        { actor: { slackUserId: sub.slack_user_id }, thread: undefined },
+        () => executePlan({ plan, registry: this.deps.registry, runAt, timezone: sub.timezone }),
+      );
     } catch (err) {
       executeError = err;
-    } finally {
-      this.deps.orchestrator.clearActiveActor();
     }
 
     const nextRun = computeNextFireAt(sub.cron, sub.timezone, runAt);

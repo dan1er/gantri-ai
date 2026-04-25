@@ -30,7 +30,7 @@ function renderBlock(
 ): string | null {
   switch (block.type) {
     case 'header':
-      return `*${block.text}*`;
+      return `*${interpolate(block.text, aliasMap)}*`;
     case 'text':
       return interpolate(block.text, aliasMap);
     case 'table':

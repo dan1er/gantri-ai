@@ -18,7 +18,7 @@ import { FeedbackConnector } from './connectors/feedback/feedback-connector.js';
 import { FeedbackRepo } from './storage/repositories/feedback.js';
 import { GantriPorterConnector } from './connectors/gantri-porter/gantri-porter-connector.js';
 import { GrafanaConnector } from './connectors/grafana/grafana-connector.js';
-import { Orchestrator } from './orchestrator/orchestrator.js';
+import { Orchestrator, getActiveActor, getActiveThread } from './orchestrator/orchestrator.js';
 import { buildSlackApp } from './slack/app.js';
 import { ReportSubscriptionsRepo } from './reports/reports-repo.js';
 import { ScheduledReportsConnector } from './reports/reports-connector.js';
@@ -90,7 +90,7 @@ async function main() {
   const reportsConnector = new ScheduledReportsConnector({
     repo: reportsRepo,
     getActor: () => {
-      const actor = orchestrator.getActiveActor();
+      const actor = getActiveActor();
       if (!actor) throw new Error('reports.* tool called without an actor context');
       return actor;
     },
@@ -112,11 +112,13 @@ async function main() {
   const { app, receiver } = buildSlackApp({ orchestrator, usersRepo, conversationsRepo });
 
   // ReportsConnector hooks Slack's canvases API + the per-run actor context,
-  // so it can only be built once both `app.client` and the orchestrator exist.
+  // so it can only be built once `app.client` exists. The actor closure
+  // reads from the AsyncLocalStorage-backed run context (see
+  // orchestrator.ts: getActiveActor/getActiveThread/runWithContext).
   registry.register(
     new ReportsConnector({
       slackClient: app.client,
-      getActor: () => orchestrator.getActiveActor(),
+      getActor: () => getActiveActor(),
     }),
   );
 
@@ -130,8 +132,8 @@ async function main() {
       conversationsRepo,
       slackClient: app.client,
       maintainerSlackUserId: env.MAINTAINER_SLACK_USER_ID,
-      getActor: () => orchestrator.getActiveActor(),
-      getThread: () => orchestrator.getActiveThread(),
+      getActor: () => getActiveActor(),
+      getThread: () => getActiveThread(),
     }),
   );
 
@@ -170,7 +172,6 @@ async function main() {
     slackBotToken: env.SLACK_BOT_TOKEN,
     claude,
     compilerModel: 'claude-sonnet-4-6',
-    orchestrator,
   });
 
   receiver.router.post('/internal/run-due-reports', async (req, res) => {

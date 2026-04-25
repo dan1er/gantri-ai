@@ -68,6 +68,34 @@ export interface HandlerDeps {
   conversationsRepo: ConversationsRepo;
 }
 
+/**
+ * Display labels for each connector namespace. The orchestrator's tool names
+ * follow `{connector}.{tool}` (e.g. `gantri.orders_query`); we collect the
+ * connector prefixes that appeared in the run's tool calls and show those as
+ * the source list. Unknown prefixes are passed through capitalized as-is.
+ */
+const SOURCE_LABELS: Record<string, string> = {
+  northbeam: 'Northbeam',
+  gantri: 'Porter',
+  grafana: 'Grafana',
+  reports: 'Reports',
+};
+
+function buildFooter(out: {
+  model: string;
+  iterations: number;
+  toolCalls: Array<{ name: string }>;
+}): string {
+  const sources = new Set<string>();
+  for (const call of out.toolCalls) {
+    const prefix = call.name.split('.')[0];
+    if (!prefix) continue;
+    sources.add(SOURCE_LABELS[prefix] ?? prefix.charAt(0).toUpperCase() + prefix.slice(1));
+  }
+  const sourceLabel = sources.size > 0 ? `Source: ${[...sources].join(', ')} • ` : '';
+  return `${sourceLabel}Model: ${out.model} • ${out.iterations} iteration${out.iterations === 1 ? '' : 's'}`;
+}
+
 export function createDmHandler(deps: HandlerDeps) {
   const env = loadEnv();
   return async ({ event, client }: any) => {
@@ -111,7 +139,7 @@ export function createDmHandler(deps: HandlerDeps) {
         actor: { slackUserId: event.user, slackChannelId: event.channel },
       });
       const blocks = markdownToSlackBlocks(out.response, {
-        footer: `Source: Northbeam • Model: ${out.model} • ${out.iterations} iteration${out.iterations === 1 ? '' : 's'}`,
+        footer: buildFooter(out),
       });
       await client.chat.update({
         channel: event.channel,

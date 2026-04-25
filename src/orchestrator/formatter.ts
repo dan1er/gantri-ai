@@ -1,3 +1,5 @@
+import stringWidth from 'string-width';
+
 export interface FormatterOptions {
   footer?: string;
 }
@@ -133,14 +135,26 @@ function splitRow(row: string): string[] {
     .map((c) => c.trim().replace(/\*\*(.+?)\*\*/g, '$1'));
 }
 
+/**
+ * Pad `cell` with trailing spaces until its rendered width (via string-width) is `target`.
+ * `string.padEnd` uses `.length` (UTF-16 code units), which silently misaligns columns
+ * whenever a cell contains an emoji, em-dash, ellipsis, or any wide/zero-width character.
+ * Slack mobile and desktop monospace fonts disagree on those characters' widths, so the
+ * misalignment shows up only on one platform.
+ */
+function padToWidth(cell: string, target: number): string {
+  const pad = target - stringWidth(cell);
+  return pad <= 0 ? cell : cell + ' '.repeat(pad);
+}
+
 function renderAsciiTable(rows: string[]): string[] {
   const parsed = rows.map(splitRow).filter((r) => !r.every((c) => /^-+$/.test(c) || c === ''));
   if (parsed.length === 0) return [];
   const ncol = Math.max(...parsed.map((r) => r.length));
   const widths = new Array(ncol).fill(0);
-  for (const r of parsed) for (let c = 0; c < r.length; c++) widths[c] = Math.max(widths[c], r[c].length);
+  for (const r of parsed) for (let c = 0; c < r.length; c++) widths[c] = Math.max(widths[c], stringWidth(r[c]));
   return parsed.map((r) =>
-    r.map((cell, c) => cell.padEnd(widths[c], ' ')).join('  ').trimEnd(),
+    r.map((cell, c) => padToWidth(cell, widths[c])).join('  ').trimEnd(),
   );
 }
 

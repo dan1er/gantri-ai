@@ -45,6 +45,30 @@ describe('markdownToSlackBlocks', () => {
     expect(texts).toEqual(['Before', 'After']);
   });
 
+  it('aligns ASCII columns by visual width, not UTF-16 length, so cells with emojis/em-dashes line up on every device', () => {
+    // Emojis (🚨 = 2 cols visual, length 2), em-dash (— = 1 col visual, length 1),
+    // and ellipsis (… = 1 col visual, length 1) used to misalign because padEnd
+    // pads to .length; the regression repro is "🚨 Deadline missed (7d)" sitting
+    // next to plain ASCII rows.
+    const md = [
+      '| Order | Cause |',
+      '|---|---|',
+      '| 53107 | 🚨 Deadline missed (7d) |',
+      '| 53108 | Reworked 4× |',
+      '| 53109 | gunk — layer lines |',
+    ].join('\n');
+    const blocks = markdownToSlackBlocks(md);
+    const text = (blocks[0] as any).text.text;
+    const lines = text.split('\n').filter((l: string) => l && !l.startsWith('```'));
+    // Every rendered line must end the first column at the same visual column.
+    // Use a regex that matches the gap between cells (≥2 spaces).
+    const firstColEnds = lines.map((l: string) => {
+      const m = l.match(/^(.*?)( {2,})/);
+      return m ? m[1].length + m[2].length : -1;
+    });
+    expect(firstColEnds.every((n: number) => n === firstColEnds[0])).toBe(true);
+  });
+
   it('converts markdown pipe-tables into ASCII code blocks', () => {
     const md = [
       '| Campaign | Spend | ROAS |',

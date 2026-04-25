@@ -28,7 +28,7 @@ export class LateOrdersConnector implements Connector {
     const tool: ToolDef<Args> = {
       name: 'gantri.late_orders_report',
       description:
-        'One-shot report of currently-late orders (Porter\'s `Transactions.isLateOrder = true`, excluding Cancelled/Lost/Refunded/Delivered). Returns per-order: id, type, status, customerName, shipsAt, daysLate, totalDollars, primaryCause, plus job-level counts (attention/rework/late/exceeded) and a sample of flagged job descriptions. Also returns aggregate buckets: by days-late range (0-3 / 4-7 / 8-14 / 15+), by primaryCause, by type. Use this whenever the user asks about late / delayed / atrasadas / retrasadas orders, or wants a summary of why orders are running behind. Backed by a single Grafana SQL query — fast and consistent.',
+        'One-shot report of currently-late, in-flight orders (Porter\'s `Transactions.isLateOrder = true`, excluding shipped/delivered/cancelled/lost/refunded statuses, capped at last 365 days to skip zombie data). Returns per-order: id, type, status, customerName, shipsAt, daysLate, totalDollars, primaryCause (category), **causeSummary** (one-line table-friendly: "<category>: <top flagged jobs> (<text causes>)"), job-level counts (attention/rework/late/exceeded), sample of flagged job descriptions, distinct text causes. Also returns aggregate buckets: by days-late range (0-3 / 4-7 / 8-14 / 15+), by primaryCause, by type. **When rendering a table for the user, ALWAYS include a "Cause" column populated from `order.causeSummary` (NOT just `primaryCause`, which alone is too coarse).** Use this whenever the user asks about late / delayed / atrasadas / retrasadas orders, or wants a summary of why orders are running behind. Backed by a single Grafana SQL query — fast and consistent.',
       schema: Args as z.ZodType<Args>,
       jsonSchema: {
         type: 'object',
@@ -86,6 +86,11 @@ interface OrderOut {
   lateJobCount: number;
   exceededCount: number;
   primaryCause: string;
+  /** One-line, table-friendly cause description. Combines the primaryCause
+   *  category, the most-flagged job descriptions, and any text causes from
+   *  the `Jobs.cause` field. Capped at ~80 chars so it fits cleanly in a
+   *  Slack canvas table cell. */
+  causeSummary: string;
   flaggedJobs: string[];
   causes: string[];
   adminLink: string;
@@ -194,6 +199,10 @@ function rowsToOrders(fields: string[], rows: unknown[][]): OrderOut[] {
       lateJobCount,
       exceededCount,
       primaryCause: derivePrimaryCause({ attentionCount, reworkCount, lateJobCount, exceededCount, causes }),
+      causeSummary: deriveCauseSummary({
+        attentionCount, reworkCount, lateJobCount, exceededCount,
+        causes, flagged,
+      }),
       flaggedJobs: flagged.slice(0, 5),
       causes,
       adminLink: `http://admin.gantri.com/orders/${id}`,
@@ -229,6 +238,47 @@ export function derivePrimaryCause(input: {
   if (input.lateJobCount > 0) return 'Late job(s)';
   if (input.causes.length > 0) return input.causes[0];
   return 'Unknown';
+}
+
+/**
+ * Compose a one-line cause summary suitable for a single table cell.
+ * Format: "<category>: <top job descriptions> [(<text causes>)]" capped at
+ * ~80 characters. Designed so a row in a Slack canvas's "Cause" column reads
+ * like "Has attention: Lid, Paint Tool (duplicate)" rather than a flat
+ * categorical label.
+ */
+export function deriveCauseSummary(input: {
+  attentionCount: number;
+  reworkCount: number;
+  lateJobCount: number;
+  exceededCount: number;
+  causes: string[];
+  flagged: string[];
+}): string {
+  const category = derivePrimaryCause({
+    attentionCount: input.attentionCount,
+    reworkCount: input.reworkCount,
+    lateJobCount: input.lateJobCount,
+    exceededCount: input.exceededCount,
+    causes: input.causes,
+  });
+  // Top distinct flagged job descriptions, normalized + deduped.
+  const seen = new Set<string>();
+  const tops: string[] = [];
+  for (const raw of input.flagged) {
+    const cleaned = raw.replace(/\s+/g, ' ').trim();
+    if (!cleaned) continue;
+    const key = cleaned.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    tops.push(cleaned);
+    if (tops.length >= 3) break;
+  }
+  const jobsPart = tops.length > 0 ? tops.join(', ') : '';
+  const causesPart = input.causes.length > 0 ? `(${input.causes.slice(0, 2).join(', ')})` : '';
+  const tail = [jobsPart, causesPart].filter((s) => s.length > 0).join(' ');
+  const full = tail ? `${category}: ${tail}` : category;
+  return full.length > 80 ? full.slice(0, 77) + '…' : full;
 }
 
 export function computeBuckets(orders: OrderOut[]) {

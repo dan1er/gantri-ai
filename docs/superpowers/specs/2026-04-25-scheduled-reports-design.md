@@ -173,16 +173,11 @@ A pure TypeScript walker, no LLM (unless `narrativeWrapup` is set):
 
 ## Runner
 
-Endpoint `POST /internal/run-due-reports` (shared-secret header). Triggered by GitHub Actions cron every 5 minutes:
+The runner is an **in-process loop** inside the bot itself, ticking every 30 seconds via `setInterval`. The bot already runs 24/7 on Fly, so we don't need external infrastructure for scheduling. This also gives us 1-minute cron resolution — `* * * * *`, `*/5 * * * *`, `0 */2 * * *` all work — which is necessary for testing patterns like "every 2 minutes" without spinning up a deploy.
 
-```yaml
-# .github/workflows/run-reports.yml
-on:
-  schedule: [{ cron: '*/5 * * * *' }]
-  workflow_dispatch: {}
-```
+A manual trigger endpoint `POST /internal/run-due-reports` (shared-secret header) is also exposed for debugging and forced re-runs from a CI/CD context. The endpoint and the in-process tick share the same handler.
 
-The endpoint:
+The runner:
 
 1. `SELECT … FROM report_subscriptions WHERE enabled AND next_run_at <= now() FOR UPDATE SKIP LOCKED LIMIT 50` — picks up to 50 due subscriptions, locks them so multiple workers don't double-fire.
 2. For each subscription:
@@ -194,7 +189,7 @@ The endpoint:
 3. Compute the next `next_run_at` from the cron expression in the subscription's timezone; set `last_run_at = now()`.
 4. Commit. Lock releases.
 
-The 5-minute granularity is fine for daily/weekly reports; nobody is asking for sub-minute schedules and adding finer granularity would require a separate runner architecture.
+Tick cadence is 30 seconds, so a `* * * * *` schedule fires within ~30s of its target minute boundary. Sub-minute granularity is intentionally not supported — cron is minute-resolution and the in-process tick is bounded by the loop. Users who need to verify a report immediately should call `reports.run_now(id)`.
 
 ## User-Facing Tools
 
@@ -220,7 +215,13 @@ The bot is responsible for translating natural-language schedules ("every Monday
 
 A new section is appended to the system prompt explaining:
 - The `reports.*` tools and when to use each.
-- Cron parsing examples ("daily at 9am PT" → `0 9 * * *` + `America/Los_Angeles`).
+- Cron parsing examples covering both interval and time-of-day patterns:
+  - *"every minute"* → `* * * * *`
+  - *"every 5 minutes"* → `*/5 * * * *`
+  - *"every 2 hours"* → `0 */2 * * *`
+  - *"daily at 9am PT"* → `0 9 * * *`, tz `America/Los_Angeles`
+  - *"every Monday at 7am"* → `0 7 * * 1`
+  - *"weekdays at 8:30 PT"* → `30 8 * * 1-5`
 - The expectation that the bot **rewrites** the user's casual intent into a precise English `displayName` and a more rigorous `original_intent` before calling `reports.subscribe`.
 - The `reports.preview` flow: when the user says *"show me what this would look like"*, call `preview` first; only call `subscribe` once they confirm.
 
@@ -230,7 +231,7 @@ A new section is appended to the system prompt explaining:
 - Fire cost: zero LLM by default; a few SQL/tool calls. <2s wall time. With `narrativeWrapup`: +~5K tokens (~$0.02).
 - Per-user soft cap: 10 active subscriptions. Past that, `reports.subscribe` returns an error suggesting `unsubscribe` first.
 - Plan size cap: 8 steps. Enforced at compile.
-- Cron resolution: 5 minutes (runner ticks every 5 min).
+- Cron resolution: 1 minute (in-process runner ticks every 30s).
 
 ## Failure & Recovery
 

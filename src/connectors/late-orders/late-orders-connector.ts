@@ -121,7 +121,14 @@ WITH late AS (
              + COALESCE((amount->>'tax')::numeric, 0)) / 100.0 AS total_dollars
   FROM "Transactions" t
   WHERE t."isLateOrder" = true
-    AND t.status NOT IN ('Cancelled', 'Lost', 'Refunded', 'Delivered')
+    -- Exclude completed statuses so we only see actionable in-flight orders.
+    -- "Partially shipped" / "Partially delivered" stay because they still have
+    -- open lines.
+    AND t.status NOT IN ('Cancelled', 'Lost', 'Refunded', 'Delivered', 'Shipped', 'Partially refunded')
+    -- Cap to the last 365 days. Orders flagged late but lingering for years
+    -- are zombie data (should have been Cancelled or Lost long ago) and
+    -- aren't actionable.
+    AND t."shipsAt" >= NOW() - INTERVAL '365 days'
     ${filterClause}
 ),
 job_summary AS (

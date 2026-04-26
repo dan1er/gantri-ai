@@ -157,22 +157,31 @@ export class MarketingAnalysisConnector implements Connector {
     const breakdown = args.platformFilter
       ? { key: 'Platform (Northbeam)', values: [args.platformFilter] }
       : undefined;
-    const results = await Promise.all(
-      models.map(async (m) => {
-        try {
-          const csv = await this.deps.nb.runExport(this.buildExport({
+    // Sequential, NOT parallel: firing all 7 exports at once saturates NB's
+    // queue and every poll loop competes for the same 90s budget. Serial keeps
+    // each export under its own timeout window. ~5-10s × 7 = 35-70s total —
+    // acceptable for a tool that gives a 7-model side-by-side.
+    const results: Array<
+      | { model: { id: string; name: string }; ok: true; headers: string[]; rows: Array<string[] | unknown[]> }
+      | { model: { id: string; name: string }; ok: false; error: string }
+    > = [];
+    for (const m of models) {
+      try {
+        const csv = await this.deps.nb.runExport(
+          this.buildExport({
             dateRange: args.dateRange,
             attributionModel: m.id,
             metrics: args.metrics,
             breakdown,
             aggregateData: true,
-          }));
-          return { model: m, ok: true as const, headers: csv.headers, rows: csv.rows };
-        } catch (err) {
-          return { model: m, ok: false as const, error: err instanceof Error ? err.message : String(err) };
-        }
-      }),
-    );
+          }),
+          { timeoutMs: 180_000 }, // bump per-export budget from default 90s to 180s for heavy analysis windows
+        );
+        results.push({ model: m, ok: true, headers: csv.headers, rows: csv.rows });
+      } catch (err) {
+        results.push({ model: m, ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
+    }
     // Aggregate per-model totals across breakdown rows for the comparison view.
     const perModel = results.map((r) => {
       if (!r.ok) return { model_id: r.model.id, model_name: r.model.name, error: r.error };
@@ -212,13 +221,16 @@ export class MarketingAnalysisConnector implements Connector {
 
   private async runLtvCac(args: LtvCacArgs) {
     const breakdownValues = await this.expandBreakdownValues(args.breakdownKey);
-    const csv = await this.deps.nb.runExport(this.buildExport({
-      dateRange: args.dateRange,
-      attributionModel: 'northbeam_custom__va',
-      metrics: [...LTV_METRICS],
-      breakdown: { key: args.breakdownKey, values: breakdownValues },
-      aggregateData: true,
-    }));
+    const csv = await this.deps.nb.runExport(
+      this.buildExport({
+        dateRange: args.dateRange,
+        attributionModel: 'northbeam_custom__va',
+        metrics: [...LTV_METRICS],
+        breakdown: { key: args.breakdownKey, values: breakdownValues },
+        aggregateData: true,
+      }),
+      { timeoutMs: 180_000 },
+    );
     const breakdownColumn = breakdownColumnFor(args.breakdownKey);
     const rows = csv.rows.map((r) => {
       const get = (col: string) => {
@@ -270,14 +282,17 @@ export class MarketingAnalysisConnector implements Connector {
 
   private async runNewVsReturning(args: NewVsReturningArgs) {
     const breakdownValues = await this.expandBreakdownValues(args.breakdownKey);
-    const csv = await this.deps.nb.runExport(this.buildExport({
-      dateRange: args.dateRange,
-      attributionModel: 'northbeam_custom__va',
-      metrics: NVR_METRICS,
-      breakdown: { key: args.breakdownKey, values: breakdownValues },
-      level: args.level,
-      aggregateData: args.level === 'platform',
-    }));
+    const csv = await this.deps.nb.runExport(
+      this.buildExport({
+        dateRange: args.dateRange,
+        attributionModel: 'northbeam_custom__va',
+        metrics: NVR_METRICS,
+        breakdown: { key: args.breakdownKey, values: breakdownValues },
+        level: args.level,
+        aggregateData: args.level === 'platform',
+      }),
+      { timeoutMs: 180_000 },
+    );
     const breakdownColumn = breakdownColumnFor(args.breakdownKey);
     const rows = csv.rows.map((r) => {
       const get = (col: string) => {
@@ -331,18 +346,20 @@ export class MarketingAnalysisConnector implements Connector {
 
   private async runBudgetOptimization(args: BudgetOptimizationArgs) {
     const fetchPeriod = async (range: { startDate: string; endDate: string }) => {
-      return this.deps.nb.runExport(this.buildExport({
-        dateRange: range,
-        attributionModel: 'northbeam_custom__va',
-        metrics: ['rev', 'spend', 'txns'],
-        level: 'campaign',
-        aggregateData: false,
-      }));
+      return this.deps.nb.runExport(
+        this.buildExport({
+          dateRange: range,
+          attributionModel: 'northbeam_custom__va',
+          metrics: ['rev', 'spend', 'txns'],
+          level: 'campaign',
+          aggregateData: false,
+        }),
+        { timeoutMs: 180_000 },
+      );
     };
-    const [current, prior] = await Promise.all([
-      fetchPeriod(args.currentPeriod),
-      fetchPeriod(args.priorPeriod),
-    ]);
+    // Sequential, not parallel — see attribution_compare_models for rationale.
+    const current = await fetchPeriod(args.currentPeriod);
+    const prior = await fetchPeriod(args.priorPeriod);
     const indexBy = (csv: { headers: string[]; rows: Array<Record<string, string>> | Array<Array<string | number | null>> }) => {
       const map = new Map<string, { rev: number; spend: number; txns: number; campaign: string; platform: string }>();
       const get = (row: Array<unknown>, col: string) => {

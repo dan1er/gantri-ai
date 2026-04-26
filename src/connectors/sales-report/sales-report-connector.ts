@@ -49,10 +49,22 @@ export class SalesReportConnector implements Connector {
       description: [
         'Pull the per-type sales breakdown directly from the Grafana Sales dashboard SQL — the same numbers the team sees on Grafana. Use this for ANY revenue / subtotal / shipping / tax / discount / credit / AOV / ASP / order-count question, broken out by transaction type (Order, Wholesale, Trade, Third Party, Made, Refund, Wholesale Refund, Trade Refund, Third Party Refund, Replacement, Marketing, R&D, Designer).',
         'Time bucketing matches Grafana exactly:',
-        '  - Non-refund types: filter by `createdAt` in the range, status NOT IN (Unpaid, Cancelled).',
-        '  - Refund types: filter by `completedAt` in the range, status IN (Refunded, Delivered); revenue is signed negative so type-totals net out refunds.',
+        '  - Non-refund types: filter by createdAt in the range, status NOT IN (Unpaid, Cancelled).',
+        '  - Refund types: filter by completedAt in the range, status IN (Refunded, Delivered); revenue is signed negative so type-totals net out refunds.',
         'Revenue formula: subtotal + shipping + tax - discount, all summed at the StockAssociation + GiftCards line-item level (NOT the Transactions.amount level).',
-        'Returns one row per type with: orders, items, giftCards, subtotal, shipping, tax, discount (signed negative), credit (signed negative), full_total, sales_exl_tax. Always quote the period back to the user.',
+        'Returns one row per type with these EXACT field names (use them as-is when building canvas tables — `row[column.key]` lookup is case-sensitive):',
+        '  - `type` (string) — transaction type',
+        '  - `orders` (int)  — count of transactions',
+        '  - `items` (int)   — count of stock-association line items',
+        '  - `giftCards` (int) — count of gift cards',
+        '  - `subtotal` (number, dollars) — SA-level subtotal sum (signed negative for refund types)',
+        '  - `shipping` (number, dollars) — SA-level shipping sum',
+        '  - `tax` (number, dollars) — SA-level tax sum',
+        '  - `discount` (number, dollars, signed negative) — Grafana-displayed value: -1 * (SUM(disc) - SUM(credit))',
+        '  - `credit` (number, dollars, signed negative) — Grafana-displayed value: -1 * SUM(credit)',
+        '  - `salesExclTax` (number, dollars) — sales excluding tax',
+        '  - `fullTotal` (number, dollars) — the headline revenue number (signed negative for refund types)',
+        'Always quote the period back to the user.',
       ].join('\n'),
       schema: Args as z.ZodType<Args>,
       jsonSchema: zodToJsonSchema(Args),
@@ -66,18 +78,21 @@ export class SalesReportConnector implements Connector {
     const toMs = wallClockToUtc(`${addDays(args.dateRange.endDate, 1)}T00:00:00.000`, PT_TZ);
     const result = await this.deps.grafana.runSql({ sql: SALES_REPORT_SQL, fromMs, toMs, maxRows: 50 });
     const idx = (name: string) => result.fields.indexOf(name);
+    // Field names match what the LLM naturally references when building canvas
+    // tables. Shorter is better — the canvas builder looks up `row[column.key]`
+    // so e.g. `key:'shipping'` must find the value, not `key:'shippingDollars'`.
     const rows = result.rows.map((r) => ({
       type: r[idx('type')] as string,
       orders: Number(r[idx('orders')] ?? 0),
       items: Number(r[idx('items')] ?? 0),
       giftCards: Number(r[idx('gift_cards')] ?? 0),
-      subtotalDollars: roundCents(r[idx('subtotal')]),
-      shippingDollars: roundCents(r[idx('shipping')]),
-      taxDollars: roundCents(r[idx('tax')]),
-      discountDollars: roundCents(r[idx('discount')]),
-      creditDollars: roundCents(r[idx('credit')]),
-      salesExclTaxDollars: roundCents(r[idx('sales_exl_tax')]),
-      fullTotalDollars: roundCents(r[idx('full_total')]),
+      subtotal: roundCents(r[idx('subtotal')]),
+      shipping: roundCents(r[idx('shipping')]),
+      tax: roundCents(r[idx('tax')]),
+      discount: roundCents(r[idx('discount')]),
+      credit: roundCents(r[idx('credit')]),
+      salesExclTax: roundCents(r[idx('sales_exl_tax')]),
+      fullTotal: roundCents(r[idx('full_total')]),
     }));
     return {
       period: args.dateRange,

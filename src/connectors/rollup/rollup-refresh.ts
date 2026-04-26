@@ -31,7 +31,11 @@ WITH txn AS (
   FROM "Transactions" t
   WHERE t."createdAt" >= ($__timeFrom())::timestamp
     AND t."createdAt" <  ($__timeTo())::timestamp
-    AND t.status NOT IN ('Cancelled','Lost')
+    -- Cancelled-only exclusion. We deliberately keep Lost rows because the
+    -- Grafana Sales panel includes them (a Lost order is a real sale whose
+    -- package did not arrive -- usually offset by a separate Refund row that
+    -- this rollup also captures, so net revenue stays correct).
+    AND t.status NOT IN ('Cancelled')
 ),
 daily_totals AS (
   SELECT day,

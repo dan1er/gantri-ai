@@ -598,7 +598,7 @@ export function aggregateFromRollup(
     period: args.dateRange,
     typesFilter: args.types,
     source: 'rollup' as const,
-    note: 'Rollup excludes Cancelled and Lost orders by construction; numbers match Grafana Sales (which uses the same definition). Refund-type rows are negative (net of refunds).',
+    note: 'Rollup excludes Cancelled orders only (Lost is included because a Lost order is a real sale whose package did not arrive, usually offset by a corresponding Refund row that the rollup also captures). Numbers match Grafana Sales. Refund-type rows are negative (net of refunds).',
     porterTotalCount,
     totalOrders: totalCount,
     totalRevenueDollars,

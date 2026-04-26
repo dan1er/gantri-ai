@@ -48,11 +48,17 @@ async function main() {
   ]);
 
   const registry = new ConnectorRegistry();
+  // KILL SWITCH 2026-04-25: legacy Playwright-based Northbeam connector
+  // disabled while the API migration is in flight. NB's anti-bot blocked the
+  // scraping account; even after manual unblock it still times out heuristically.
+  // Stays in the codebase for emergency rollback — re-enable by uncommenting
+  // the registry.register(northbeam) line below once the API path is stable.
   const northbeam = new NorthbeamConnector({
     supabase,
     credentials: { email, password, dashboardId },
   });
-  registry.register(northbeam);
+  // registry.register(northbeam);
+  void northbeam; // keep the construction so healthCheck below still has a target
   // ReportsConnector needs the Slack WebClient (for canvases.* APIs), so we
   // construct + register it AFTER buildSlackApp() below, where `app.client`
   // is available. The orchestrator reads tools lazily on each run, so

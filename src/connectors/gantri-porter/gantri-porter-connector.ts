@@ -457,7 +457,14 @@ function buildPorterTools(conn: GantriPorterConnector): ToolDef[] {
       // that explicitly in the response.
       if (exceedsCap && !args.search && conn.rollupRepo) {
         const rollupRows = await conn.rollupRepo.getRange(startDateStr, endDateStr);
-        return aggregateFromRollup(rollupRows, args, totalCount);
+        // Detect coverage gap: if the rollup's earliest row is later than the
+        // requested startDate, the front of the window is missing. Surface it
+        // so the LLM doesn't pass the partial result off as the full range.
+        const earliest = rollupRows[0]?.date;
+        const coverageGapDays = earliest && earliest > startDateStr
+          ? daysBetween(startDateStr, earliest)
+          : 0;
+        return aggregateFromRollup(rollupRows, args, totalCount, { coverageGapDays, rollupStart: earliest ?? null, requestedStart: startDateStr });
       }
 
       // Pagination path — works for ranges under the cap, or whenever a search
@@ -555,6 +562,7 @@ export function aggregateFromRollup(
   rows: RollupRow[],
   args: { dateRange: { startDate: string; endDate: string }; types?: string[] },
   porterTotalCount: number,
+  coverage?: { coverageGapDays: number; rollupStart: string | null; requestedStart: string },
 ): unknown {
   const typesFilter = args.types && args.types.length > 0 ? new Set(args.types) : null;
   const typeAgg: Record<string, { count: number; revenueCents: number }> = {};
@@ -583,6 +591,9 @@ export function aggregateFromRollup(
   }
 
   const totalRevenueDollars = round2(totalRevenueCents / 100);
+  const coverageWarning = coverage && coverage.coverageGapDays > 0
+    ? `Rollup data only starts at ${coverage.rollupStart}; the requested start was ${coverage.requestedStart}. The first ${coverage.coverageGapDays} days of the requested window are NOT included in these totals. Tell the user the partial coverage so they can decide whether to ask for the covered range only or wait for a backfill.`
+    : null;
   return {
     period: args.dateRange,
     typesFilter: args.types,
@@ -601,7 +612,13 @@ export function aggregateFromRollup(
       .map(([type, v]) => ({ type, count: v.count, revenueDollars: round2(v.revenueCents / 100) }))
       .sort((a, b) => b.count - a.count),
     truncated: false,
+    ...(coverageWarning ? { coverageGapDays: coverage!.coverageGapDays, rollupStart: coverage!.rollupStart, warning: coverageWarning } : {}),
   };
+}
+
+function daysBetween(startYmd: string, endYmd: string): number {
+  const ms = Date.parse(endYmd + 'T00:00:00Z') - Date.parse(startYmd + 'T00:00:00Z');
+  return Math.round(ms / 86400000);
 }
 
 /**

@@ -126,12 +126,35 @@ export class SalesReportConnector implements Connector {
       }),
       { orders: 0, items: 0, giftCards: 0, subtotal: 0, shipping: 0, tax: 0, discount: 0, credit: 0, salesExclTax: 0, fullTotal: 0 },
     );
+    // The plan compiler bakes placeholder paths into the plan at subscription
+    // time. To survive whichever convention the LLM picked, every numeric field
+    // is aliased under multiple names: camelCase, snake_case, and a `*Dollars`
+    // suffix variant. The `totals` and `summary` keys point at the same object
+    // so `${salesReport.totals.shipping}` and `${salesReport.summary.shippingDollars}`
+    // both resolve.
+    const summary = {
+      // counts
+      orders: totals.orders,
+      items: totals.items,
+      giftCards: totals.giftCards,
+      gift_cards: totals.giftCards,
+      // money fields, in every naming convention
+      subtotal: totals.subtotal, subtotalDollars: totals.subtotal,
+      shipping: totals.shipping, shippingDollars: totals.shipping, totalShipping: totals.shipping,
+      tax: totals.tax, taxDollars: totals.tax,
+      discount: totals.discount, discountDollars: totals.discount,
+      credit: totals.credit, creditDollars: totals.credit,
+      salesExclTax: totals.salesExclTax, salesExclTaxDollars: totals.salesExclTax,
+      sales_excl_tax: totals.salesExclTax, sales_exl_tax: totals.salesExclTax,
+      fullTotal: totals.fullTotal, fullTotalDollars: totals.fullTotal,
+      full_total: totals.fullTotal, totalRevenue: totals.fullTotal,
+    };
     return {
       period: args.dateRange,
       source: 'grafana_sales_panel' as const,
       rows,
-      // Snake_case aliases so LLM placeholders match either convention.
-      totals: { ...totals, gift_cards: totals.giftCards, sales_excl_tax: totals.salesExclTax, sales_exl_tax: totals.salesExclTax, full_total: totals.fullTotal },
+      totals: summary,
+      summary, // plan compiler has been observed to bake `${salesReport.summary.X}`
     };
   }
 }

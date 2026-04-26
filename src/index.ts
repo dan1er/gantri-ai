@@ -17,6 +17,7 @@ import { LateOrdersConnector } from './connectors/late-orders/late-orders-connec
 import { NorthbeamConnector } from './connectors/northbeam/northbeam-connector.js';
 import { NorthbeamApiConnector } from './connectors/northbeam-api/connector.js';
 import { NorthbeamApiClient } from './connectors/northbeam-api/client.js';
+import { MarketingAnalysisConnector } from './connectors/marketing-analysis/connector.js';
 import { ReportsConnector } from './connectors/reports/reports-connector.js';
 import { FeedbackConnector } from './connectors/feedback/feedback-connector.js';
 import { FeedbackRepo } from './storage/repositories/feedback.js';
@@ -105,6 +106,11 @@ async function main() {
   // gantri.compare_orders_nb_vs_porter tool exposed by SalesReportConnector).
   const nbClient = new NorthbeamApiClient({ apiKey: nbApiKey, dataClientId: nbDataClientId });
   registry.register(new SalesReportConnector({ grafana, nb: nbClient }));
+
+  // Marketing-analysis tools — multi-call NB patterns the LLM has historically
+  // gotten wrong inline (attribution-model comparison, LTV/CAC by channel,
+  // new vs returning split, marginal-ROAS budget optimization).
+  registry.register(new MarketingAnalysisConnector({ nb: nbClient }));
 
   registry.register(new LateOrdersConnector({ grafana }));
 

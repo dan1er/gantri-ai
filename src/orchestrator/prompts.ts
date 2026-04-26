@@ -19,6 +19,7 @@ What you can answer (canonical list — when the user asks "what can you do" / "
     - \`dateRange\`: either a preset (\`yesterday\`, \`last_7_days\`, \`last_30_days\`, \`last_90_days\`, \`last_180_days\`, \`last_365_days\`) OR an explicit \`{start: 'YYYY-MM-DD', end: 'YYYY-MM-DD'}\` for a fixed window.
     - \`metrics\`: array of metric IDs (e.g. \`['rev']\`, \`['spend']\`, \`['rev','spend','txns']\`, \`['aovFt','aovRtn']\`). Use \`northbeam.list_metrics\` to discover IDs you don't know.
     - \`breakdown\` (optional): \`{key, values?}\`. Common keys: \`'Platform (Northbeam)'\` (Facebook Ads, Google Ads, Email, etc), \`'Forecast'\` (Gantri's internal channel rollup: Affiliate, Direct, Email, Google Ads, Meta Ads, Organic Search, Organic Social, Other), \`'Category (Northbeam)'\`, \`'Targeting (Northbeam)'\`. Use \`northbeam.list_breakdowns\` to discover keys + valid values.
+    - \`level\`: \`'platform'\` (default — one row per channel), \`'campaign'\`, \`'adset'\`, or \`'ad'\`. **Use \`'campaign'\` for "top N campaigns" / "best campaign" / "most successful campaign" / "highest ROAS campaign" questions** — combine with \`aggregateData: false\` so you get per-campaign rows you can sort. The CSV columns include \`campaign_name\` and \`status\` at this level.
     - \`attributionModel\`: default \`northbeam_custom__va\` ("Clicks + Modeled Views") — the headline number. Other options via \`northbeam.list_attribution_models\`.
     - \`accountingMode\`: \`'cash'\` (default — revenue at order time, "Cash snapshot" in the UI) or \`'accrual'\` (LTV horizon).
     - \`attributionWindow\`: default \`'1'\` (1-day click).
@@ -38,6 +39,7 @@ What you can answer (canonical list — when the user asks "what can you do" / "
     - "How much did we spend on ads on January 1?" → \`metrics_explorer({ dateRange: {start: '2026-01-01', end: '2026-01-01'}, metrics: ['spend'] })\`
     - "Top channel by revenue last month" → \`metrics_explorer({ dateRange: 'last_30_days', metrics: ['rev'], breakdown: {key: 'Platform (Northbeam)'} })\`, then sort top by \`rev\`
     - "ROAS by channel last 7 days" → \`metrics_explorer({ dateRange: 'last_7_days', metrics: ['rev','spend'], breakdown: {key: 'Platform (Northbeam)'} })\`, compute \`rev/spend\` per row
+    - "Best / most successful campaign last 30d" → \`metrics_explorer({ dateRange: 'last_30_days', metrics: ['rev','spend','txns'], level: 'campaign', aggregateData: false })\`, then compute ROAS = rev/spend per row, sort desc, top N. Each row is a campaign with \`campaign_name\` and \`status\` columns.
     - "Lana's weekly Forecast report" → \`metrics_explorer({ dateRange: 'last_7_days', metrics: ['rev','spend','txns'], breakdown: {key: 'Forecast'}, attributionModel: 'northbeam_custom__va', accountingMode: 'cash', attributionWindow: '1' })\`
     - "% of revenue from new customers this week" → \`metrics_explorer({ dateRange: 'last_7_days', metrics: ['aovFt','aovRtn','visitorsFt','visitorsRtn'] })\`
     - "Does Facebook spend correlate with Google branded search revenue?" → two calls (or one with a Platform breakdown), then compute Pearson client-side.

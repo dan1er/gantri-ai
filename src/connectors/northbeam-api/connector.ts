@@ -78,6 +78,10 @@ const MetricsExplorerArgs = z.object({
     .min(1)
     .describe('Array of metric IDs from `northbeam.list_metrics` (e.g. ["rev","spend","txns"]).'),
   breakdown: Breakdown.optional(),
+  level: z
+    .enum(['platform', 'campaign', 'adset', 'ad'])
+    .default('platform')
+    .describe('Granularity of the rows returned. Use "campaign" for "top N campaigns by ROAS / revenue" / "best ad campaign" questions; "adset" or "ad" for deeper drill-down. Default "platform" (one row per channel/platform).'),
   attributionModel: z
     .string()
     .default('northbeam_custom__va')
@@ -91,7 +95,7 @@ const MetricsExplorerArgs = z.object({
   aggregateData: z
     .boolean()
     .default(true)
-    .describe('When true, NB sums campaigns within each breakdown so you get one row per (date × breakdown_value). Set false for per-campaign rows.'),
+    .describe('When true, NB sums campaigns within each breakdown so you get one row per (date × breakdown_value). Set false at level=campaign/ad to get per-row detail (e.g. for "top campaigns" rankings).'),
 });
 type MetricsExplorerArgs = z.infer<typeof MetricsExplorerArgs>;
 
@@ -185,7 +189,7 @@ export function buildExportPayload(args: MetricsExplorerArgs): DataExportPayload
       // so the FIXED window is inclusive of both calendar days.
       : { period_type: 'FIXED', period_options: { period_starting_at: `${args.dateRange.start}T00:00:00.000Z`, period_ending_at: `${args.dateRange.end}T23:59:59.999Z` } };
   return {
-    level: 'platform',
+    level: args.level,
     time_granularity: args.granularity,
     ...periodFields,
     breakdowns,

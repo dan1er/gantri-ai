@@ -20,6 +20,23 @@ export function renderOutput(spec: OutputSpec, aliasMap: Record<string, unknown>
     const rendered = renderBlock(block, aliasMap, attachments);
     if (rendered) parts.push(rendered);
   }
+  // Also collect any attachments produced by `reports.attach_file` steps. That
+  // tool returns `{attachment: {filename, content, format, normalizedFilename?}}`
+  // in its alias entry. Without this scan, the runner shipped the message text
+  // but Slack got no file (the attachment sat unused in aliasMap). The LLM has
+  // been observed to schedule attach_file as a step (instead of declaring a
+  // `csv_attachment` block) — both patterns now produce a delivered file.
+  for (const aliasResult of Object.values(aliasMap)) {
+    const att = (aliasResult as { attachment?: unknown } | null | undefined)?.attachment;
+    if (!att || typeof att !== 'object') continue;
+    const a = att as Record<string, unknown>;
+    if (typeof a.content !== 'string' || typeof a.format !== 'string' || typeof a.filename !== 'string') continue;
+    if (a.format !== 'csv' && a.format !== 'markdown' && a.format !== 'text') continue;
+    const filename = (typeof a.normalizedFilename === 'string' ? a.normalizedFilename : a.filename);
+    // RenderedAttachment currently types format as 'csv' only — but the
+    // delivery side accepts arbitrary text uploads, so cast and let it through.
+    attachments.push({ filename, content: a.content, format: a.format as 'csv' });
+  }
   return { text: parts.join('\n\n'), attachments };
 }
 

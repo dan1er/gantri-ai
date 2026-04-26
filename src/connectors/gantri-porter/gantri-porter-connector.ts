@@ -449,23 +449,12 @@ function buildPorterTools(conn: GantriPorterConnector): ToolDef[] {
         }),
       });
       const totalCount = firstPage.allOrders;
-      const exceedsCap = totalCount > pageSize * maxPages;
 
-      // Rollup fallback: only when there's no `search` (rollup has no
-      // customer/email/text index) and the row count exceeds the pagination
-      // cap. The rollup excludes Cancelled/Lost orders by construction; we mark
-      // that explicitly in the response.
-      if (exceedsCap && !args.search && conn.rollupRepo) {
-        const rollupRows = await conn.rollupRepo.getRange(startDateStr, endDateStr);
-        // Detect coverage gap: if the rollup's earliest row is later than the
-        // requested startDate, the front of the window is missing. Surface it
-        // so the LLM doesn't pass the partial result off as the full range.
-        const earliest = rollupRows[0]?.date;
-        const coverageGapDays = earliest && earliest > startDateStr
-          ? daysBetween(startDateStr, earliest)
-          : 0;
-        return aggregateFromRollup(rollupRows, args, totalCount, { coverageGapDays, rollupStart: earliest ?? null, requestedStart: startDateStr });
-      }
+      // Note: the rollup fallback for wide ranges has been removed. For revenue
+      // / subtotal / shipping aggregates over wide ranges, use
+      // `gantri.sales_report` (which runs Grafana's Sales-panel SQL live).
+      // order_stats stays Porter-paginated and surfaces `breakdownIncomplete`
+      // when the cap is hit so the LLM can warn the user.
 
       // Pagination path — works for ranges under the cap, or whenever a search
       // filter is applied.
@@ -616,10 +605,6 @@ export function aggregateFromRollup(
   };
 }
 
-function daysBetween(startYmd: string, endYmd: string): number {
-  const ms = Date.parse(endYmd + 'T00:00:00Z') - Date.parse(startYmd + 'T00:00:00Z');
-  return Math.round(ms / 86400000);
-}
 
 /**
  * Compute the order total in cents from the Porter `amount` JSON.

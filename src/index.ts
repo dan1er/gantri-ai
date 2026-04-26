@@ -9,8 +9,10 @@ import { CachingRegistry } from './connectors/base/caching-registry.js';
 import { DEFAULT_CACHE_POLICIES } from './connectors/base/default-policies.js';
 import { TtlCache } from './storage/cache.js';
 import { RollupRepo } from './storage/rollup-repo.js';
-import { RollupConnector } from './connectors/rollup/rollup-connector.js';
 import { RollupRefreshJob } from './connectors/rollup/rollup-refresh.js';
+import { SalesReportConnector } from './connectors/sales-report/sales-report-connector.js';
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+import { RollupConnector as _DeprecatedRollupConnector } from './connectors/rollup/rollup-connector.js';
 import { LateOrdersConnector } from './connectors/late-orders/late-orders-connector.js';
 import { NorthbeamConnector } from './connectors/northbeam/northbeam-connector.js';
 import { NorthbeamApiConnector } from './connectors/northbeam-api/connector.js';
@@ -94,7 +96,11 @@ async function main() {
   });
   registry.register(grafana);
 
-  registry.register(new RollupConnector({ repo: rollupRepo }));
+  // Sales report tool — runs Grafana's exact Sales-dashboard panel SQL live.
+  // Replaces the old `gantri.daily_rollup` tool; the team trusts Grafana's
+  // numbers and the rollup table diverged subtly (Transaction-level vs
+  // StockAssociation-level discount allocation).
+  registry.register(new SalesReportConnector({ grafana }));
 
   registry.register(new LateOrdersConnector({ grafana }));
 
@@ -209,8 +215,12 @@ async function main() {
 
   reportsRunner.start();
 
-  const rollupJob = new RollupRefreshJob({ grafana, repo: rollupRepo });
-  rollupJob.start();
+  // RollupRefreshJob is no longer started — sales numbers now come live from
+  // Grafana via SalesReportConnector. The rollup table + refresh code stay in
+  // the tree as deprecated for emergency rollback. Re-enable by uncommenting:
+  //   const rollupJob = new RollupRefreshJob({ grafana, repo: rollupRepo });
+  //   rollupJob.start();
+  void RollupRefreshJob; // silence unused-import lint
 }
 
 main().catch((err) => {

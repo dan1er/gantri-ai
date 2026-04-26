@@ -3,39 +3,65 @@ import type { RollupRepo, UpsertRollupInput } from '../../storage/rollup-repo.js
 import { logger } from '../../logger.js';
 
 const PT_TZ = 'America/Los_Angeles';
+// Replicates the Grafana Sales dashboard "Full Total" panel formula EXACTLY so
+// the rollup matches what the Gantri team actually looks at. Two key choices,
+// both copied from Grafana's per-type Sales panel:
+//
+// 1. Revenue components come from StockAssociations + GiftCards (the per-line
+//    SA-level fields), NOT from Transactions.amount. Same row count, but
+//    Transaction-level discount/shipping/tax can differ from the sum of the
+//    per-line SA values (e.g. for Trade type the SA-level discount is $77k
+//    while T.amount.discount is $47k). The Grafana panel uses SA-level, so we
+//    do too.
+//    full_total = SA.subtotal + GC.subtotal + SA.shipping + SA.tax - SA.discount
+//    Note: gift and credit are NOT subtracted in the Grafana panel.
+//
+// 2. Non-refund types bucket by t.createdAt and require status NOT IN
+//    ('Unpaid','Cancelled'). Refund types bucket by t.completedAt and
+//    require status IN ('Refunded','Delivered'); their revenue is negated so
+//    daily totals net out refunds.
 const ROLLUP_SQL = `
-WITH txn AS (
+WITH per_txn AS (
   SELECT
-    DATE_TRUNC('day', t."createdAt" AT TIME ZONE 'America/Los_Angeles')::date AS day,
-    t.type,
-    t.status,
+    t.id, t.type, t.status, t."createdAt", t."completedAt",
     COALESCE(t."organizationId"::text, 'null') AS org_key,
-    -- Net revenue per transaction. Always derive as
-    --   subtotal + shipping + tax - discount - credit - gift
-    -- so that the rollup matches Grafana's Sales panel formula exactly. We
-    -- intentionally do NOT prefer amount.total (even when it's set on retail
-    -- Order rows) because amount.total has payment-gateway fees baked in that
-    -- the Grafana panel doesn't subtract -- using amount.total would make the rollup
-    -- ~$8.6k less than Grafana over a 2-year window for an aggregate the user
-    -- expects to match.
-    -- Refund-type transactions store positive numbers, so we negate them so
-    -- daily totals are net of refunds and the by_type breakdown sums to the
-    -- daily total. Affects every type ending in "Refund".
-    (CASE WHEN t.type LIKE '%Refund' THEN -1 ELSE 1 END) *
-    ((t.amount->>'subtotal')::numeric
-     + COALESCE((t.amount->>'shipping')::numeric, 0)
-     + COALESCE((t.amount->>'tax')::numeric, 0)
-     - COALESCE((t.amount->>'discount')::numeric, 0)
-     - COALESCE((t.amount->>'credit')::numeric, 0)
-     - COALESCE((t.amount->>'gift')::numeric, 0)) AS revenue_cents
+    (SUM(COALESCE((sa.amount->>'subtotal')::decimal, 0))
+       + COALESCE(SUM((gc.amount)::decimal), 0)
+     + SUM(COALESCE((sa.amount->>'shipping')::decimal, 0))
+     + SUM(COALESCE((sa.amount->>'tax')::decimal, 0))
+     - SUM(COALESCE((sa.amount->>'discount')::decimal, 0))) AS revenue_cents
   FROM "Transactions" t
-  WHERE t."createdAt" >= ($__timeFrom())::timestamp
-    AND t."createdAt" <  ($__timeTo())::timestamp
-    -- Cancelled-only exclusion. We deliberately keep Lost rows because the
-    -- Grafana Sales panel includes them (a Lost order is a real sale whose
-    -- package did not arrive -- usually offset by a separate Refund row that
-    -- this rollup also captures, so net revenue stays correct).
-    AND t.status NOT IN ('Cancelled')
+  LEFT JOIN "StockAssociations" sa ON sa."orderId" = t.id
+  LEFT JOIN "GiftCards" gc ON gc."orderId" = t.id
+  WHERE
+    -- Non-refund types: keyed by createdAt. Refund types: keyed by completedAt.
+    -- Either bucket-day must fall within the window for the row to count.
+    (
+      (t.type NOT LIKE '%Refund'
+        AND t."createdAt" >= ($__timeFrom())::timestamp
+        AND t."createdAt" <  ($__timeTo())::timestamp
+        AND t.status NOT IN ('Unpaid','Cancelled'))
+      OR
+      (t.type LIKE '%Refund'
+        AND t."completedAt" >= ($__timeFrom())::timestamp
+        AND t."completedAt" <  ($__timeTo())::timestamp
+        AND t.status IN ('Refunded','Delivered'))
+    )
+  GROUP BY t.id, t.type, t.status, t."createdAt", t."completedAt", org_key
+),
+txn AS (
+  SELECT
+    -- Non-refund: bucket by createdAt PT. Refund: bucket by completedAt PT.
+    CASE
+      WHEN type LIKE '%Refund'
+        THEN DATE_TRUNC('day', "completedAt" AT TIME ZONE 'America/Los_Angeles')::date
+      ELSE DATE_TRUNC('day', "createdAt" AT TIME ZONE 'America/Los_Angeles')::date
+    END AS day,
+    type, status, org_key,
+    -- Negate refund-type revenue so daily totals are net of refunds and the
+    -- by_type breakdown sums to the daily total.
+    (CASE WHEN type LIKE '%Refund' THEN -1 ELSE 1 END) * revenue_cents AS revenue_cents
+  FROM per_txn
 ),
 daily_totals AS (
   SELECT day,

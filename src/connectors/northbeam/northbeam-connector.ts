@@ -1,3 +1,16 @@
+/**
+ * @deprecated 2026-04-25 — replaced by `src/connectors/northbeam-api/connector.ts`,
+ * which talks to the official Northbeam REST API. This Playwright-based
+ * connector got blocked by NB's anti-bot detection (the scraping account was
+ * suspended; even after manual unblock the heuristic flag kept timing out
+ * queries). It is kept in the codebase as an emergency fallback only — DO NOT
+ * register it in `src/index.ts`. To resurrect for a one-off, swap the
+ * `registry.register(northbeamApi)` call for `registry.register(northbeamLegacy)`
+ * in main(). The official API does not currently expose per-order attribution
+ * (touchpoints, channel-attributed-flag, per-order first-time/returning), so
+ * if a need for those resurfaces this is the bridge until/unless NB ships an
+ * official endpoint.
+ */
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { Connector, ToolDef } from '../base/connector.js';
 import { NorthbeamAuthManager, type Credentials } from './auth-manager.js';

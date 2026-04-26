@@ -13,6 +13,7 @@ import { RollupConnector } from './connectors/rollup/rollup-connector.js';
 import { RollupRefreshJob } from './connectors/rollup/rollup-refresh.js';
 import { LateOrdersConnector } from './connectors/late-orders/late-orders-connector.js';
 import { NorthbeamConnector } from './connectors/northbeam/northbeam-connector.js';
+import { NorthbeamApiConnector } from './connectors/northbeam-api/connector.js';
 import { ReportsConnector } from './connectors/reports/reports-connector.js';
 import { FeedbackConnector } from './connectors/feedback/feedback-connector.js';
 import { FeedbackRepo } from './storage/repositories/feedback.js';
@@ -33,12 +34,15 @@ async function main() {
 
   const [
     email, password, dashboardId,
+    nbApiKey, nbDataClientId,
     porterApiBaseUrl, porterBotEmail, porterBotPassword,
     grafanaUrl, grafanaToken, grafanaPostgresDsUid,
   ] = await Promise.all([
     readVaultSecret(supabase, 'NORTHBEAM_EMAIL'),
     readVaultSecret(supabase, 'NORTHBEAM_PASSWORD'),
     readVaultSecret(supabase, 'NORTHBEAM_DASHBOARD_ID'),
+    readVaultSecret(supabase, 'NORTHBEAM_API_KEY'),
+    readVaultSecret(supabase, 'NORTHBEAM_DATA_CLIENT_ID'),
     readVaultSecret(supabase, 'PORTER_API_BASE_URL'),
     readVaultSecret(supabase, 'PORTER_BOT_EMAIL'),
     readVaultSecret(supabase, 'PORTER_BOT_PASSWORD'),
@@ -48,17 +52,23 @@ async function main() {
   ]);
 
   const registry = new ConnectorRegistry();
-  // KILL SWITCH 2026-04-25: legacy Playwright-based Northbeam connector
-  // disabled while the API migration is in flight. NB's anti-bot blocked the
-  // scraping account; even after manual unblock it still times out heuristically.
-  // Stays in the codebase for emergency rollback — re-enable by uncommenting
-  // the registry.register(northbeam) line below once the API path is stable.
-  const northbeam = new NorthbeamConnector({
+
+  // Active Northbeam path: official REST API.
+  const northbeamApi = new NorthbeamApiConnector({
+    apiKey: nbApiKey,
+    dataClientId: nbDataClientId,
+  });
+  registry.register(northbeamApi);
+
+  // DEPRECATED 2026-04-25: legacy Playwright-based connector kept for emergency
+  // rollback only. NB's anti-bot blocked the scraping account; the official API
+  // (NorthbeamApiConnector above) is the supported path now. To re-enable for
+  // a one-off, swap the registry.register call to `northbeamLegacy`.
+  const northbeamLegacy = new NorthbeamConnector({
     supabase,
     credentials: { email, password, dashboardId },
   });
-  // registry.register(northbeam);
-  void northbeam; // keep the construction so healthCheck below still has a target
+  void northbeamLegacy;
   // ReportsConnector needs the Slack WebClient (for canvases.* APIs), so we
   // construct + register it AFTER buildSlackApp() below, where `app.client`
   // is available. The orchestrator reads tools lazily on each run, so
@@ -163,7 +173,7 @@ async function main() {
   // Readiness / deep check — exercises downstream auth and DB. Call manually.
   receiver.router.get('/readyz', async (_req, res) => {
     const [nb, gp, gf] = await Promise.all([
-      northbeam.healthCheck(),
+      northbeamApi.healthCheck(),
       gantriPorter.healthCheck(),
       grafana.healthCheck(),
     ]);

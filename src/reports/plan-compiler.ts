@@ -282,7 +282,11 @@ CONSTRAINTS:
 - schemaVersion must be 1.
 - Maximum 8 steps total.
 - All tool names must exactly match the catalog. Validate args against each tool's input schema.
-- Use TimeRef tokens for any date range; do NOT hard-code dates in SQL or args.
+- **TimeRef tokens go at the \`dateRange\` LEVEL, not inside \`startDate\`/\`endDate\`.** For tools whose args take \`{ dateRange: { startDate: string, endDate: string } }\` (gantri.sales_report, gantri.order_stats, gantri.orders_query, northbeam.list_orders, northbeam.metrics_explorer, etc.), pass the TimeRef as the WHOLE \`dateRange\` value:
+    Correct:   \`"args": { "dateRange": {"$time": "yesterday_pt"} }\`
+    Correct:   \`"args": { "dateRange": {"$time": "last_n_days_pt", "n": 7} }\`
+    WRONG:     \`"args": { "dateRange": { "startDate": {"$time": "yesterday_pt"}, "endDate": {"$time": "today_pt"} } }\`  ← will fail validation, NEVER do this.
+  At execution time the runner resolves \`{$time: ...}\` into \`{startDate, endDate, fromMs, toMs}\` and passes that whole object as the tool's \`dateRange\`. The extra \`fromMs\`/\`toMs\` keys are accepted (tools ignore them). For SQL placeholders inside grafana.sql, use the standard \`$__timeFrom()\` / \`$__timeTo()\` macros (which are filled from the same TimeRef-resolved range), not literal date strings.
 - Prefer grafana.sql for aggregations across the Porter schema (Transactions, StockAssociations, Stocks, Users, Products). Use Porter API tools only when you need data the read-replica doesn't expose.
 - Money in Porter SQL is JSON cents: divide \`(amount->>'total')::bigint\` by 100 for dollars.
 - Default to \`t.type IN ('Order','Wholesale','Trade','Third Party')\` for "sold" questions.
@@ -290,14 +294,14 @@ CONSTRAINTS:
 - Skip narrativeWrapup unless the user explicitly asked for analysis or commentary.
 
 KNOWN TOOL RESULT SHAPES (use these field names exactly):
-- gantri.order_stats: { period, typesFilter, totalOrders, totalRevenueDollars, avgOrderValueDollars, statusBreakdown: [{status, count, revenueDollars}], typeBreakdown: [{type, count, revenueDollars}], truncated }
+- gantri.sales_report: { period: {startDate, endDate}, source: 'grafana_sales_panel', rows: [{type, orders, items, giftCards, subtotal, shipping, tax, discount, credit, salesExclTax, fullTotal}], totals: {orders, items, giftCards, subtotal, shipping, tax, discount, credit, salesExclTax, fullTotal, ...snake_case + *Dollars aliases}, summary: <same as totals> }
+- gantri.order_stats: { period, typesFilter, totalOrders, totalRevenueDollars, avgOrderValueDollars, statusBreakdown: [{status, count, revenueDollars}], typeBreakdown: [{type, count, revenueDollars}], truncated, source: 'porter' }
 - gantri.orders_query: { totalMatching, maxPages, page, returnedCount, orders: [{id, type, status, customerName, email, userId, totalDollars, subtotalDollars, shippingDollars, taxDollars, createdAt, shipsAt, completedAt, adminLink, ...}] }
 - grafana.sql: { period, fields: string[], rowCount, rows: unknown[][], durationMs }   // rows are arrays-of-cells in column order; for tables build a derived shape via SQL aliases or use a text block
 - grafana.run_dashboard: { dashboard, period, panels: [{ panelId, title, fields, rows, error? }] }
-- northbeam.overview: top-level metrics object (spend, revenue, ROAS, …) — names depend on the metric ids selected
-- northbeam.sales: { rows: [...], summary: {...} }
-- northbeam.orders_summary: per-period rollup
-- northbeam.orders_list: { orders: [...], allOrders, page, ... }
+- northbeam.metrics_explorer: { attributionModel, accountingMode, attributionWindow, metrics, rowCount, headers, rows: [{...metric/breakdown columns}] }
+- northbeam.list_orders: { period, source: 'northbeam_v2_orders', count, totalReturned, cancelledOrDeletedExcluded, orders: [{order_id, customer_id, customer_name, customer_email, customer_phone_number, time_of_purchase, currency, purchase_total, tax, shipping_cost, discount_amount, order_tags, is_cancelled, is_deleted, ...}] }
+- northbeam.list_metrics / list_breakdowns / list_attribution_models: discovery catalogs; rarely useful inside a scheduled plan.
 
 OUTPUT TIPS:
 - **NEVER hand-build ASCII tables inside a text block.** Do not write \`| col | col |\` rows or \`---\` dividers in a text. Slack will not align them and the columns will visibly misregister. If you want tabular presentation, ALWAYS use the \`table\` block type — it auto-aligns columns at render time.

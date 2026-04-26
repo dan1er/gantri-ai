@@ -153,7 +153,7 @@ WITH per_txn_non_refund AS (
     AND t."createdAt" <  ($__timeTo())::timestamp
     AND t.status NOT IN ('Unpaid','Cancelled')
     AND t.type NOT IN ('Refund','Third Party Refund','Made Refund','Trade Refund','Wholesale Refund')
-  GROUP BY t.id, t.type, t.status, t.amount
+  GROUP BY t.id, t.type, t.status, (t.amount->>'credit')
 ),
 per_type_non_refund AS (
   SELECT type,
@@ -185,7 +185,7 @@ per_txn_refund AS (
     AND t."completedAt" <  ($__timeTo())::timestamp
     AND t.status IN ('Refunded','Delivered')
     AND t.type IN ('Refund','Third Party Refund','Made Refund','Trade Refund','Wholesale Refund')
-  GROUP BY t.id, t.type, t.status, t.amount
+  GROUP BY t.id, t.type, t.status, (t.amount->>'credit')
 ),
 per_type_refund AS (
   SELECT type,

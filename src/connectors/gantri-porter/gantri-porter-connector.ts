@@ -1,11 +1,19 @@
 import { z } from 'zod';
 import type { Connector, ToolDef } from '../base/connector.js';
 import { logger } from '../../logger.js';
+import type { RollupRepo, RollupRow } from '../../storage/rollup-repo.js';
 
 export interface PorterApiConfig {
   baseUrl: string;
   email: string;
   password: string;
+  /**
+   * Optional. When provided, `gantri.order_stats` falls back to the daily
+   * rollup table for date ranges that would otherwise overflow Porter's
+   * paginate-and-aggregate cap (~2000 rows). Without it, large ranges silently
+   * return a sample-of-2000 breakdown — see the comments in `orderStats` below.
+   */
+  rollupRepo?: RollupRepo;
 }
 
 /**
@@ -20,12 +28,14 @@ export interface PorterApiConfig {
 export class GantriPorterConnector implements Connector {
   readonly name = 'gantri';
   readonly tools: readonly ToolDef[];
+  readonly rollupRepo: RollupRepo | undefined;
 
   private token: string | null = null;
   private tokenFetchedAt = 0;
   private inflight: Promise<string> | null = null;
 
   constructor(private readonly cfg: PorterApiConfig) {
+    this.rollupRepo = cfg.rollupRepo;
     this.tools = buildPorterTools(this);
   }
 
@@ -392,7 +402,7 @@ function buildPorterTools(conn: GantriPorterConnector): ToolDef[] {
   const orderStats: ToolDef<OrderStatsArgs> = {
     name: 'gantri.order_stats',
     description:
-      'Aggregate order stats for a date range (Pacific Time): total count, total revenue in dollars, average order value, and breakdown by status and type. Paginates through matching orders up to a cap of ~2000 rows.',
+      'Aggregate order stats for a date range (Pacific Time): total count, total revenue in dollars, average order value, and breakdown by status and type. For ranges that fit under ~2000 transactions, paginates Porter directly. For larger ranges (e.g. multi-month / multi-year queries) without a `search` filter, automatically uses the pre-aggregated daily rollup so totals match Grafana exactly. Per-customer or text-search queries always go through Porter.',
     schema: OrderStatsArgs as z.ZodType<OrderStatsArgs>,
     jsonSchema: {
       type: 'object',
@@ -415,32 +425,50 @@ function buildPorterTools(conn: GantriPorterConnector): ToolDef[] {
     async execute(args) {
       const startDateStr = toPorterDate(args.dateRange.startDate);
       const endDateStr = toPorterDate(args.dateRange.endDate);
+
+      // Probe page 1 once to learn the true total. If it fits under the
+      // pagination cap we paginate Porter for full per-row breakdowns. If not,
+      // fall back to the daily rollup (which has correct totals + per-type and
+      // per-status breakdowns pre-aggregated, matching Grafana).
       const pageSize = 200;
-      const maxPages = 10; // 2000 rows cap
+      const maxPages = 10; // 2000 rows cap before rollup fallback
+
+      const firstPage = await conn.fetchJson<{
+        orders: any[];
+        allOrders: number;
+        maxPages: number;
+      }>('/api/admin/paginated-transactions', {
+        method: 'POST',
+        body: JSON.stringify({
+          page: 1,
+          count: pageSize,
+          ...(args.types?.length ? { types: args.types } : {}),
+          ...(args.search ? { search: args.search } : {}),
+          startDate: startDateStr,
+          endDate: endDateStr,
+        }),
+      });
+      const totalCount = firstPage.allOrders;
+      const exceedsCap = totalCount > pageSize * maxPages;
+
+      // Rollup fallback: only when there's no `search` (rollup has no
+      // customer/email/text index) and the row count exceeds the pagination
+      // cap. The rollup excludes Cancelled/Lost orders by construction; we mark
+      // that explicitly in the response.
+      if (exceedsCap && !args.search && conn.rollupRepo) {
+        const rollupRows = await conn.rollupRepo.getRange(startDateStr, endDateStr);
+        return aggregateFromRollup(rollupRows, args, totalCount);
+      }
+
+      // Pagination path — works for ranges under the cap, or whenever a search
+      // filter is applied.
       const statusCounts: Record<string, { count: number; revenueDollars: number }> = {};
       const typeCounts: Record<string, { count: number; revenueDollars: number }> = {};
-      let totalCount = 0;
       let totalRevenueCents = 0;
       let truncated = false;
 
-      for (let page = 1; page <= maxPages; page++) {
-        const data = await conn.fetchJson<{
-          orders: any[];
-          allOrders: number;
-          maxPages: number;
-        }>('/api/admin/paginated-transactions', {
-          method: 'POST',
-          body: JSON.stringify({
-            page,
-            count: pageSize,
-            ...(args.types?.length ? { types: args.types } : {}),
-            ...(args.search ? { search: args.search } : {}),
-            startDate: startDateStr,
-            endDate: endDateStr,
-          }),
-        });
-        if (page === 1) totalCount = data.allOrders;
-        for (const o of data.orders) {
+      const consume = (orders: any[]) => {
+        for (const o of orders) {
           const total = computeTotalCents(o.amount ?? {}) ?? 0;
           totalRevenueCents += total;
           const sKey = o.status ?? 'unknown';
@@ -452,24 +480,59 @@ function buildPorterTools(conn: GantriPorterConnector): ToolDef[] {
           typeCounts[tKey].count++;
           typeCounts[tKey].revenueDollars += total / 100;
         }
-        if (data.orders.length < pageSize) break;
+      };
+      consume(firstPage.orders);
+      let lastPageSize = firstPage.orders.length;
+
+      for (let page = 2; page <= maxPages && lastPageSize === pageSize; page++) {
+        const data = await conn.fetchJson<{ orders: any[]; allOrders: number; maxPages: number }>(
+          '/api/admin/paginated-transactions',
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              page,
+              count: pageSize,
+              ...(args.types?.length ? { types: args.types } : {}),
+              ...(args.search ? { search: args.search } : {}),
+              startDate: startDateStr,
+              endDate: endDateStr,
+            }),
+          },
+        );
+        consume(data.orders);
+        lastPageSize = data.orders.length;
         if (page === maxPages && data.maxPages > maxPages) truncated = true;
       }
+
+      // If we still fell short of `totalCount` (search filter present, no rollup
+      // available, or other reason), flag the truncation so the LLM doesn't
+      // surface a sample as if it were the full breakdown.
+      const breakdownCount = Object.values(typeCounts).reduce((s, v) => s + v.count, 0);
+      const breakdownIncomplete = breakdownCount < totalCount;
 
       const totalRevenueDollars = round2(totalRevenueCents / 100);
       return {
         period: args.dateRange,
         typesFilter: args.types,
+        source: 'porter' as const,
         totalOrders: totalCount,
-        totalRevenueDollars,
-        avgOrderValueDollars: totalCount > 0 ? round2(totalRevenueDollars / totalCount) : 0,
+        totalRevenueDollars: breakdownIncomplete ? null : totalRevenueDollars,
+        avgOrderValueDollars: breakdownIncomplete || totalCount === 0
+          ? null
+          : round2(totalRevenueDollars / totalCount),
         statusBreakdown: Object.entries(statusCounts)
           .map(([status, v]) => ({ status, ...v, revenueDollars: round2(v.revenueDollars) }))
           .sort((a, b) => b.count - a.count),
         typeBreakdown: Object.entries(typeCounts)
           .map(([type, v]) => ({ type, ...v, revenueDollars: round2(v.revenueDollars) }))
           .sort((a, b) => b.count - a.count),
-        truncated,
+        truncated: truncated || breakdownIncomplete,
+        breakdownIncomplete,
+        ...(breakdownIncomplete
+          ? {
+              warning: `Porter pagination cap reached (${pageSize * maxPages} rows fetched of ${totalCount} matching). The breakdowns above reflect a SAMPLE, not the full range. Re-run without 'search' to use the rollup, or narrow the date range.`,
+            }
+          : {}),
       };
     },
   };
@@ -479,6 +542,66 @@ function buildPorterTools(conn: GantriPorterConnector): ToolDef[] {
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
+}
+
+/**
+ * Aggregate the daily rollup into the same shape `gantri.order_stats` returns
+ * from Porter pagination. Used as the fallback for date ranges that overflow
+ * the pagination cap. Note the rollup excludes Cancelled/Lost orders by
+ * construction — the response is marked accordingly so the LLM can surface
+ * that to the user.
+ */
+export function aggregateFromRollup(
+  rows: RollupRow[],
+  args: { dateRange: { startDate: string; endDate: string }; types?: string[] },
+  porterTotalCount: number,
+): unknown {
+  const typesFilter = args.types && args.types.length > 0 ? new Set(args.types) : null;
+  const typeAgg: Record<string, { count: number; revenueCents: number }> = {};
+  const statusAgg: Record<string, { count: number; revenueCents: number }> = {};
+  let totalCount = 0;
+  let totalRevenueCents = 0;
+
+  for (const row of rows) {
+    for (const [type, v] of Object.entries(row.by_type ?? {})) {
+      if (typesFilter && !typesFilter.has(type)) continue;
+      typeAgg[type] ??= { count: 0, revenueCents: 0 };
+      typeAgg[type].count += v.orders;
+      typeAgg[type].revenueCents += v.revenueCents;
+      totalCount += v.orders;
+      totalRevenueCents += v.revenueCents;
+    }
+    for (const [status, v] of Object.entries(row.by_status ?? {})) {
+      // by_status doesn't carry per-type info, so we can't filter it by `types`
+      // perfectly. When a type filter is set we omit the status breakdown to
+      // avoid surfacing numbers that don't match the type-filtered totals.
+      if (typesFilter) continue;
+      statusAgg[status] ??= { count: 0, revenueCents: 0 };
+      statusAgg[status].count += v.orders;
+      statusAgg[status].revenueCents += v.revenueCents;
+    }
+  }
+
+  const totalRevenueDollars = round2(totalRevenueCents / 100);
+  return {
+    period: args.dateRange,
+    typesFilter: args.types,
+    source: 'rollup' as const,
+    note: 'Rollup excludes Cancelled and Lost orders by construction; numbers match Grafana Sales (which uses the same definition). Refund-type rows are negative (net of refunds).',
+    porterTotalCount,
+    totalOrders: totalCount,
+    totalRevenueDollars,
+    avgOrderValueDollars: totalCount > 0 ? round2(totalRevenueDollars / totalCount) : 0,
+    statusBreakdown: typesFilter
+      ? null
+      : Object.entries(statusAgg)
+          .map(([status, v]) => ({ status, count: v.count, revenueDollars: round2(v.revenueCents / 100) }))
+          .sort((a, b) => b.count - a.count),
+    typeBreakdown: Object.entries(typeAgg)
+      .map(([type, v]) => ({ type, count: v.count, revenueDollars: round2(v.revenueCents / 100) }))
+      .sort((a, b) => b.count - a.count),
+    truncated: false,
+  };
 }
 
 /**

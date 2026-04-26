@@ -74,10 +74,16 @@ async function main() {
   // is available. The orchestrator reads tools lazily on each run, so
   // late-registration is safe.
 
+  // RollupRepo first so GantriPorterConnector can pick it up — order_stats
+  // falls back to the rollup for date ranges that exceed Porter's pagination
+  // cap (so multi-year totals match Grafana exactly).
+  const rollupRepo = new RollupRepo(supabase);
+
   const gantriPorter = new GantriPorterConnector({
     baseUrl: porterApiBaseUrl,
     email: porterBotEmail,
     password: porterBotPassword,
+    rollupRepo,
   });
   registry.register(gantriPorter);
 
@@ -88,7 +94,6 @@ async function main() {
   });
   registry.register(grafana);
 
-  const rollupRepo = new RollupRepo(supabase);
   registry.register(new RollupConnector({ repo: rollupRepo }));
 
   registry.register(new LateOrdersConnector({ grafana }));

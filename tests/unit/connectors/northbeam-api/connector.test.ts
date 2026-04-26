@@ -33,7 +33,7 @@ describe('buildExportPayload', () => {
       aggregateData: true,
     });
     expect(p.period_type).toBe('FIXED');
-    expect(p.period_options).toEqual({ from: '2026-01-01', to: '2026-01-01' });
+    expect(p.period_options).toEqual({ period_starting_at: '2026-01-01', period_ending_at: '2026-01-01' });
   });
 
   it('passes the breakdown through unchanged', () => {

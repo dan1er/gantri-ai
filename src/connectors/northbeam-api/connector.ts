@@ -111,7 +111,13 @@ function buildTools(client: NorthbeamApiClient): ToolDef[] {
       schema: MetricsExplorerArgs as z.ZodType<MetricsExplorerArgs>,
       jsonSchema: zodToJsonSchema(MetricsExplorerArgs),
       async execute(args: MetricsExplorerArgs) {
-        const payload = buildExportPayload(args);
+        // The API requires breakdowns[].values to be a non-empty enum array.
+        // If the caller didn't pass one, auto-populate from the catalog so the
+        // LLM doesn't have to make a discovery call before every breakdown.
+        const breakdown = args.breakdown && (!args.breakdown.values || args.breakdown.values.length === 0)
+          ? { key: args.breakdown.key, values: await fetchBreakdownValues(client, args.breakdown.key) }
+          : args.breakdown;
+        const payload = buildExportPayload({ ...args, breakdown });
         logger.info({ args, payload: redactPayload(payload) }, 'northbeam.metrics_explorer →');
         try {
           const csv = await client.runExport(payload);
@@ -172,7 +178,10 @@ export function buildExportPayload(args: MetricsExplorerArgs): DataExportPayload
   const periodFields: Pick<DataExportPayload, 'period_type' | 'period_options'> =
     typeof args.dateRange === 'string'
       ? { period_type: presetToPeriodType(args.dateRange) }
-      : { period_type: 'FIXED', period_options: { from: args.dateRange.start, to: args.dateRange.end } };
+      // The API rejects {from,to} (which the docs example suggests) and demands
+      // {period_starting_at, period_ending_at} for FIXED windows. Empirically
+      // verified by 422 response.
+      : { period_type: 'FIXED', period_options: { period_starting_at: args.dateRange.start, period_ending_at: args.dateRange.end } };
   return {
     level: 'platform',
     time_granularity: args.granularity,
@@ -203,6 +212,20 @@ function presetToPeriodType(preset: string): string {
     case 'last_365_days': return 'LAST_365_DAYS';
     default: throw new Error(`unknown date preset: ${preset}`);
   }
+}
+
+/**
+ * Fetch the catalog values for a breakdown key. The API requires the
+ * `breakdowns[].values` array to be present and non-empty; if the caller didn't
+ * supply one we expand to "all values for this key" so they get the slice they
+ * intended. Cached implicitly by the upstream CachingRegistry (catalog endpoints
+ * have a long TTL).
+ */
+async function fetchBreakdownValues(client: NorthbeamApiClient, key: string): Promise<string[]> {
+  const breakdowns = await client.listBreakdowns();
+  const match = breakdowns.find((b) => b.key === key);
+  if (!match) throw new NorthbeamApiError(0, null, `Breakdown key "${key}" not found in catalog. Call northbeam.list_breakdowns to see valid keys.`);
+  return match.values;
 }
 
 function redactPayload(p: DataExportPayload): DataExportPayload {

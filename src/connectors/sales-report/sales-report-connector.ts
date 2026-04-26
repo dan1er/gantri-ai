@@ -78,22 +78,33 @@ export class SalesReportConnector implements Connector {
     const toMs = wallClockToUtc(`${addDays(args.dateRange.endDate, 1)}T00:00:00.000`, PT_TZ);
     const result = await this.deps.grafana.runSql({ sql: SALES_REPORT_SQL, fromMs, toMs, maxRows: 50 });
     const idx = (name: string) => result.fields.indexOf(name);
-    // Field names match what the LLM naturally references when building canvas
-    // tables. Shorter is better — the canvas builder looks up `row[column.key]`
-    // so e.g. `key:'shipping'` must find the value, not `key:'shippingDollars'`.
-    const rows = result.rows.map((r) => ({
-      type: r[idx('type')] as string,
-      orders: Number(r[idx('orders')] ?? 0),
-      items: Number(r[idx('items')] ?? 0),
-      giftCards: Number(r[idx('gift_cards')] ?? 0),
-      subtotal: roundCents(r[idx('subtotal')]),
-      shipping: roundCents(r[idx('shipping')]),
-      tax: roundCents(r[idx('tax')]),
-      discount: roundCents(r[idx('discount')]),
-      credit: roundCents(r[idx('credit')]),
-      salesExclTax: roundCents(r[idx('sales_exl_tax')]),
-      fullTotal: roundCents(r[idx('full_total')]),
-    }));
+    // Field names: include BOTH camelCase and snake_case variants so the LLM
+    // can pick whichever matches its mental model — `row[column.key]` lookup is
+    // case-sensitive, and the LLM has been observed using `full_total` (snake)
+    // when its prompt only had `fullTotal` (camel).
+    const rows = result.rows.map((r) => {
+      const subtotal = roundCents(r[idx('subtotal')]);
+      const shipping = roundCents(r[idx('shipping')]);
+      const tax = roundCents(r[idx('tax')]);
+      const discount = roundCents(r[idx('discount')]);
+      const credit = roundCents(r[idx('credit')]);
+      const salesExclTax = roundCents(r[idx('sales_exl_tax')]);
+      const fullTotal = roundCents(r[idx('full_total')]);
+      return {
+        type: r[idx('type')] as string,
+        orders: Number(r[idx('orders')] ?? 0),
+        items: Number(r[idx('items')] ?? 0),
+        giftCards: Number(r[idx('gift_cards')] ?? 0),
+        gift_cards: Number(r[idx('gift_cards')] ?? 0),
+        subtotal,
+        shipping,
+        tax,
+        discount,
+        credit,
+        salesExclTax, sales_excl_tax: salesExclTax, sales_exl_tax: salesExclTax,
+        fullTotal, full_total: fullTotal,
+      };
+    });
     return {
       period: args.dateRange,
       source: 'grafana_sales_panel' as const,

@@ -177,26 +177,41 @@ export class NorthbeamApiClient {
    * attribution (touchpoints, channel) on this surface — for that the
    * dashboard is still the only path.
    *
-   * Quirks (both detected empirically — undocumented):
+   * Quirks (all detected empirically — undocumented):
    *   1. Body comes back as Content-Type `text/html` and as a JSON-encoded
    *      STRING (not a raw array). The first JSON.parse yields a string; we
    *      have to parse it again to get the array.
-   *   2. `end_date` is EXCLUSIVE — passing start=end returns 0 rows. The
-   *      caller-facing contract here is end-inclusive (matches every other
-   *      tool in this repo), so we add 1 day to end_date before sending.
+   *   2. `end_date` is EXCLUSIVE — passing start=end returns 0 rows.
+   *   3. NB filters by UTC midnight on the wire, but Gantri's accounting (and
+   *      every other tool in this repo) buckets by Pacific Time. An order
+   *      placed Apr 25 10pm PT has time_of_purchase = Apr 26 05:00 UTC, so a
+   *      caller asking for "PT Apr 25 only" would silently miss it if we
+   *      passed those dates straight through. Solution: send a UTC window
+   *      wide enough to cover the requested PT days (start-1 day, end+2 days
+   *      to absorb up to 8 hours of TZ offset on either side), then filter
+   *      client-side by PT-bucketed time_of_purchase. Caller-facing
+   *      startDate/endDate are end-inclusive PT dates.
    */
   async listOrders(opts: { startDate: string; endDate: string }): Promise<Array<Record<string, unknown>>> {
-    const apiEndDate = addDays(opts.endDate, 1);
-    const qs = `?start_date=${encodeURIComponent(opts.startDate)}&end_date=${encodeURIComponent(apiEndDate)}`;
+    const wideStart = addDays(opts.startDate, -1);
+    const wideEnd = addDays(opts.endDate, 2); // +1 for end-inclusive, +1 more for the PT→UTC offset
+    const qs = `?start_date=${encodeURIComponent(wideStart)}&end_date=${encodeURIComponent(wideEnd)}`;
     let body: unknown = await this.request<unknown>('GET', `/v2/orders${qs}`);
     if (typeof body === 'string') {
       try { body = JSON.parse(body); } catch { /* leave as-is */ }
     }
-    if (Array.isArray(body)) return body as Array<Record<string, unknown>>;
-    if (body && typeof body === 'object' && 'data' in body && Array.isArray((body as any).data)) {
-      return (body as { data: Array<Record<string, unknown>> }).data;
-    }
-    return [];
+    let rows: Array<Record<string, unknown>>;
+    if (Array.isArray(body)) rows = body as Array<Record<string, unknown>>;
+    else if (body && typeof body === 'object' && 'data' in body && Array.isArray((body as any).data)) {
+      rows = (body as { data: Array<Record<string, unknown>> }).data;
+    } else rows = [];
+    // Filter to the requested PT window (inclusive on both ends).
+    return rows.filter((o) => {
+      const t = o.time_of_purchase;
+      if (typeof t !== 'string') return true; // unknown shape — keep it
+      const ptDay = ptDayOf(t);
+      return ptDay >= opts.startDate && ptDay <= opts.endDate;
+    });
   }
 
   // ---- internals ----
@@ -233,6 +248,18 @@ function addDays(ymd: string, n: number): string {
   const dt = new Date(Date.UTC(y, m - 1, d));
   dt.setUTCDate(dt.getUTCDate() + n);
   return dt.toISOString().slice(0, 10);
+}
+
+/** Format an ISO timestamp as the Pacific Time calendar day (YYYY-MM-DD). */
+function ptDayOf(iso: string): string {
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return '';
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Los_Angeles',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date(ms));
 }
 
 /**

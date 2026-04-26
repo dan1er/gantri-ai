@@ -10,23 +10,24 @@ WITH txn AS (
     t.type,
     t.status,
     COALESCE(t."organizationId"::text, 'null') AS org_key,
-    -- Net revenue per transaction. Use amount.total when set (retail orders), else
-    -- compute net = subtotal + shipping + tax - discount - credit - gift. Wholesale
-    -- transactions don't carry amount.total, so the fallback path applies and MUST
-    -- subtract discount or it overstates revenue (Grafana's panels do subtract it).
-    -- Refund-type transactions store amount.total as a POSITIVE number (the amount
-    -- refunded), so we negate them here so daily totals are net of refunds and the
-    -- by_type breakdown sums consistently with the daily total. Affects every type
-    -- whose name ends in "Refund": Refund, Wholesale Refund, Trade Refund,
-    -- Third Party Refund.
+    -- Net revenue per transaction. Always derive as
+    --   subtotal + shipping + tax - discount - credit - gift
+    -- so that the rollup matches Grafana's Sales panel formula exactly. We
+    -- intentionally do NOT prefer amount.total (even when it's set on retail
+    -- Order rows) because amount.total has payment-gateway fees baked in that
+    -- the Grafana panel doesn't subtract -- using amount.total would make the rollup
+    -- ~$8.6k less than Grafana over a 2-year window for an aggregate the user
+    -- expects to match.
+    -- Refund-type transactions store positive numbers, so we negate them so
+    -- daily totals are net of refunds and the by_type breakdown sums to the
+    -- daily total. Affects every type ending in "Refund".
     (CASE WHEN t.type LIKE '%Refund' THEN -1 ELSE 1 END) *
-    COALESCE((t.amount->>'total')::numeric,
-             (t.amount->>'subtotal')::numeric
-             + COALESCE((t.amount->>'shipping')::numeric, 0)
-             + COALESCE((t.amount->>'tax')::numeric, 0)
-             - COALESCE((t.amount->>'discount')::numeric, 0)
-             - COALESCE((t.amount->>'credit')::numeric, 0)
-             - COALESCE((t.amount->>'gift')::numeric, 0)) AS revenue_cents
+    ((t.amount->>'subtotal')::numeric
+     + COALESCE((t.amount->>'shipping')::numeric, 0)
+     + COALESCE((t.amount->>'tax')::numeric, 0)
+     - COALESCE((t.amount->>'discount')::numeric, 0)
+     - COALESCE((t.amount->>'credit')::numeric, 0)
+     - COALESCE((t.amount->>'gift')::numeric, 0)) AS revenue_cents
   FROM "Transactions" t
   WHERE t."createdAt" >= ($__timeFrom())::timestamp
     AND t."createdAt" <  ($__timeTo())::timestamp

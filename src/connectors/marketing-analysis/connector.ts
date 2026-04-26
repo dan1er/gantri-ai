@@ -162,7 +162,7 @@ export class MarketingAnalysisConnector implements Connector {
     // each export under its own timeout window. ~5-10s × 7 = 35-70s total —
     // acceptable for a tool that gives a 7-model side-by-side.
     const results: Array<
-      | { model: { id: string; name: string }; ok: true; headers: string[]; rows: Array<string[] | unknown[]> }
+      | { model: { id: string; name: string }; ok: true; headers: string[]; rows: Array<Record<string, string>> }
       | { model: { id: string; name: string }; ok: false; error: string }
     > = [];
     for (const m of models) {
@@ -183,12 +183,12 @@ export class MarketingAnalysisConnector implements Connector {
       }
     }
     // Aggregate per-model totals across breakdown rows for the comparison view.
+    // CSV rows come back as Record<col_name, string_value>, so access by name.
     const perModel = results.map((r) => {
       if (!r.ok) return { model_id: r.model.id, model_name: r.model.name, error: r.error };
       const sum = (col: string) => {
-        const idx = r.headers.indexOf(col);
-        if (idx < 0) return null;
-        return r.rows.reduce((acc, row) => acc + (Number(row[idx]) || 0), 0);
+        if (!r.headers.includes(col)) return null;
+        return r.rows.reduce((acc, row) => acc + (Number((row as Record<string, string>)[col]) || 0), 0);
       };
       const out: Record<string, unknown> = { model_id: r.model.id, model_name: r.model.name };
       for (const m of args.metrics) out[m] = round2(sum(m) ?? 0);
@@ -233,16 +233,11 @@ export class MarketingAnalysisConnector implements Connector {
     );
     const breakdownColumn = breakdownColumnFor(args.breakdownKey);
     const rows = csv.rows.map((r) => {
-      const get = (col: string) => {
-        const i = csv.headers.indexOf(col);
-        if (i < 0) return null;
-        const v = r[i];
+      const get = (col: string): number | null => {
+        const v = r[col];
         return v === '' || v == null ? null : Number(v);
       };
-      const channel = (() => {
-        const i = csv.headers.indexOf(breakdownColumn);
-        return i >= 0 ? String(r[i]) : 'unknown';
-      })();
+      const channel = r[breakdownColumn] ?? 'unknown';
       const aovFtLtv = get('aov_1st_time_ltv');
       const cacFt = get('new_customer_acquisition_cost');
       const aovFt = get('aov_1st_time');
@@ -295,18 +290,12 @@ export class MarketingAnalysisConnector implements Connector {
     );
     const breakdownColumn = breakdownColumnFor(args.breakdownKey);
     const rows = csv.rows.map((r) => {
-      const get = (col: string) => {
-        const i = csv.headers.indexOf(col);
-        return i >= 0 ? Number(r[i] ?? 0) : 0;
+      const get = (col: string): number => {
+        const v = r[col];
+        return v == null || v === '' ? 0 : Number(v);
       };
-      const channel = (() => {
-        const i = csv.headers.indexOf(breakdownColumn);
-        return i >= 0 ? String(r[i]) : 'unknown';
-      })();
-      const campaignName = (() => {
-        const i = csv.headers.indexOf('campaign_name');
-        return i >= 0 ? String(r[i]) : null;
-      })();
+      const channel = r[breakdownColumn] ?? 'unknown';
+      const campaignName = r['campaign_name'] ?? null;
       const rev = get('rev');
       const revFt = get('rev_1st_time');
       const revRtn = get('rev_returning');
@@ -360,20 +349,16 @@ export class MarketingAnalysisConnector implements Connector {
     // Sequential, not parallel — see attribution_compare_models for rationale.
     const current = await fetchPeriod(args.currentPeriod);
     const prior = await fetchPeriod(args.priorPeriod);
-    const indexBy = (csv: { headers: string[]; rows: Array<Record<string, string>> | Array<Array<string | number | null>> }) => {
+    const indexBy = (csv: { headers: string[]; rows: Array<Record<string, string>> }) => {
       const map = new Map<string, { rev: number; spend: number; txns: number; campaign: string; platform: string }>();
-      const get = (row: Array<unknown>, col: string) => {
-        const i = csv.headers.indexOf(col);
-        return i >= 0 ? row[i] : null;
-      };
-      for (const r of csv.rows as Array<Array<unknown>>) {
-        const campaign = String(get(r, 'campaign_name') ?? 'unknown');
-        const platform = String(get(r, 'breakdown_platform_northbeam') ?? '');
+      for (const r of csv.rows) {
+        const campaign = r['campaign_name'] || 'unknown';
+        const platform = r['breakdown_platform_northbeam'] || '';
         const key = `${platform}::${campaign}`;
         const e = map.get(key) ?? { rev: 0, spend: 0, txns: 0, campaign, platform };
-        e.rev += Number(get(r, 'rev') ?? 0);
-        e.spend += Number(get(r, 'spend') ?? 0);
-        e.txns += Number(get(r, 'transactions') ?? 0);
+        e.rev += Number(r['rev'] || 0);
+        e.spend += Number(r['spend'] || 0);
+        e.txns += Number(r['transactions'] || 0);
         map.set(key, e);
       }
       return map;

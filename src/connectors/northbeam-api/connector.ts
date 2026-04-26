@@ -96,6 +96,10 @@ const MetricsExplorerArgs = z.object({
     .boolean()
     .default(true)
     .describe('When true, NB sums campaigns within each breakdown so you get one row per (date × breakdown_value). Set false at level=campaign/ad to get per-row detail (e.g. for "top campaigns" rankings).'),
+  bucketByDate: z
+    .boolean()
+    .default(false)
+    .describe('When TRUE, NB returns one row per (date × breakdown_value) — REQUIRED for any "which day", "daily trend", "weekly evolution", "highest-spend day" question. Each row will include a `date` column you can sort/argmax on. When FALSE (default) NB collapses the entire period into a single aggregate row per breakdown_value with NO date column.'),
 });
 type MetricsExplorerArgs = z.infer<typeof MetricsExplorerArgs>;
 
@@ -198,12 +202,40 @@ function buildTools(client: NorthbeamApiClient): ToolDef[] {
           const filtered = args.includeCancelled
             ? all
             : all.filter((o) => !o.is_cancelled && !o.is_deleted);
+          // Pre-compute the day-by-day breakdown server-side so the LLM doesn't
+          // have to bucket timestamps itself. We've observed the model getting
+          // PT-day arithmetic wrong (off-by-one weekday labels, mismatched
+          // counts) when asked to "show daily orders". By emitting the rollup
+          // here the LLM just has to render the table.
+          const ptDayFmt = new Intl.DateTimeFormat('en-CA', {
+            timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit',
+          });
+          const ptDayWithName = new Intl.DateTimeFormat('en-US', {
+            timeZone: 'America/Los_Angeles', weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit',
+          });
+          const dailyMap = new Map<string, { date: string; weekday: string; orders: number; revenue: number }>();
+          for (const o of filtered) {
+            const t = (o as { time_of_purchase?: string }).time_of_purchase;
+            if (typeof t !== 'string') continue;
+            const dt = new Date(t);
+            const date = ptDayFmt.format(dt);
+            const weekday = ptDayWithName.formatToParts(dt).find((p) => p.type === 'weekday')?.value ?? '';
+            const total = Number((o as { purchase_total?: unknown }).purchase_total ?? 0);
+            const e = dailyMap.get(date) ?? { date, weekday, orders: 0, revenue: 0 };
+            e.orders += 1;
+            e.revenue += total;
+            dailyMap.set(date, e);
+          }
+          const dailyBreakdown = [...dailyMap.values()]
+            .sort((a, b) => a.date.localeCompare(b.date))
+            .map((e) => ({ ...e, revenue: Math.round(e.revenue * 100) / 100 }));
           return {
             period: args.dateRange,
             source: 'northbeam_v2_orders' as const,
             count: filtered.length,
             totalReturned: all.length,
             cancelledOrDeletedExcluded: all.length - filtered.length,
+            dailyBreakdown,
             orders: filtered,
           };
         } catch (err) {
@@ -236,7 +268,10 @@ export function buildExportPayload(args: MetricsExplorerArgs): DataExportPayload
     ...periodFields,
     breakdowns,
     options: {
-      export_aggregation: 'BREAKDOWN',
+      // export_aggregation:'BREAKDOWN' collapses the whole period into one row per
+      // breakdown_value (no `date` column). 'DATE' returns one row per
+      // (date × breakdown_value) — use this when the question is per-day.
+      export_aggregation: args.bucketByDate ? 'DATE' : 'BREAKDOWN',
       remove_zero_spend: false,
       aggregate_data: args.aggregateData,
       include_ids: false,

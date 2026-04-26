@@ -45,7 +45,15 @@ export interface DataExportPayload {
   period_options?: Record<string, unknown>;
   breakdowns?: DataExportBreakdown[];
   options?: {
-    export_aggregation?: 'BREAKDOWN' | 'TOTAL';
+    /**
+     * 'BREAKDOWN' (default) collapses the entire period into one row per
+     * breakdown_value (no `date` column). 'DATE' returns one row per
+     * (date × breakdown_value) — empirically required for daily/weekly
+     * trend questions; without it `time_granularity` is ignored. NB's
+     * server-side validator only accepts these two values (probed
+     * 2026-04-26).
+     */
+    export_aggregation?: 'BREAKDOWN' | 'DATE';
     remove_zero_spend?: boolean;
     aggregate_data?: boolean;
     include_ids?: boolean;

@@ -16,6 +16,59 @@ export interface MarketingAnalysisDeps {
 
 const PT_TZ = 'America/Los_Angeles';
 
+// NB's data-export API quietly remaps metric IDs to its own column names in
+// the CSV. Discovered empirically with scripts/probe-csv-columns.mjs — without
+// this mapping, lookups silently zero-fill (e.g. metric_id="txns" → column
+// "transactions"; aovFtLtv → ltv_aov_1st_time, not aov_1st_time_ltv).
+const METRIC_TO_COL: Record<string, string> = {
+  rev: 'rev',
+  spend: 'spend',
+  txns: 'transactions',
+  cac: 'cac',
+  cacFt: 'cac_1st_time',
+  aovFt: 'aov_1st_time',
+  aovFtLtv: 'ltv_aov_1st_time',
+  roasFt: 'roas_1st_time',
+  roasFtLtv: 'ltv_roas_1st_time',
+  revFt: 'rev_1st_time',
+  revRtn: 'rev_returning',
+  txnsFt: 'transactions_1st_time',
+  txnsRtn: 'transactions_returning',
+};
+
+function colFor(metricId: string): string {
+  return METRIC_TO_COL[metricId] ?? metricId;
+}
+
+// NB ignores `accounting_modes` and `attribution_windows` in the request body
+// and returns rows for every (mode × window) combo, with different metrics
+// populated in different rows (e.g. `rev` lives in Cash+lifetime; LTV lives
+// in Accrual+1). Merge per group taking the first non-blank value per column
+// so we end up with one row per (channel[, campaign]) holding every populated
+// metric.
+function mergeRowsByChannel(
+  rows: Array<Record<string, string>>,
+  channelCol: string,
+  campaignCol?: string,
+): Map<string, Record<string, string>> {
+  const map = new Map<string, Record<string, string>>();
+  for (const r of rows) {
+    const channel = r[channelCol] ?? '';
+    const campaign = campaignCol ? (r[campaignCol] ?? '') : '';
+    const key = campaignCol ? `${channel}::${campaign}` : channel;
+    const existing = map.get(key) ?? {};
+    for (const [k, v] of Object.entries(r)) {
+      if (v == null || v === '') continue;
+      const cur = existing[k];
+      if (cur == null || cur === '') existing[k] = v;
+    }
+    if (channel && existing[channelCol] == null) existing[channelCol] = channel;
+    if (campaignCol && campaign && existing[campaignCol] == null) existing[campaignCol] = campaign;
+    map.set(key, existing);
+  }
+  return map;
+}
+
 const DateRange = z.object({
   startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD PT'),
   endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD PT'),
@@ -77,6 +130,8 @@ const BudgetOptimizationArgs = z.object({
   priorPeriod: DateRange,
   /** Drop campaigns with spend below this in the current period. Defaults to $100. */
   minSpendDollars: z.number().default(100),
+  /** Restrict to one platform (e.g. "Facebook Ads", "Google Ads"). Null/undefined = all platforms. Use for "cut N% of Meta budget" / "lowest ROAS Google campaigns" questions. */
+  platformFilter: z.string().optional(),
 });
 type BudgetOptimizationArgs = z.infer<typeof BudgetOptimizationArgs>;
 
@@ -184,11 +239,15 @@ export class MarketingAnalysisConnector implements Connector {
     }
     // Aggregate per-model totals across breakdown rows for the comparison view.
     // CSV rows come back as Record<col_name, string_value>, so access by name.
+    // Filter to one (accounting_mode × attribution_window) combo per channel
+    // so we don't double-count across NB's mode/window expansion.
     const perModel = results.map((r) => {
       if (!r.ok) return { model_id: r.model.id, model_name: r.model.name, error: r.error };
-      const sum = (col: string) => {
+      const merged = mergeRowsByChannel(r.rows, 'breakdown_platform_northbeam');
+      const sum = (metricId: string) => {
+        const col = colFor(metricId);
         if (!r.headers.includes(col)) return null;
-        return r.rows.reduce((acc, row) => acc + (Number((row as Record<string, string>)[col]) || 0), 0);
+        return [...merged.values()].reduce((acc, row) => acc + (Number(row[col]) || 0), 0);
       };
       const out: Record<string, unknown> = { model_id: r.model.id, model_name: r.model.name };
       for (const m of args.metrics) out[m] = round2(sum(m) ?? 0);
@@ -232,18 +291,23 @@ export class MarketingAnalysisConnector implements Connector {
       { timeoutMs: 180_000 },
     );
     const breakdownColumn = breakdownColumnFor(args.breakdownKey);
-    const rows = csv.rows.map((r) => {
+    // NB returns one row per (channel × accounting_mode × attribution_window),
+    // and LTV columns live in a different combo than rev/spend. Merge per
+    // channel taking first non-blank value so we end up with one row per
+    // channel containing every populated column.
+    const merged = mergeRowsByChannel(csv.rows, breakdownColumn);
+    const rows = [...merged.values()].map((r) => {
       const get = (col: string): number | null => {
         const v = r[col];
         return v === '' || v == null ? null : Number(v);
       };
       const channel = r[breakdownColumn] ?? 'unknown';
-      const aovFtLtv = get('aov_1st_time_ltv');
-      const cacFt = get('new_customer_acquisition_cost');
-      const aovFt = get('aov_1st_time');
-      const rev = get('rev');
-      const revFt = get('rev_1st_time');
-      const spend = get('spend');
+      const aovFtLtv = get(colFor('aovFtLtv'));
+      const cacFt = get(colFor('cacFt'));
+      const aovFt = get(colFor('aovFt'));
+      const rev = get(colFor('rev'));
+      const revFt = get(colFor('revFt'));
+      const spend = get(colFor('spend'));
       return {
         channel,
         revenue: round2(rev ?? 0),
@@ -252,8 +316,8 @@ export class MarketingAnalysisConnector implements Connector {
         cac_first_time: cacFt != null ? round2(cacFt) : null,
         aov_first_time: aovFt != null ? round2(aovFt) : null,
         aov_first_time_ltv: aovFtLtv != null ? round2(aovFtLtv) : null,
-        roas_first_time: get('roas_1st_time') ?? null,
-        roas_first_time_ltv: get('roas_1st_time_ltv') ?? null,
+        roas_first_time: get(colFor('roasFt')) ?? null,
+        roas_first_time_ltv: get(colFor('roasFtLtv')) ?? null,
         ltv_cac_ratio: aovFtLtv != null && cacFt != null && cacFt > 0 ? round2(aovFtLtv / cacFt) : null,
       };
     });
@@ -289,16 +353,19 @@ export class MarketingAnalysisConnector implements Connector {
       { timeoutMs: 180_000 },
     );
     const breakdownColumn = breakdownColumnFor(args.breakdownKey);
-    const rows = csv.rows.map((r) => {
+    // Merge multi-(mode, window) rows so cac/cacFt + revFt/revRtn (which NB
+    // splits across separate rows) end up on the same row per channel.
+    const merged = mergeRowsByChannel(csv.rows, breakdownColumn, args.level === 'campaign' ? 'campaign_name' : undefined);
+    const rows = [...merged.values()].map((r) => {
       const get = (col: string): number => {
         const v = r[col];
         return v == null || v === '' ? 0 : Number(v);
       };
       const channel = r[breakdownColumn] ?? 'unknown';
       const campaignName = r['campaign_name'] ?? null;
-      const rev = get('rev');
-      const revFt = get('rev_1st_time');
-      const revRtn = get('rev_returning');
+      const rev = get(colFor('rev'));
+      const revFt = get(colFor('revFt'));
+      const revRtn = get(colFor('revRtn'));
       return {
         channel,
         ...(campaignName ? { campaign: campaignName } : {}),
@@ -306,12 +373,12 @@ export class MarketingAnalysisConnector implements Connector {
         revenue_new: round2(revFt),
         revenue_returning: round2(revRtn),
         pct_new_revenue: rev > 0 ? round2((revFt / rev) * 100) : 0,
-        transactions_total: round2(get('transactions')),
-        transactions_new: round2(get('transactions_1st_time')),
-        transactions_returning: round2(get('transactions_returning')),
-        spend: round2(get('spend')),
-        cac: round2(get('customer_acquisition_cost')),
-        cac_new: round2(get('new_customer_acquisition_cost')),
+        transactions_total: round2(get(colFor('txns'))),
+        transactions_new: round2(get(colFor('txnsFt'))),
+        transactions_returning: round2(get(colFor('txnsRtn'))),
+        spend: round2(get(colFor('spend'))),
+        cac: round2(get(colFor('cac'))),
+        cac_new: round2(get(colFor('cacFt'))),
       };
     });
     rows.sort((a, b) => b.revenue_total - a.revenue_total);
@@ -334,12 +401,20 @@ export class MarketingAnalysisConnector implements Connector {
   }
 
   private async runBudgetOptimization(args: BudgetOptimizationArgs) {
+    // When filtering to one platform, push it through as a breakdown so NB
+    // attaches breakdown_platform_northbeam to each campaign row (and only
+    // returns campaigns from that platform). Without this, campaign-level
+    // exports come back without any platform column at all.
+    const breakdown = args.platformFilter
+      ? { key: 'Platform (Northbeam)', values: [args.platformFilter] }
+      : undefined;
     const fetchPeriod = async (range: { startDate: string; endDate: string }) => {
       return this.deps.nb.runExport(
         this.buildExport({
           dateRange: range,
           attributionModel: 'northbeam_custom__va',
           metrics: ['rev', 'spend', 'txns'],
+          breakdown,
           level: 'campaign',
           aggregateData: false,
         }),
@@ -350,8 +425,13 @@ export class MarketingAnalysisConnector implements Connector {
     const current = await fetchPeriod(args.currentPeriod);
     const prior = await fetchPeriod(args.priorPeriod);
     const indexBy = (csv: { headers: string[]; rows: Array<Record<string, string>> }) => {
+      // aggregate_data:false → one row per (campaign × day [× mode × window]).
+      // Empirically NB returns only the Cash-snapshot/lifetime combo at campaign
+      // level + non-aggregated, so a straight sum over all rows is correct.
+      // Defensive: filter to that combo only in case NB starts expanding modes.
       const map = new Map<string, { rev: number; spend: number; txns: number; campaign: string; platform: string }>();
       for (const r of csv.rows) {
+        if (r.accounting_mode && r.accounting_mode !== 'Cash snapshot') continue;
         const campaign = r['campaign_name'] || 'unknown';
         const platform = r['breakdown_platform_northbeam'] || '';
         const key = `${platform}::${campaign}`;

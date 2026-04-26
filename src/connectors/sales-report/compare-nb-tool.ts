@@ -36,7 +36,7 @@ export function buildCompareNbTool(deps: CompareNbToolDeps): ToolDef<Args> {
       'Use this for ANY "compare NB vs Grafana/Porter" question — it eliminates the LLM-arithmetic drift the previous free-form CSV builds had.',
       'Returns one row per PT day with: date, porter_orders, porter_revenue (sum of amount.total), nb_orders, nb_revenue (sum of purchase_total), order_diff, revenue_diff. Plus grand totals.',
       'Settled days will all match exactly (or very nearly — sub-cent rounding). Only the current PT day is expected to show NB lag (NB count < Porter count) since orders take a few minutes to propagate via firePurchaseEvent.',
-      'When you call this, paste the rows back to the user as a tabular CSV via reports.attach_file — do NOT re-format or re-sum the columns yourself. The tool already aggregated correctly.',
+      'Result also has a top-level `csv` field — a pre-formatted CSV string with header, data rows, and a TOTAL row. To attach it as a file, pass `{"$ref": "comparison.csv"}` to `reports.attach_file` content. DO NOT rebuild the CSV yourself (it leads to arithmetic drift).',
     ].join(' '),
     schema: Args as z.ZodType<Args>,
     jsonSchema: zodToJsonSchema(Args),
@@ -113,11 +113,21 @@ export function buildCompareNbTool(deps: CompareNbToolDeps): ToolDef<Args> {
         { porter_orders: 0, porter_revenue: 0, nb_orders: 0, nb_revenue: 0, order_diff: 0, revenue_diff: 0 },
       );
 
+      // Pre-formatted CSV string. Surfaced as a top-level `csv` field so
+      // scheduled-report plans can use {"$ref": "comparison.csv"} as the
+      // `content` arg to reports.attach_file without the LLM having to build
+      // the CSV itself (which historically caused arithmetic drift).
+      const header = 'date,porter_orders,porter_revenue,nb_orders,nb_revenue,order_diff,revenue_diff';
+      const dataLines = rows.map((r) => `${r.date},${r.porter_orders},${r.porter_revenue.toFixed(2)},${r.nb_orders},${r.nb_revenue.toFixed(2)},${r.order_diff},${r.revenue_diff.toFixed(2)}`);
+      const totalsLine = `TOTAL,${totals.porter_orders},${totals.porter_revenue.toFixed(2)},${totals.nb_orders},${totals.nb_revenue.toFixed(2)},${totals.order_diff},${totals.revenue_diff.toFixed(2)}`;
+      const csv = [header, ...dataLines, totalsLine].join('\n');
+
       return {
         period: { startDate: args.dateRange.startDate, endDate },
         excludeToday: args.excludeToday,
         rows,
         totals,
+        csv,
         notes: [
           'porter_revenue = SUM(amount.total) for type=Order, status NOT IN (Unpaid, Cancelled).',
           'nb_revenue = SUM(purchase_total) from /v2/orders, excluding is_cancelled/is_deleted.',

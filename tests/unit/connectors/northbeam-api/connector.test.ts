@@ -68,12 +68,13 @@ describe('NorthbeamApiConnector', () => {
       return new Response('', { status: 404 });
     }) as unknown as typeof fetch;
 
-  it('exposes the four expected tools by name', () => {
+  it('exposes the expected tools by name', () => {
     const c = new NorthbeamApiConnector({ apiKey: 'k', dataClientId: 'cid', fetchImpl: successfulFetch('a,b\n1,2\n') });
     expect(c.tools.map((t) => t.name).sort()).toEqual([
       'northbeam.list_attribution_models',
       'northbeam.list_breakdowns',
       'northbeam.list_metrics',
+      'northbeam.list_orders',
       'northbeam.metrics_explorer',
     ]);
   });

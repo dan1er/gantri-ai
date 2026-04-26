@@ -168,6 +168,25 @@ export class NorthbeamApiClient {
     return body.attribution_models;
   }
 
+  /**
+   * GET /v2/orders — pulls the per-order rows Northbeam has on file for the
+   * window. Each row is what was pushed via the upstream firePurchaseEvent
+   * ingestion: order_id, customer_name/email/phone, purchase_total, tax,
+   * shipping_cost, discount_amount, order_tags, currency, timestamps, plus
+   * `is_cancelled` / `is_deleted` flags. NB does NOT attach per-order
+   * attribution (touchpoints, channel) on this surface — for that the
+   * dashboard is still the only path.
+   */
+  async listOrders(opts: { startDate: string; endDate: string }): Promise<Array<Record<string, unknown>>> {
+    const qs = `?start_date=${encodeURIComponent(opts.startDate)}&end_date=${encodeURIComponent(opts.endDate)}`;
+    const body = await this.request<Array<Record<string, unknown>> | { data?: Array<Record<string, unknown>> }>(
+      'GET',
+      `/v2/orders${qs}`,
+    );
+    if (Array.isArray(body)) return body;
+    return body.data ?? [];
+  }
+
   // ---- internals ----
 
   private async request<T>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<T> {

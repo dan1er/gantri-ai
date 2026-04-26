@@ -101,6 +101,15 @@ type MetricsExplorerArgs = z.infer<typeof MetricsExplorerArgs>;
 
 const NoArgs = z.object({}).strict();
 
+const ListOrdersArgs = z.object({
+  dateRange: z.object({
+    startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD'),
+    endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD'),
+  }),
+  includeCancelled: z.boolean().default(false).describe('Include cancelled/deleted orders. Default false — most callers want clean orders only.'),
+});
+type ListOrdersArgs = z.infer<typeof ListOrdersArgs>;
+
 // ---- tool implementations ----
 
 function buildTools(client: NorthbeamApiClient): ToolDef[] {
@@ -170,6 +179,39 @@ function buildTools(client: NorthbeamApiClient): ToolDef[] {
       async execute() {
         const models = await client.listAttributionModels();
         return { count: models.length, models };
+      },
+    },
+    {
+      name: 'northbeam.list_orders',
+      description: [
+        'List the per-order rows Northbeam has on file for a date range (GET /v2/orders).',
+        'Use this whenever the user asks for "orders from Northbeam", a list of orders, or per-order detail (customer name/email, purchase total, refund amount, etc).',
+        'Each row contains: order_id, customer_id, customer_name, customer_email, customer_phone_number, time_of_purchase (ISO), currency, purchase_total, tax, shipping_cost, discount_amount, discount_codes, order_tags, is_recurring_order, is_cancelled, is_deleted, updated_at.',
+        'IMPORTANT: this endpoint does NOT include per-order attribution (no touchpoints, no channel-attributed flag, no first-time/returning at the order grain). For attribution at the aggregate level use `northbeam.metrics_explorer`. For touchpoints per order, the Northbeam dashboard is still the only source.',
+        'Date range is inclusive YYYY-MM-DD. By default cancelled and deleted rows are filtered out — set `includeCancelled: true` to include them.',
+      ].join(' '),
+      schema: ListOrdersArgs as z.ZodType<ListOrdersArgs>,
+      jsonSchema: zodToJsonSchema(ListOrdersArgs),
+      async execute(args: ListOrdersArgs) {
+        try {
+          const all = await client.listOrders({ startDate: args.dateRange.startDate, endDate: args.dateRange.endDate });
+          const filtered = args.includeCancelled
+            ? all
+            : all.filter((o) => !o.is_cancelled && !o.is_deleted);
+          return {
+            period: args.dateRange,
+            source: 'northbeam_v2_orders' as const,
+            count: filtered.length,
+            totalReturned: all.length,
+            cancelledOrDeletedExcluded: all.length - filtered.length,
+            orders: filtered,
+          };
+        } catch (err) {
+          if (err instanceof NorthbeamApiError) {
+            return { error: { code: 'NORTHBEAM_API_ERROR', status: err.status, message: err.message, body: err.body } };
+          }
+          throw err;
+        }
       },
     },
   ];

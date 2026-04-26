@@ -176,15 +176,22 @@ export class NorthbeamApiClient {
    * `is_cancelled` / `is_deleted` flags. NB does NOT attach per-order
    * attribution (touchpoints, channel) on this surface — for that the
    * dashboard is still the only path.
+   *
+   * Quirk: NB's /v2/orders endpoint returns the body as `text/html` and as a
+   * JSON-encoded STRING (not a raw array). The first JSON.parse yields a
+   * string; we have to parse it again to get the array. Detected empirically.
    */
   async listOrders(opts: { startDate: string; endDate: string }): Promise<Array<Record<string, unknown>>> {
     const qs = `?start_date=${encodeURIComponent(opts.startDate)}&end_date=${encodeURIComponent(opts.endDate)}`;
-    const body = await this.request<Array<Record<string, unknown>> | { data?: Array<Record<string, unknown>> }>(
-      'GET',
-      `/v2/orders${qs}`,
-    );
-    if (Array.isArray(body)) return body;
-    return body.data ?? [];
+    let body: unknown = await this.request<unknown>('GET', `/v2/orders${qs}`);
+    if (typeof body === 'string') {
+      try { body = JSON.parse(body); } catch { /* leave as-is */ }
+    }
+    if (Array.isArray(body)) return body as Array<Record<string, unknown>>;
+    if (body && typeof body === 'object' && 'data' in body && Array.isArray((body as any).data)) {
+      return (body as { data: Array<Record<string, unknown>> }).data;
+    }
+    return [];
   }
 
   // ---- internals ----

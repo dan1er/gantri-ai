@@ -179,9 +179,11 @@ export function buildExportPayload(args: MetricsExplorerArgs): DataExportPayload
     typeof args.dateRange === 'string'
       ? { period_type: presetToPeriodType(args.dateRange) }
       // The API rejects {from,to} (which the docs example suggests) and demands
-      // {period_starting_at, period_ending_at} for FIXED windows. Empirically
-      // verified by 422 response.
-      : { period_type: 'FIXED', period_options: { period_starting_at: args.dateRange.start, period_ending_at: args.dateRange.end } };
+      // {period_starting_at, period_ending_at} as ISO 8601 datetimes for FIXED
+      // windows. Bare YYYY-MM-DD also gets rejected with "invalid datetime
+      // format". We attach midnight UTC to the start and end-of-day to the end
+      // so the FIXED window is inclusive of both calendar days.
+      : { period_type: 'FIXED', period_options: { period_starting_at: `${args.dateRange.start}T00:00:00.000Z`, period_ending_at: `${args.dateRange.end}T23:59:59.999Z` } };
   return {
     level: 'platform',
     time_granularity: args.granularity,

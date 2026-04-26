@@ -2,6 +2,8 @@ import { z } from 'zod';
 import type { Connector, ToolDef } from '../base/connector.js';
 import { zodToJsonSchema } from '../base/zod-to-json-schema.js';
 import type { GrafanaConnector } from '../grafana/grafana-connector.js';
+import type { NorthbeamApiClient } from '../northbeam-api/client.js';
+import { buildCompareNbTool } from './compare-nb-tool.js';
 
 /**
  * Wraps Grafana's Sales-dashboard "Full Total" panel SQL as a single tool. The
@@ -19,6 +21,8 @@ import type { GrafanaConnector } from '../grafana/grafana-connector.js';
  */
 export interface SalesReportConnectorDeps {
   grafana: GrafanaConnector;
+  /** Optional. When provided, also exposes `gantri.compare_orders_nb_vs_porter`. */
+  nb?: NorthbeamApiClient;
 }
 
 const Args = z.object({
@@ -71,7 +75,11 @@ export class SalesReportConnector implements Connector {
       jsonSchema: zodToJsonSchema(Args),
       execute: (args) => this.run(args),
     };
-    return [tool];
+    const tools: ToolDef[] = [tool];
+    if (this.deps.nb) {
+      tools.push(buildCompareNbTool({ grafana: this.deps.grafana, nb: this.deps.nb }) as ToolDef);
+    }
+    return tools;
   }
 
   private async run(args: Args) {

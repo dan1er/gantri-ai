@@ -16,6 +16,7 @@ import { RollupConnector as _DeprecatedRollupConnector } from './connectors/roll
 import { LateOrdersConnector } from './connectors/late-orders/late-orders-connector.js';
 import { NorthbeamConnector } from './connectors/northbeam/northbeam-connector.js';
 import { NorthbeamApiConnector } from './connectors/northbeam-api/connector.js';
+import { NorthbeamApiClient } from './connectors/northbeam-api/client.js';
 import { ReportsConnector } from './connectors/reports/reports-connector.js';
 import { FeedbackConnector } from './connectors/feedback/feedback-connector.js';
 import { FeedbackRepo } from './storage/repositories/feedback.js';
@@ -100,7 +101,10 @@ async function main() {
   // Replaces the old `gantri.daily_rollup` tool; the team trusts Grafana's
   // numbers and the rollup table diverged subtly (Transaction-level vs
   // StockAssociation-level discount allocation).
-  registry.register(new SalesReportConnector({ grafana }));
+  // Standalone NB API client for tools that need both NB + Grafana (e.g. the
+  // gantri.compare_orders_nb_vs_porter tool exposed by SalesReportConnector).
+  const nbClient = new NorthbeamApiClient({ apiKey: nbApiKey, dataClientId: nbDataClientId });
+  registry.register(new SalesReportConnector({ grafana, nb: nbClient }));
 
   registry.register(new LateOrdersConnector({ grafana }));
 

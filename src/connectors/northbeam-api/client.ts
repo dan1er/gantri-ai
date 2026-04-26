@@ -177,12 +177,17 @@ export class NorthbeamApiClient {
    * attribution (touchpoints, channel) on this surface — for that the
    * dashboard is still the only path.
    *
-   * Quirk: NB's /v2/orders endpoint returns the body as `text/html` and as a
-   * JSON-encoded STRING (not a raw array). The first JSON.parse yields a
-   * string; we have to parse it again to get the array. Detected empirically.
+   * Quirks (both detected empirically — undocumented):
+   *   1. Body comes back as Content-Type `text/html` and as a JSON-encoded
+   *      STRING (not a raw array). The first JSON.parse yields a string; we
+   *      have to parse it again to get the array.
+   *   2. `end_date` is EXCLUSIVE — passing start=end returns 0 rows. The
+   *      caller-facing contract here is end-inclusive (matches every other
+   *      tool in this repo), so we add 1 day to end_date before sending.
    */
   async listOrders(opts: { startDate: string; endDate: string }): Promise<Array<Record<string, unknown>>> {
-    const qs = `?start_date=${encodeURIComponent(opts.startDate)}&end_date=${encodeURIComponent(opts.endDate)}`;
+    const apiEndDate = addDays(opts.endDate, 1);
+    const qs = `?start_date=${encodeURIComponent(opts.startDate)}&end_date=${encodeURIComponent(apiEndDate)}`;
     let body: unknown = await this.request<unknown>('GET', `/v2/orders${qs}`);
     if (typeof body === 'string') {
       try { body = JSON.parse(body); } catch { /* leave as-is */ }
@@ -221,6 +226,13 @@ export class NorthbeamApiClient {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((res) => setTimeout(res, ms));
+}
+
+function addDays(ymd: string, n: number): string {
+  const [y, m, d] = ymd.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + n);
+  return dt.toISOString().slice(0, 10);
 }
 
 /**

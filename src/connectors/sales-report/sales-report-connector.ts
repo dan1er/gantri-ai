@@ -64,6 +64,7 @@ export class SalesReportConnector implements Connector {
         '  - `credit` (number, dollars, signed negative) — Grafana-displayed value: -1 * SUM(credit)',
         '  - `salesExclTax` (number, dollars) — sales excluding tax',
         '  - `fullTotal` (number, dollars) — the headline revenue number (signed negative for refund types)',
+        'Top-level `totals` object with the same fields summed across all types (net of refunds, since refund-type rows are signed). Use it for placeholders like ${salesReport.totals.shipping} or ${salesReport.totals.fullTotal} in canvas summaries — do NOT leave a placeholder unresolved.',
         'Always quote the period back to the user.',
       ].join('\n'),
       schema: Args as z.ZodType<Args>,
@@ -105,12 +106,38 @@ export class SalesReportConnector implements Connector {
         fullTotal, full_total: fullTotal,
       };
     });
+    // Top-level totals (net of refunds, since refund-type rows already carry
+    // negative values). Surfaced so the LLM can write summary lines like
+    // `Net shipping total: ${salesReport.totals.shipping}` without having to
+    // re-sum the rows manually (and without leaving the placeholder unresolved
+    // when no totals object exists, which was the bug).
+    const totals = rows.reduce(
+      (acc, r) => ({
+        orders: acc.orders + r.orders,
+        items: acc.items + r.items,
+        giftCards: acc.giftCards + r.giftCards,
+        subtotal: round2(acc.subtotal + r.subtotal),
+        shipping: round2(acc.shipping + r.shipping),
+        tax: round2(acc.tax + r.tax),
+        discount: round2(acc.discount + r.discount),
+        credit: round2(acc.credit + r.credit),
+        salesExclTax: round2(acc.salesExclTax + r.salesExclTax),
+        fullTotal: round2(acc.fullTotal + r.fullTotal),
+      }),
+      { orders: 0, items: 0, giftCards: 0, subtotal: 0, shipping: 0, tax: 0, discount: 0, credit: 0, salesExclTax: 0, fullTotal: 0 },
+    );
     return {
       period: args.dateRange,
       source: 'grafana_sales_panel' as const,
       rows,
+      // Snake_case aliases so LLM placeholders match either convention.
+      totals: { ...totals, gift_cards: totals.giftCards, sales_excl_tax: totals.salesExclTax, sales_exl_tax: totals.salesExclTax, full_total: totals.fullTotal },
     };
   }
+}
+
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
 }
 
 function roundCents(v: unknown): number {

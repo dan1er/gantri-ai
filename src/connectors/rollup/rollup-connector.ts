@@ -8,7 +8,12 @@ const Args = z.object({
     endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   }),
   dimension: z.enum(['type', 'status', 'organization', 'none']).default('none'),
-  granularity: z.enum(['day', 'week', 'month']).default('day'),
+  // 'period' = collapse the whole window into one bucket per dimensionKey (or
+  // a single total row when dimension='none'). Use this whenever the question
+  // does NOT need a time series — e.g. "revenue by type", "orders by status",
+  // "wholesale total this year". Avoids returning thousands of day-rows that
+  // blow up the LLM context.
+  granularity: z.enum(['period', 'day', 'week', 'month']).default('period'),
 });
 type Args = z.infer<typeof Args>;
 
@@ -30,7 +35,7 @@ export class RollupConnector implements Connector {
     const tool: ToolDef<Args> = {
       name: 'gantri.daily_rollup',
       description:
-        'Fast pre-aggregated read for revenue and order count over a PT date range. Backed by a nightly-refreshed Supabase rollup table — use this INSTEAD of grafana.sql for any aggregate revenue/orders question that fits its grain (day/week/month, optionally broken down by type/status/organization). Returns rows with `date`, optional `dimensionKey`, `totalOrders`, `totalRevenueDollars`. Excludes Cancelled and Lost orders. The rollup refreshes daily at 04:00 PT and covers the trailing 30 days plus all historical data; queries that span the very current PT day may be incomplete by up to one refresh cycle.',
+        'Fast pre-aggregated read for revenue and order count over a PT date range. Backed by a nightly-refreshed Supabase rollup table that covers from 2019-09-29 to today. Use this INSTEAD of grafana.sql for any aggregate revenue/orders question. Returns rows with optional `date`, optional `dimensionKey`, `totalOrders`, `totalRevenueDollars`. Excludes Cancelled orders only (matches Grafana Sales). Refund-type rows carry NEGATIVE revenue so totals are net of refunds. **Pick `granularity` carefully:** `period` (default) returns ONE row per dimension key totaled across the whole window — use this for non-time-series questions like "revenue by type", "top platform last month", "wholesale total this year". `day`/`week`/`month` return one row per (period × dimension key) — use ONLY when the user explicitly wants a time series. Calling with `dimension:type` + `granularity:day` over multi-year ranges returns thousands of rows and blows up the LLM context — DO NOT do this. **The response includes the `period` (start/end dates) so you MUST quote those dates back to the user in the answer**, e.g. "For 2024-01-01 to 2026-04-25, Order revenue is $3.9M". Never give a number without stating the window.',
       schema: Args as z.ZodType<Args>,
       jsonSchema: {
         type: 'object',
@@ -106,7 +111,26 @@ function explode(days: RollupRow[], dimension: Args['dimension']): FlatRow[] {
 
 function groupByGrain(rows: FlatRow[], granularity: Args['granularity']) {
   if (granularity === 'day') {
-    return rows.map((r) => formatRow(r));
+    return rows.map((r) => formatRow(r, false));
+  }
+  if (granularity === 'period') {
+    // One bucket per dimensionKey across the whole window. The `date` column
+    // is omitted from the formatted output since it's meaningless here — the
+    // caller already has the period via the response's `period` field.
+    const buckets = new Map<string, FlatRow>();
+    for (const r of rows) {
+      const key = r.dimensionKey ?? '__total__';
+      const existing = buckets.get(key);
+      if (existing) {
+        existing.totalOrders += r.totalOrders;
+        existing.totalRevenueCents += r.totalRevenueCents;
+      } else {
+        buckets.set(key, { date: '', dimensionKey: r.dimensionKey, totalOrders: r.totalOrders, totalRevenueCents: r.totalRevenueCents });
+      }
+    }
+    return [...buckets.values()]
+      .sort((a, b) => b.totalRevenueCents - a.totalRevenueCents)
+      .map((r) => formatRow(r, true));
   }
   const buckets = new Map<string, FlatRow>();
   for (const r of rows) {
@@ -120,15 +144,15 @@ function groupByGrain(rows: FlatRow[], granularity: Args['granularity']) {
       buckets.set(key, { date: bucketDate, dimensionKey: r.dimensionKey, totalOrders: r.totalOrders, totalRevenueCents: r.totalRevenueCents });
     }
   }
-  return [...buckets.values()].sort((a, b) => a.date.localeCompare(b.date)).map((r) => formatRow(r));
+  return [...buckets.values()].sort((a, b) => a.date.localeCompare(b.date)).map((r) => formatRow(r, false));
 }
 
-function formatRow(r: FlatRow) {
+function formatRow(r: FlatRow, omitDate: boolean) {
   const obj: Record<string, unknown> = {
-    date: r.date,
     totalOrders: r.totalOrders,
     totalRevenueDollars: Math.round(r.totalRevenueCents) / 100,
   };
+  if (!omitDate) obj.date = r.date;
   if (r.dimensionKey !== null) obj.dimensionKey = r.dimensionKey;
   return obj;
 }

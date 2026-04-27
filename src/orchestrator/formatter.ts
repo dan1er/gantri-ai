@@ -125,6 +125,10 @@ export function markdownToMrkdwn(md: string): string {
 
     let transformed = line;
     transformed = transformed.replace(/^(#{1,6})\s+(.*)$/, (_, _h, txt) => `*${txt.trim()}*`);
+    // Bold+italic (***text*** in standard md) → *_text_* (Slack mrkdwn).
+    // Must run BEFORE the bold-only rule so the non-greedy bold-only regex
+    // doesn't half-match a triple-asterisk span and leave dangling `**`s.
+    transformed = transformed.replace(/\*\*\*(.+?)\*\*\*/g, '*_$1_*');
     transformed = transformed.replace(/\*\*(.+?)\*\*/g, '*$1*');
     transformed = transformed.replace(/^(\s*)- /, '$1• ');
 

@@ -33,6 +33,16 @@ describe('markdownToSlackBlocks', () => {
     expect((blocks[0] as any).text.text).toBe('Spend was *$2,400* last week.');
   });
 
+  it('converts ***bold-italic*** (standard markdown) to *_text_* (Slack mrkdwn)', () => {
+    // Regression: the bold-only regex left dangling `**` when the LLM produced
+    // ***Week 1*** Apr 6–12*: 8,875` style output, so Slack rendered the
+    // unmatched asterisks literally. The triple-asterisk rule must run first.
+    const blocks = markdownToSlackBlocks('- ***Week 1*** Apr 6–12: 8,875\n- ***Week 2*** Apr 13–19: 8,434');
+    expect((blocks[0] as any).text.text).toContain('• *_Week 1_* Apr 6–12: 8,875');
+    expect((blocks[0] as any).text.text).toContain('• *_Week 2_* Apr 13–19: 8,434');
+    expect((blocks[0] as any).text.text).not.toContain('**');
+  });
+
   it('converts markdown headings to bold lines', () => {
     const blocks = markdownToSlackBlocks('# Summary\n\nTotal: $100');
     expect((blocks[0] as any).text.text).toBe('*Summary*');

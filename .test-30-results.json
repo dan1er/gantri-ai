@@ -1,0 +1,1330 @@
+{
+  "startedAt": "2026-04-26T23:23:20.450Z",
+  "completedAt": "2026-04-26T23:23:33.055Z",
+  "results": [
+    {
+      "n": 1,
+      "cat": "Spend & ROAS",
+      "q": "¿Cuánto gastamos en Meta y Google la semana pasada?",
+      "response": "Aquí está el gasto de la semana pasada (13–19 de abril de 2026):\n\n- *Google Ads:* $2,232.77\n- *Meta (Facebook Ads):* $0.00\n\nEl gasto en Meta aparece en $0 — lo cual es inusual. Puede ser un problema de ingesta de datos en Northbeam o que la cuenta estuvo pausada esa semana. ¿Quieres que revise un rango más amplio para confirmar?",
+      "toolCalls": [
+        {
+          "name": "northbeam.metrics_explorer",
+          "args": {
+            "dateRange": {
+              "start": "2026-04-13",
+              "end": "2026-04-19"
+            },
+            "metrics": [
+              "spend"
+            ],
+            "breakdown": {
+              "key": "Platform (Northbeam)",
+              "values": [
+                "Facebook Ads",
+                "Google Ads"
+              ]
+            }
+          },
+          "ok": true,
+          "errorMessage": null
+        }
+      ],
+      "iterations": 2,
+      "tokensIn": 993,
+      "tokensOut": 264,
+      "elapsedMs": 7818,
+      "ok": true
+    },
+    {
+      "n": 2,
+      "cat": "Spend & ROAS",
+      "q": "¿Cuál es nuestro ROAS por canal en los últimos 30 días?",
+      "response": "Aquí está el ROAS por canal para los últimos 30 días — modelo *Clicks + Modeled Views*, cash snapshot:\n\nLos canales con *spend activo* son los únicos con ROAS calculable. El resto (Organic, Email, etc.) no tienen gasto pagado, así que no aplica ratio.\n\n*Canales pagados:*\n- *Google Ads* — Rev: $47,692 | Spend: $10,998 → *ROAS: 4.34x*\n- *Facebook Ads* — Rev: $299 | Spend: $2,271 → *ROAS: 0.13x*\n- *YouTube Ads* — Rev: $139 | Spend: $3,466 → *ROAS: 0.04x*\n\n*Canales orgánicos / no pagados (sin spend):*\n- *Klaviyo (Email)* — $7,140 atribuidos\n- *Organic* — $21,824\n- *Organic Search* — $14,528\n- *Unattributed* — $18,022\n- *Impact (Afiliados)* — $4,070\n- *Pinterest* — $1,485\n- *Reddit* — $1,256\n\n*Conclusiones rápidas:*\n- *Google Ads* es con diferencia el canal pagado más eficiente con un ROAS de ~4.3x.\n- *Facebook Ads y YouTube Ads* están por debajo de 1x — cada dólar invertido recupera menos de $0.15 en revenue atribuido. Vale la pena revisar esas campañas.\n- El volumen orgánico (Organic + Organic Search + Unattributed) supera los $54K, lo que sugiere una base de demanda sólida no dependiente de paid.\n\n¿Quieres ver esto desglosado por campaña, comparar modelos de atribución, o profundizar en algún canal en particular?",
+      "toolCalls": [
+        {
+          "name": "northbeam.metrics_explorer",
+          "args": {
+            "dateRange": "last_30_days",
+            "metrics": [
+              "rev",
+              "spend",
+              "roas"
+            ],
+            "breakdown": {
+              "key": "Platform (Northbeam)"
+            },
+            "attributionModel": "northbeam_custom__va",
+            "accountingMode": "cash"
+          },
+          "ok": true,
+          "errorMessage": null
+        }
+      ],
+      "iterations": 2,
+      "tokensIn": 3540,
+      "tokensOut": 641,
+      "elapsedMs": 18129,
+      "ok": true
+    },
+    {
+      "n": 3,
+      "cat": "Spend & ROAS",
+      "q": "¿En qué canal tenemos el mejor ROAS este mes?",
+      "response": "De los canales con gasto real (paid), solo *Google Ads* y *Facebook Ads* y *YouTube Ads* tienen spend > $0. Aquí el ranking por ROAS (modelo: Clicks + Modeled Views, ventana accrual, 1 de abril – 26 de abril 2026):\n\n*Google Ads gana por amplio margen* 🏆\n\n- *Google Ads* — ROAS: *1.97x* | Revenue atribuido: $43,259 | Spend: $9,099\n- *Facebook Ads* — ROAS: ~0.25x† | Revenue: $295 | Spend: $1,170\n- *YouTube Ads* — ROAS: ~0.06x† | Revenue: $125 | Spend: $2,083\n\n† Los ROAS de Facebook y YouTube Ads en la fila \"Cash snapshot\" son implícitos (rev/spend calculado); el ROAS explícito de Northbeam en modo accrual aparece como 0.012 y 0.019 respectivamente — ambos casos señalan rendimiento muy bajo en lo que va del mes.\n\n*Takeaways:*\n- Google Ads es el único canal paid con ROAS rentable este mes (~2x).\n- Facebook Ads y YouTube Ads están significativamente por debajo de 1x — cada dólar gastado está recuperando centavos en revenue atribuido.\n- Canales orgánicos (Organic, Organic Search, Klaviyo) generan revenue sin gasto, por lo que técnicamente tienen ROAS infinito, pero no son canales \"pagados\" comparables.\n\n¿Quieres ver el desglose a nivel de campaña de algún canal en particular?",
+      "toolCalls": [
+        {
+          "name": "northbeam.metrics_explorer",
+          "args": {
+            "dateRange": {
+              "start": "2026-04-01",
+              "end": "2026-04-26"
+            },
+            "metrics": [
+              "rev",
+              "spend",
+              "roas"
+            ],
+            "breakdown": {
+              "key": "Platform (Northbeam)"
+            }
+          },
+          "ok": true,
+          "errorMessage": null
+        }
+      ],
+      "iterations": 2,
+      "tokensIn": 3497,
+      "tokensOut": 557,
+      "elapsedMs": 17802,
+      "ok": true
+    },
+    {
+      "n": 4,
+      "cat": "Spend & ROAS",
+      "q": "¿Cómo se compara el ROAS de Meta nativo vs el ROAS atribuido por Northbeam?",
+      "response": "Aquí está la comparación para *Facebook Ads* en los últimos 30 días (modelo: Clicks + Modeled Views, Cash):\n\n---\n\n*ROAS Meta nativo (7D Click / 1D View):* 0.31x\n*ROAS atribuido por Northbeam:* ~0.13x _(rev $298.69 / spend $2,270.65)_\n*Transacciones atribuidas (NB):* ~1.06\n*Spend total:* $2,270.65\n\n---\n\n*¿Qué significa esto?*\n\n- *Meta reporta 0.31x* — Meta acredita revenue con una ventana amplia (7 días de click + 1 día de view), lo que típicamente infla el número porque incluye compras que probablemente habrían ocurrido de todas formas.\n- *Northbeam atribuye ~0.13x* — NB usa su modelo probabilístico multi-touch (\"Clicks + Modeled Views\") con ventana de 1 día, removiendo el doble-conteo con otros canales. El número es considerablemente más conservador.\n- *La brecha (0.31x vs 0.13x)* es la sobre-atribución clásica de Meta: Meta se asigna ~2.4x más revenue del que NB le da una vez que se controla el resto del funnel.\n\n⚠️ Nota: el gasto de $2,270.65 en 30 días parece bajo — ¿quieres que verifique con un rango de fechas específico o a nivel de campaña para asegurarnos de que el filtro está capturando todo el spend de Meta?",
+      "toolCalls": [
+        {
+          "name": "northbeam.metrics_explorer",
+          "args": {
+            "dateRange": "last_30_days",
+            "metrics": [
+              "metaROAS7DClick1DView",
+              "rev",
+              "spend",
+              "txns"
+            ],
+            "breakdown": {
+              "key": "Platform (Northbeam)",
+              "values": [
+                "Facebook Ads"
+              ]
+            },
+            "attributionModel": "northbeam_custom__va",
+            "accountingMode": "cash"
+          },
+          "ok": true,
+          "errorMessage": null
+        }
+      ],
+      "iterations": 2,
+      "tokensIn": 1093,
+      "tokensOut": 597,
+      "elapsedMs": 18383,
+      "ok": true
+    },
+    {
+      "n": 5,
+      "cat": "Spend & ROAS",
+      "q": "¿Cuánto gastamos en total en paid media este año?",
+      "response": "Del *1 de enero al 26 de abril de 2026*, el gasto total en paid media fue de:\n\n*$79,413.82*\n\nEsto es el total consolidado en todos los canales pagados según Northbeam (modelo: Clicks + Modeled Views). ¿Quieres verlo desglosado por canal (Meta, Google, TikTok, etc.)?",
+      "toolCalls": [
+        {
+          "name": "northbeam.metrics_explorer",
+          "args": {
+            "dateRange": {
+              "start": "2026-01-01",
+              "end": "2026-04-26"
+            },
+            "metrics": [
+              "spend"
+            ]
+          },
+          "ok": true,
+          "errorMessage": null
+        }
+      ],
+      "iterations": 2,
+      "tokensIn": 885,
+      "tokensOut": 197,
+      "elapsedMs": 8770,
+      "ok": true
+    },
+    {
+      "n": 6,
+      "cat": "Spend & ROAS",
+      "q": "¿Cuál fue el día con mayor spend en Q1 2026?",
+      "response": "El día con mayor spend en Q1 2026 fue *2026-01-27* con *$1,297.47*.\n\nTop 5 días del trimestre:\n\n- *Ene 27* — $1,297.47\n- *Ene 25* — $1,221.44\n- *Ene 29* — $1,162.85\n- *Feb 01* — $1,249.93\n- *Ene 28* — $1,079.42\n\nEnero concentró los días de mayor gasto, con un spend notablemente más alto que febrero y marzo. A partir de mediados de febrero el presupuesto bajó considerablemente (~$400–$600/día).\n\n_Fuente: Northbeam · Clicks + Modeled Views · Q1 2026 (1 ene – 31 mar)_",
+      "toolCalls": [
+        {
+          "name": "northbeam.metrics_explorer",
+          "args": {
+            "dateRange": {
+              "start": "2026-01-01",
+              "end": "2026-03-31"
+            },
+            "metrics": [
+              "spend"
+            ],
+            "bucketByDate": true,
+            "granularity": "DAILY"
+          },
+          "ok": true,
+          "errorMessage": null
+        }
+      ],
+      "iterations": 2,
+      "tokensIn": 4833,
+      "tokensOut": 348,
+      "elapsedMs": 7752,
+      "ok": true
+    },
+    {
+      "n": 7,
+      "cat": "Revenue",
+      "q": "¿Cuál es el revenue atribuido por canal en los últimos 7 días?",
+      "response": "Northbeam sigue respondiendo con *rate limit* (429). Probablemente hay otras consultas en cola en este momento.\n\n*¿Qué hacer?*\n- Intenta preguntar de nuevo en ~1 minuto, el límite se resetea automáticamente.\n- Si el problema persiste, podría haber un pico de uso concurrente en la API.\n\nEn cuanto el rate limit se libere, el resultado te mostrará *revenue atribuido, spend y transacciones por canal* (Meta, Google, Email, Direct, Organic, etc.) para los últimos 7 días bajo el modelo *Clicks + Modeled Views* (modelo por defecto de Northbeam). ¡Avísame cuando quieras que lo vuelva a intentar! 🙂",
+      "toolCalls": [
+        {
+          "name": "northbeam.metrics_explorer",
+          "args": {
+            "dateRange": "last_7_days",
+            "metrics": [
+              "rev",
+              "spend",
+              "txns"
+            ],
+            "breakdown": {
+              "key": "Platform (Northbeam)"
+            }
+          },
+          "ok": true,
+          "errorMessage": null
+        },
+        {
+          "name": "northbeam.metrics_explorer",
+          "args": {
+            "dateRange": "last_7_days",
+            "metrics": [
+              "rev",
+              "spend",
+              "txns"
+            ],
+            "breakdown": {
+              "key": "Platform (Northbeam)"
+            }
+          },
+          "ok": true,
+          "errorMessage": null
+        },
+        {
+          "name": "northbeam.metrics_explorer",
+          "args": {
+            "dateRange": "last_7_days",
+            "metrics": [
+              "rev",
+              "spend",
+              "txns"
+            ],
+            "breakdown": {
+              "key": "Platform (Northbeam)"
+            }
+          },
+          "ok": true,
+          "errorMessage": null
+        }
+      ],
+      "iterations": 4,
+      "tokensIn": 2074,
+      "tokensOut": 609,
+      "elapsedMs": 14662,
+      "ok": true
+    },
+    {
+      "n": 8,
+      "cat": "Revenue",
+      "q": "¿Qué canal generó más revenue atribuido en marzo?",
+      "response": "El canal con más revenue atribuido en marzo fue *Google Ads*, y no es competencia cercana. Aquí el top 5:\n\n| Canal | Revenue atribuido | Spend | ROAS |\n|---|---|---|---|\n| Google Ads | $59,902 | $14,574 | 4.1× |\n| Organic | $16,825 | $0 | — |\n| Unattributed | $12,356 | $0 | — |\n| Klaviyo | $7,057 | $0 | — |\n| Organic Search | $5,421 | $0 | — |\n\n_(Modelo: Clicks + Modeled Views · Cash snapshot · Marzo 2026)_\n\n*Takeaways clave:*\n- *Google Ads* generó *$59.9K* — más del doble del segundo canal (Organic, $16.8K).\n- Entre canales de pago, solo Google Ads y Facebook Ads ($16.5) tuvieron spend. Google tuvo un ROAS de *4.1×*, mientras que Facebook Ads fue marginal ($16.5 de revenue vs $4,830 de spend).\n- Klaviyo (email) aportó $7K sin costo atribuido — buen canal de conversión.\n\n¿Quieres profundizar en algún canal específico, o comparar contra otro período?",
+      "toolCalls": [
+        {
+          "name": "northbeam.metrics_explorer",
+          "args": {
+            "dateRange": {
+              "start": "2026-03-01",
+              "end": "2026-03-31"
+            },
+            "metrics": [
+              "rev",
+              "spend",
+              "txns"
+            ],
+            "breakdown": {
+              "key": "Platform (Northbeam)"
+            }
+          },
+          "ok": true,
+          "errorMessage": null
+        }
+      ],
+      "iterations": 2,
+      "tokensIn": 2268,
+      "tokensOut": 473,
+      "elapsedMs": 14564,
+      "ok": true
+    },
+    {
+      "n": 9,
+      "cat": "Revenue",
+      "q": "¿Cómo se distribuye el revenue entre Forecast channels (Meta, Google, Email, Organic, etc.)?",
+      "response": "El revenue total atribuido en los últimos 30 días fue *~$119,307*. El canal dominante es *Google Ads* con casi la mitad del revenue.\n\nAquí el resumen por canal (modelo: Clicks + Modeled Views, Cash, últimos 30 días):\n\n- *Google Ads* — $48,104 (40.3%) | Spend: $14,465 | ROAS: 3.3x\n- *Direct* — $21,825 (18.3%) | Spend: $0\n- *Other* — $19,722 (16.5%) | Spend: $0\n- *Email* — $7,092 (5.9%) | Spend: $0\n- *Organic Search* — $14,528 (12.2%) | Spend: $0\n- *Affiliate* — $4,495 (3.8%) | Spend: $0\n- *Organic Social* — $3,243 (2.7%) | Spend: $0\n- *Meta Ads* — $299 (0.3%) | Spend: $2,271 | ROAS: 0.13x ⚠️\n\n*Puntos clave:*\n1. *Google Ads* domina el revenue pagado con ROAS de 3.3x — el único canal paid con retorno positivo.\n2. *Meta Ads* está en terreno negativo: $299 atribuidos vs $2,271 gastados (ROAS 0.13x). Vale la pena revisar si hay un problema de atribución o si el gasto está activo pero el revenue se está atribuyendo a otros canales.\n3. *Direct + Organic* combinados (~47%) representan casi la mitad del revenue sin costo paid — señal de marca fuerte.\n\n¿Quieres ver el desglose a nivel de campaña para Google o Meta, o comparar con las últimas semanas?",
+      "toolCalls": [
+        {
+          "name": "northbeam.metrics_explorer",
+          "args": {
+            "dateRange": "last_30_days",
+            "metrics": [
+              "rev",
+              "spend",
+              "txns"
+            ],
+            "breakdown": {
+              "key": "Forecast"
+            },
+            "attributionModel": "northbeam_custom__va",
+            "accountingMode": "cash"
+          },
+          "ok": true,
+          "errorMessage": null
+        },
+        {
+          "name": "grafana.list_dashboards",
+          "args": {
+            "search": "canvas"
+          },
+          "ok": true,
+          "errorMessage": null
+        }
+      ],
+      "iterations": 3,
+      "tokensIn": 2658,
+      "tokensOut": 709,
+      "elapsedMs": 17396,
+      "ok": true
+    },
+    {
+      "n": 10,
+      "cat": "Revenue",
+      "q": "¿Cuánto revenue atribuyó Northbeam a Email este mes?",
+      "response": "Aquí tienes el resumen para *abril 1–26, 2026* (modelo: Clicks + Modeled Views, Cash snapshot):\n\n---\n\n*Revenue atribuido a Email — Abril 2026*\n\nUsando el breakdown *Forecast → Email*:\n- *Revenue:* $6,146\n- *Transacciones:* ~10.6\n\nDesglose por plataforma:\n- *Klaviyo:* $6,194 / ~10.7 txns\n- *Other Email:* $0\n\n> Las pequeñas diferencias entre Forecast \"Email\" ($6,146) y Klaviyo ($6,194) se deben a cómo Northbeam agrupa sub-plataformas en el rollup de Forecast. *Klaviyo es la fuente de email más representativa* en tu cuenta.",
+      "toolCalls": [
+        {
+          "name": "northbeam.metrics_explorer",
+          "args": {
+            "dateRange": {
+              "start": "2026-04-01",
+              "end": "2026-04-26"
+            },
+            "metrics": [
+              "rev"
+            ],
+            "breakdown": {
+              "key": "Platform (Northbeam)",
+              "values": [
+                "Email"
+              ]
+            }
+          },
+          "ok": true,
+          "errorMessage": null
+        },
+        {
+          "name": "northbeam.list_breakdowns",
+          "args": {},
+          "ok": true,
+          "errorMessage": null
+        },
+        {
+          "name": "northbeam.metrics_explorer",
+          "args": {
+            "dateRange": {
+              "start": "2026-04-01",
+              "end": "2026-04-26"
+            },
+            "metrics": [
+              "rev",
+              "txns"
+            ],
+            "breakdown": {
+              "key": "Forecast",
+              "values": [
+                "Email"
+              ]
+            }
+          },
+          "ok": true,
+          "errorMessage": null
+        },
+        {
+          "name": "northbeam.metrics_explorer",
+          "args": {
+            "dateRange": {
+              "start": "2026-04-01",
+              "end": "2026-04-26"
+            },
+            "metrics": [
+              "rev",
+              "txns"
+            ],
+            "breakdown": {
+              "key": "Platform (Northbeam)",
+              "values": [
+                "Klaviyo",
+                "Other Email"
+              ]
+            }
+          },
+          "ok": true,
+          "errorMessage": null
+        }
+      ],
+      "iterations": 4,
+      "tokensIn": 3279,
+      "tokensOut": 719,
+      "elapsedMs": 25678,
+      "ok": true
+    },
+    {
+      "n": 11,
+      "cat": "Revenue",
+      "q": "¿Cómo fue el revenue diario atribuido la semana pasada?",
+      "response": "Aquí está el revenue atribuido diario de la semana pasada (13–19 abr):\n\n- *Lun 14 abr* fue el día más fuerte con *$8,638* 🚀\n- *Jue 17 abr* fue el día más bajo con *$2,575*\n- *Total semana:* ~*$30,038*\n\nEl detalle completo 👇\n\n| Día | Revenue |\n|---|---|\n| Lun 13 | $3,941 |\n| Mar 14 | $8,638 |\n| Mié 15 | $3,286 |\n| Jue 16 | $3,718 |\n| Vie 17 | $2,575 |\n| Sáb 18 | $4,327 |\n| Dom 19 | $3,554 |\n\n_Modelo: Clicks + Modeled Views (northbeam\\_custom\\_\\_va) · Cash · ventana lifetime_\n\n¿Quieres ver también el breakdown por canal o compararlo con la semana anterior?",
+      "toolCalls": [
+        {
+          "name": "northbeam.metrics_explorer",
+          "args": {
+            "dateRange": {
+              "start": "2026-04-13",
+              "end": "2026-04-19"
+            },
+            "metrics": [
+              "rev"
+            ],
+            "bucketByDate": true,
+            "granularity": "DAILY"
+          },
+          "ok": true,
+          "errorMessage": null
+        }
+      ],
+      "iterations": 2,
+      "tokensIn": 1201,
+      "tokensOut": 407,
+      "elapsedMs": 11269,
+      "ok": true
+    },
+    {
+      "n": 12,
+      "cat": "Atribución",
+      "q": "¿Cómo cambia el ROAS de Google si uso last-touch vs linear vs Northbeam custom?",
+      "response": "Aquí está la comparación para *Google Ads* del *19 al 25 de abril 2026*:\n\n*Headline:* el ROAS de Google varía desde *1.3× (last-touch)* hasta *3.9× (Northbeam custom)* — una diferencia de 3×, que cambia completamente la historia de eficiencia del canal.\n\n| Modelo | Revenue | Txns | ROAS |\n|---|---|---|---|\n| Northbeam Custom (Clicks + Modeled Views) | $9,647 | 18.7 | **3.90×** |\n| Linear | $5,085 | 9.9 | **2.06×** |\n| Last-touch | $3,190 | 6.0 | **1.29×** |\n\n(Spend constante en los tres modelos: *$2,471*)\n\nDéjame poner esto en canvas para que lo tengas bien organizado:\n\n**¿Qué explica la brecha?**\n\n- *Last-touch* le da el 100% del crédito a Google solo cuando fue el *último* toque antes del checkout. Muchos journeys terminan en Direct o Email, así que Google queda sin crédito aunque haya contribuido antes → ROAS más bajo.\n- *Linear* distribuye el crédito equitativamente entre todos los toques → Google recibe una porción proporcional → ROAS intermedio.\n- *Northbeam Custom (Clicks + Modeled Views)* usa un modelo data-driven que también captura *view-through* y correlaciones de influencia → le asigna más crédito a Google por su rol de upper-funnel → ROAS más alto.\n\n*¿Cuál usar?* Para decisiones de presupuesto, Northbeam recomienda su modelo custom como el más representativo. Last-touch tiende a favorecer canales de cierre (retargeting, Email, Direct) y subestima brand/prospecting como Google Search. Si necesitas benchmarkar contra el reporte nativo de Google, compara el ROAS custom vs `googleROAS` — dime si quieres esa comparativa.",
+      "toolCalls": [
+        {
+          "name": "gantri.attribution_compare_models",
+          "args": {
+            "dateRange": {
+              "startDate": "2026-04-19",
+              "endDate": "2026-04-25"
+            },
+            "metrics": [
+              "rev",
+              "spend",
+              "txns"
+            ],
+            "platformFilter": "Google Ads",
+            "models": [
+              "last_touch",
+              "linear",
+              "northbeam_custom__va"
+            ]
+          },
+          "ok": true,
+          "errorMessage": null
+        }
+      ],
+      "iterations": 2,
+      "tokensIn": 1062,
+      "tokensOut": 691,
+      "elapsedMs": 25894,
+      "ok": true
+    },
+    {
+      "n": 13,
+      "cat": "Atribución",
+      "q": "¿Qué canales están sobrevaluados bajo last-click comparado con el modelo de Northbeam?",
+      "response": "Aquí está el análisis completo para el período *27 mar – 26 abr 2026*. Los canales clave con diferencia significativa:\n\n---\n\n*Overvalued bajo last-click (last-click les da MÁS revenue que Northbeam)*\n\n- *Organic (Direct/otros)* — Last-click: *$60,265* vs NB: *$21,824* → *+$38,441 (+176%)* 🔴 El más sobrevaluado. Last-click se lleva el crédito final cuando el cliente simplemente fue directo al sitio, pero NB reconoce que el journey incluyó paid/email antes.\n- *Organic Search* — Last-click: *$19,561* vs NB: *$14,528* → *+$5,033 (+35%)* 🟠 Similar story: last-click captura SEO como cierre, ignorando el rol de los ads en upper funnel.\n\n---\n\n*Undervalued bajo last-click (last-click les da MENOS revenue que Northbeam)*\n\n- *Google Ads* — Last-click: *$13,506* vs NB: *$47,692* → *-$34,186 (-72%)* 🟢 El más subvalorado. Google Ads juega rol de upper/mid funnel pero el cliente cierra en directo u orgánico → last-click nunca se lo asigna.\n- *Klaviyo (Email)* — Last-click: *$2,025* vs NB: *$7,140* → *-$5,115 (-71%)* 🟢 Email activa la intención pero raramente es el último clic.\n- *YouTube Ads* — Last-click: *$0* vs NB: *$139* → completamente invisible bajo last-click (canal de view-through).\n- *Facebook Ads* — Last-click: *$0* vs NB: *$299* → igual, 0 crédito en last-click.\n- *Impact (afiliados)* — Last-click: *$2,050* vs NB: *$4,070* → *-$2,020 (-50%)*.\n\n---\n\n*Conclusión:* Last-click infla masivamente *Organic/Direct* (que recoge todos los \"cierres\") y deja al descubierto a *Google Ads* y *Email* que hacen el trabajo de upper-funnel. Si optimizaras budget con last-click, recortarías Google Ads y Email erróneamente.\n\n¿Quieres que detalle esto en un canvas con tabla completa de todos los canales?",
+      "toolCalls": [
+        {
+          "name": "gantri.attribution_compare_models",
+          "args": {
+            "dateRange": {
+              "startDate": "2026-03-27",
+              "endDate": "2026-04-26"
+            },
+            "metrics": [
+              "rev",
+              "spend",
+              "txns"
+            ],
+            "models": [
+              "northbeam_custom__va",
+              "last_touch"
+            ]
+          },
+          "ok": true,
+          "errorMessage": null
+        },
+        {
+          "name": "gantri.attribution_compare_models",
+          "args": {
+            "dateRange": {
+              "startDate": "2026-03-27",
+              "endDate": "2026-04-26"
+            },
+            "metrics": [
+              "rev",
+              "spend",
+              "txns"
+            ],
+            "models": [
+              "northbeam_custom__va",
+              "last_touch"
+            ]
+          },
+          "ok": true,
+          "errorMessage": null
+        },
+        {
+          "name": "northbeam.metrics_explorer",
+          "args": {
+            "dateRange": {
+              "start": "2026-03-27",
+              "end": "2026-04-26"
+            },
+            "metrics": [
+              "rev",
+              "spend",
+              "txns"
+            ],
+            "breakdown": {
+              "key": "Platform (Northbeam)"
+            },
+            "attributionModel": "northbeam_custom__va"
+          },
+          "ok": true,
+          "errorMessage": null
+        },
+        {
+          "name": "northbeam.metrics_explorer",
+          "args": {
+            "dateRange": {
+              "start": "2026-03-27",
+              "end": "2026-04-26"
+            },
+            "metrics": [
+              "rev",
+              "spend",
+              "txns"
+            ],
+            "breakdown": {
+              "key": "Platform (Northbeam)"
+            },
+            "attributionModel": "last_touch"
+          },
+          "ok": true,
+          "errorMessage": null
+        },
+        {
+          "name": "grafana.list_dashboards",
+          "args": {
+            "search": "sales"
+          },
+          "ok": true,
+          "errorMessage": null
+        }
+      ],
+      "iterations": 5,
+      "tokensIn": 8940,
+      "tokensOut": 1351,
+      "elapsedMs": 44614,
+      "ok": true
+    },
+    {
+      "n": 14,
+      "cat": "Atribución",
+      "q": "¿Cuál es la diferencia en revenue atribuido entre first-touch y Clicks + Modeled Views?",
+      "response": "Los números son idénticos para los últimos 7 días (19–25 abr 2026). Aquí el resumen:\n\n*Período: 19–25 abr 2026 | Cross-channel total*\n\n| Modelo | Revenue | Spend | Txns | ROAS |\n|---|---|---|---|---|\n| Clicks + Modeled Views | $24,733 | $2,541 | 54 | 9.73× |\n| First Touch | $24,733 | $2,541 | 54 | 9.73× |\n| *Diferencia* | *$0* | — | 0 | 0 |\n\n*¿Por qué son iguales?*\nA nivel cross-channel agregado, ambos modelos distribuyen el mismo *pool total* de revenue — solo difieren en *cómo se reparte entre canales*. El total consolidado siempre coincide. La diferencia real entre modelos se ve al hacer el breakdown por plataforma (ej. Meta vs Google vs Email vs Organic).\n\n¿Quieres ver la comparación *por canal* para ver cómo cada modelo favorece a distintos canales? Eso sí mostrará diferencias significativas.",
+      "toolCalls": [
+        {
+          "name": "gantri.attribution_compare_models",
+          "args": {
+            "dateRange": {
+              "startDate": "2026-04-19",
+              "endDate": "2026-04-25"
+            },
+            "metrics": [
+              "rev",
+              "spend",
+              "txns"
+            ],
+            "models": [
+              "first_touch",
+              "northbeam_custom__va"
+            ]
+          },
+          "ok": true,
+          "errorMessage": null
+        }
+      ],
+      "iterations": 2,
+      "tokensIn": 992,
+      "tokensOut": 440,
+      "elapsedMs": 15952,
+      "ok": true
+    },
+    {
+      "n": 15,
+      "cat": "Atribución",
+      "q": "¿Qué tan estable es el ranking de canales entre los 7 modelos de atribución?",
+      "response": "Perfecto, tengo toda la información. Voy a crear el canvas con la tabla de comparación:\n\nEl ranking de canales es *moderadamente estable en el top 2, pero se mueve bastante en los puestos intermedios*. Aquí el resumen rápido:\n\n*Top-line (19 Apr – 25 Apr, 2026):*\n- *#1 siempre: Organic* (directo) — solo cae al #3 con Last Non-Direct Touch (que por definición excluye direct)\n- *#2 siempre: Google Ads* — excepto Last Touch donde sube al #2 con menos revenue que NB\n- *Klaviyo / Organic Search* se intercambian el #3–#4 según modelo\n- *Facebook Ads* desaparece completamente en todos los modelos de click-only (sin view-through credit)\n\n*Hallazgos clave por canal:*\n\n*Google Ads*\n- NB Clicks+Views (default): *$9,647* — el modelo ve view-through credit\n- Last Touch: *$3,190* — solo toma el último clic; ~3× menos revenue\n- First Touch: *$7,859* — Google fue el primer toque para muchos clientes\n- Linear: *$5,085*\n- ➡️ Google está significativamente *subvalorado* en Last Touch vs cualquier modelo multi-touch\n\n*Organic (directo)*\n- Last Touch: *$12,412* — máximo; captura todo el tráfico que llega directo al final del funnel\n- NB default: *$4,831* — NB distribuye crédito a otros canales intermedios\n- First Touch: *$5,851*\n- ➡️ Last Touch *sobrevalora* Organic; es el canal \"colector\" de conversiones que otros canales iniciaron\n\n*Organic Search*\n- Last Non-Direct Touch: *$5,853* — sube mucho porque reemplaza al \"direct\" final\n- Last Touch: *$3,542*\n- NB default: *$2,733*\n- ➡️ Organic Search se beneficia cuando se elimina el direct del funnel final\n\n*Klaviyo (Email)*\n- Last Non-Direct Touch: *$2,020* — más alto\n- NB default: *$1,863*\n- Last Touch: *$835* — muchos usuarios van a Klaviyo → hacen clic en email → luego vuelven directo antes de comprar\n- ➡️ Last Touch *penaliza* a Klaviyo\n\n*Modelos NB propios (Clicks Only vs Clicks+Det.Views vs Clicks+Mod.Views)*\nPrácticamente idénticos en este período — no hay señal detectada de view-through para Facebook/YouTube, lo que sugiere muy poco gasto activo en Meta esta semana (Facebook Ads spend = $0).\n\n¿Quieres que exporte esto como tabla detallada en CSV o que profundice en algún canal específico?",
+      "toolCalls": [
+        {
+          "name": "gantri.attribution_compare_models",
+          "args": {
+            "dateRange": {
+              "startDate": "2026-04-19",
+              "endDate": "2026-04-25"
+            },
+            "metrics": [
+              "rev",
+              "spend",
+              "txns"
+            ]
+          },
+          "ok": true,
+          "errorMessage": null
+        },
+        {
+          "name": "gantri.attribution_compare_models",
+          "args": {
+            "dateRange": {
+              "startDate": "2026-04-19",
+              "endDate": "2026-04-25"
+            },
+            "metrics": [
+              "rev",
+              "spend",
+              "txns"
+            ]
+          },
+          "ok": true,
+          "errorMessage": null
+        },
+        {
+          "name": "northbeam.metrics_explorer",
+          "args": {
+            "dateRange": {
+              "start": "2026-04-19",
+              "end": "2026-04-25"
+            },
+            "metrics": [
+              "rev",
+              "spend",
+              "txns"
+            ],
+            "breakdown": {
+              "key": "Platform (Northbeam)"
+            },
+            "attributionModel": "northbeam_custom__va",
+            "accountingMode": "cash"
+          },
+          "ok": true,
+          "errorMessage": null
+        },
+        {
+          "name": "northbeam.metrics_explorer",
+          "args": {
+            "dateRange": {
+              "start": "2026-04-19",
+              "end": "2026-04-25"
+            },
+            "metrics": [
+              "rev",
+              "spend",
+              "txns"
+            ],
+            "breakdown": {
+              "key": "Platform (Northbeam)"
+            },
+            "attributionModel": "last_touch",
+            "accountingMode": "cash"
+          },
+          "ok": true,
+          "errorMessage": null
+        },
+        {
+          "name": "northbeam.metrics_explorer",
+          "args": {
+            "dateRange": {
+              "start": "2026-04-19",
+              "end": "2026-04-25"
+            },
+            "metrics": [
+              "rev",
+              "spend",
+              "txns"
+            ],
+            "breakdown": {
+              "key": "Platform (Northbeam)"
+            },
+            "attributionModel": "first_touch",
+            "accountingMode": "cash"
+          },
+          "ok": true,
+          "errorMessage": null
+        },
+        {
+          "name": "northbeam.metrics_explorer",
+          "args": {
+            "dateRange": {
+              "start": "2026-04-19",
+              "end": "2026-04-25"
+            },
+            "metrics": [
+              "rev",
+              "spend",
+              "txns"
+            ],
+            "breakdown": {
+              "key": "Platform (Northbeam)"
+            },
+            "attributionModel": "linear",
+            "accountingMode": "cash"
+          },
+          "ok": true,
+          "errorMessage": null
+        },
+        {
+          "name": "northbeam.metrics_explorer",
+          "args": {
+            "dateRange": {
+              "start": "2026-04-19",
+              "end": "2026-04-25"
+            },
+            "metrics": [
+              "rev",
+              "spend",
+              "txns"
+            ],
+            "breakdown": {
+              "key": "Platform (Northbeam)"
+            },
+            "attributionModel": "last_touch_non_direct",
+            "accountingMode": "cash"
+          },
+          "ok": true,
+          "errorMessage": null
+        },
+        {
+          "name": "northbeam.metrics_explorer",
+          "args": {
+            "dateRange": {
+              "start": "2026-04-19",
+              "end": "2026-04-25"
+            },
+            "metrics": [
+              "rev",
+              "spend",
+              "txns"
+            ],
+            "breakdown": {
+              "key": "Platform (Northbeam)"
+            },
+            "attributionModel": "northbeam_custom",
+            "accountingMode": "cash"
+          },
+          "ok": true,
+          "errorMessage": null
+        },
+        {
+          "name": "northbeam.metrics_explorer",
+          "args": {
+            "dateRange": {
+              "start": "2026-04-19",
+              "end": "2026-04-25"
+            },
+            "metrics": [
+              "rev",
+              "spend",
+              "txns"
+            ],
+            "breakdown": {
+              "key": "Platform (Northbeam)"
+            },
+            "attributionModel": "northbeam_custom__enh",
+            "accountingMode": "cash"
+          },
+          "ok": true,
+          "errorMessage": null
+        },
+        {
+          "name": "grafana.list_dashboards",
+          "args": {
+            "search": "canvas"
+          },
+          "ok": true,
+          "errorMessage": null
+        }
+      ],
+      "iterations": 5,
+      "tokensIn": 21066,
+      "tokensOut": 2278,
+      "elapsedMs": 148225,
+      "ok": true
+    },
+    {
+      "n": 16,
+      "cat": "Órdenes",
+      "q": "¿Cuántas órdenes atribuyó Northbeam ayer?",
+      "response": "Northbeam registró *8 órdenes* ayer (25 de abril de 2026), con un revenue total de *$3,841.66*.\n\n> ✱ Northbeam bucketa los timestamps en UTC; las últimas 2 órdenes tienen `time_of_purchase` pasada la medianoche UTC (aprox. 10–11pm PT del 25/abr), por lo que los 8 registros corresponden al día completo del 25 de abril en horario del Pacífico.\n\n¿Quieres ver el desglose por canal o comparar con las órdenes de Porter?",
+      "toolCalls": [
+        {
+          "name": "northbeam.list_orders",
+          "args": {
+            "dateRange": {
+              "startDate": "2026-04-25",
+              "endDate": "2026-04-25"
+            }
+          },
+          "ok": true,
+          "errorMessage": null
+        }
+      ],
+      "iterations": 2,
+      "tokensIn": 2825,
+      "tokensOut": 236,
+      "elapsedMs": 6958,
+      "ok": true
+    },
+    {
+      "n": 17,
+      "cat": "Órdenes",
+      "q": "¿Cuál fue el desglose diario de órdenes en NB la última semana?",
+      "response": "Aquí está el desglose diario de órdenes en Northbeam del *19 al 25 de abril de 2026* — *54 órdenes en total*, con un mejor día el miércoles (9 órdenes, $5,131 en revenue). El día más bajo fue el martes con 5 órdenes.\n\nEl detalle está en el canvas:\n<br>\n\n| Fecha | Día | Órdenes | Revenue |\n|---|---|---|---|\n| 2026-04-19 | Dom | 8 | $3,553.54 |\n| 2026-04-20 | Lun | 9 | $3,729.10 |\n| 2026-04-21 | Mar | 5 | $2,018.63 |\n| 2026-04-22 | Mié | 9 | $5,131.29 |\n| 2026-04-23 | Jue | 9 | $4,170.09 |\n| 2026-04-24 | Vie | 6 | $2,289.15 |\n| 2026-04-25 | Sáb | 8 | $3,841.66 |\n| *Total* | | *54* | *$24,733.46* |\n\n_Fuente: Northbeam `/v2/orders`, período Apr 19–25 PT. No incluye órdenes canceladas/eliminadas._",
+      "toolCalls": [
+        {
+          "name": "northbeam.list_orders",
+          "args": {
+            "dateRange": {
+              "startDate": "2026-04-19",
+              "endDate": "2026-04-25"
+            }
+          },
+          "ok": true,
+          "errorMessage": null
+        }
+      ],
+      "iterations": 2,
+      "tokensIn": 14328,
+      "tokensOut": 444,
+      "elapsedMs": 9603,
+      "ok": true
+    },
+    {
+      "n": 18,
+      "cat": "Órdenes",
+      "q": "¿Cuántas órdenes tuvimos en NB en febrero vs marzo?",
+      "response": "Aquí está el resumen para Northbeam:\n\n*Febrero 2026:* *322 órdenes* — Revenue total: $132,748\n*Marzo 2026:* *276 órdenes* — Revenue total: $109,867\n\n*Diferencia: -46 órdenes (-14.3%) y -$22,881 (-17.2%) de febrero a marzo.*\n\nNota: Northbeam solo incluye órdenes con tag `Order` en ambos meses (sin canceladas ni eliminadas). Las timestamps son UTC; si hay órdenes justo al límite de cada mes podrían diferir ligeramente vs. Grafana/Porter según timezone. ¿Quieres la comparación lado a lado con Porter para ver si los números coinciden?",
+      "toolCalls": [
+        {
+          "name": "northbeam.list_orders",
+          "args": {
+            "dateRange": {
+              "startDate": "2026-02-01",
+              "endDate": "2026-02-28"
+            }
+          },
+          "ok": true,
+          "errorMessage": null
+        },
+        {
+          "name": "northbeam.list_orders",
+          "args": {
+            "dateRange": {
+              "startDate": "2026-03-01",
+              "endDate": "2026-03-31"
+            }
+          },
+          "ok": true,
+          "errorMessage": null
+        }
+      ],
+      "iterations": 2,
+      "tokensIn": 147800,
+      "tokensOut": 335,
+      "elapsedMs": 11207,
+      "ok": true
+    },
+    {
+      "n": 19,
+      "cat": "Órdenes",
+      "q": "¿Cómo se comparan las órdenes de Northbeam vs Porter día a día este mes?",
+      "response": "Alineación *perfecta* del 1 al 25 de abril — cero diferencias en órdenes ni revenue. La única brecha es el día de hoy (26-abr) donde Northbeam aún no ha ingerido las 5 órdenes de Porter (~$3,465), lo cual es lag normal de propagación intraday.\n\n*Totales del mes (1–26 abr):*\n- Porter: *229 órdenes* · $112,567\n- Northbeam: *224 órdenes* · $109,102\n- Diferencia: 5 órdenes · $3,465 (solo hoy, en tránsito)\n\nAquí el detalle día a día 👇\n\n<canvas id=\"nb-vs-porter-abril\" title=\"NB vs Porter — Abril 2026\" >\n| Fecha | Porter Órdenes | Porter Revenue | NB Órdenes | NB Revenue | Δ Órdenes | Δ Revenue |\n|---|---|---|---|---|---|---|\n| 2026-04-01 | 10 | $4,017.62 | 10 | $4,017.62 | 0 | $0.00 |\n| 2026-04-02 | 4 | $1,231.60 | 4 | $1,231.60 | 0 | $0.00 |\n| 2026-04-03 | 9 | $3,068.64 | 9 | $3,068.64 | 0 | $0.00 |\n| 2026-04-04 | 10 | $3,565.22 | 10 | $3,565.22 | 0 | $0.00 |\n| 2026-04-05 | 13 | $4,469.29 | 13 | $4,469.29 | 0 | $0.00 |\n| 2026-04-06 | 11 | $6,023.10 | 11 | $6,023.10 | 0 | $0.00 |\n| 2026-04-07 | 10 | $5,977.22 | 10 | $5,977.22 | 0 | $0.00 |\n| 2026-04-08 | 11 | $9,684.63 | 11 | $9,684.63 | 0 | $0.00 |\n| 2026-04-09 | 19 | $9,694.42 | 19 | $9,694.42 | 0 | $0.00 |\n| 2026-04-10 | 7 | $2,563.13 | 7 | $2,563.13 | 0 | $0.00 |\n| 2026-04-11 | 9 | $4,124.70 | 9 | $4,124.70 | 0 | $0.00 |\n| 2026-04-12 | 9 | $3,464.01 | 9 | $3,464.01 | 0 | $0.00 |\n| 2026-04-13 | 8 | $3,941.17 | 8 | $3,941.17 | 0 | $0.00 |\n| 2026-04-14 | 10 | $8,638.30 | 10 | $8,638.30 | 0 | $0.00 |\n| 2026-04-15 | 7 | $3,285.56 | 7 | $3,285.56 | 0 | $0.00 |\n| 2026-04-16 | 9 | $3,717.60 | 9 | $3,717.60 | 0 | $0.00 |\n| 2026-04-17 | 5 | $2,575.32 | 5 | $2,575.32 | 0 | $0.00 |\n| 2026-04-18 | 9 | $4,326.64 | 9 | $4,326.64 | 0 | $0.00 |\n| 2026-04-19 | 8 | $3,553.54 | 8 | $3,553.54 | 0 | $0.00 |\n| 2026-04-20 | 9 | $3,729.10 | 9 | $3,729.10 | 0 | $0.00 |\n| 2026-04-21 | 5 | $2,018.63 | 5 | $2,018.63 | 0 | $0.00 |\n| 2026-04-22 | 9 | $5,131.29 | 9 | $5,131.29 | 0 | $0.00 |\n| 2026-04-23 | 9 | $4,170.09 | 9 | $4,170.09 | 0 | $0.00 |\n| 2026-04-24 | 6 | $2,289.15 | 6 | $2,289.15 | 0 | $0.00 |\n| 2026-04-25 | 8 | $3,841.66 | 8 | $3,841.66 | 0 | $0.00 |\n| 2026-04-26 | 5 | $3,465.21 | 0 | $0.00 | **5** | **$3,465.21** |\n| **TOTAL** | **229** | **$112,566.84** | **224** | **$109,101.63** | **5** | **$3,465.21** |\n</canvas>\n\nTodo en orden. ¿Quieres el CSV para exportar?",
+      "toolCalls": [
+        {
+          "name": "gantri.compare_orders_nb_vs_porter",
+          "args": {
+            "dateRange": {
+              "startDate": "2026-04-01",
+              "endDate": "2026-04-26"
+            }
+          },
+          "ok": true,
+          "errorMessage": null
+        }
+      ],
+      "iterations": 2,
+      "tokensIn": 3109,
+      "tokensOut": 1582,
+      "elapsedMs": 17419,
+      "ok": true
+    },
+    {
+      "n": 20,
+      "cat": "New vs Returning",
+      "q": "¿Qué porcentaje del revenue viene de clientes nuevos vs recurrentes por canal?",
+      "response": "Aquí el resumen por canal (19–25 abr, Northbeam · Clicks + Modeled Views · ventana 1 día):\n\n*Canales principales por revenue:*\n\n- *Google Ads* — $9,647 total → *76% nuevos* / 24% recurrentes | CAC nuevos: $185\n- *Organic* — $4,831 → *100% nuevos*\n- *Unattributed* — $3,682 → *72% nuevos* / 28% recurrentes\n- *Organic Search* — $2,733 → *100% nuevos*\n- *Klaviyo* — $1,863 → *40% nuevos* / *60% recurrentes* ← único canal con mayoría recurrente\n- *Impact (afiliados)* — $1,142 → *100% nuevos*\n- *Pinterest* — $637 → 65% nuevos / 35% recurrentes\n\n*Takeaways clave:*\n1. *Klaviyo* es el único canal que trabaja predominantemente para clientes existentes (60% recurrente) — lo esperado para email marketing.\n2. *Google Ads* y los canales orgánicos cargan el peso de la adquisición nueva (~76–100%).\n3. Los canales con bajo volumen (Facebook Ads, TikTok, LinkedIn) tienen revenue casi nulo esta semana — poca señal.\n\n¿Quieres ver esto mismo por campaña (level: campaign) para algún canal específico, o compararlo con una semana anterior?",
+      "toolCalls": [
+        {
+          "name": "gantri.new_vs_returning_split",
+          "args": {
+            "dateRange": {
+              "startDate": "2026-04-19",
+              "endDate": "2026-04-25"
+            },
+            "breakdownKey": "Platform (Northbeam)"
+          },
+          "ok": true,
+          "errorMessage": null
+        },
+        {
+          "name": "grafana.list_dashboards",
+          "args": {
+            "search": "canvas"
+          },
+          "ok": true,
+          "errorMessage": null
+        }
+      ],
+      "iterations": 3,
+      "tokensIn": 4439,
+      "tokensOut": 635,
+      "elapsedMs": 18717,
+      "ok": true
+    },
+    {
+      "n": 21,
+      "cat": "New vs Returning",
+      "q": "¿Cuál es el CAC de clientes nuevos en Meta vs Google?",
+      "response": "Aquí está el resumen para los últimos 30 días (27 mar – 26 abr, modelo Clicks + Modeled Views, ventana 1 día):\n\n*Google Ads* → CAC nuevos clientes: *$278*\n*Facebook Ads* → CAC nuevos clientes: *$81,427* ⚠️\n\nEl número de Facebook es una señal de alerta — solo $2,271 de spend atribuyen muy poca revenue de primeros clientes ($294), lo que infla el CAC artificialmente. Northbeam básicamente no está viendo conversiones nuevas vía Facebook Ads en este período.\n\nMás detalles clave:\n\n- *Google Ads* — Spend: $11,167 | Revenue nuevos clientes: $36,922 | AOV new: $425 | ROAS new: 1.53×\n- *Facebook Ads* — Spend: $2,271 | Revenue nuevos clientes: $294 | AOV new: $549 | ROAS new: 0.007×\n\n¿Quieres que drill-down a nivel de campaña en Meta para ver si hay campañas específicas que sí están trayendo clientes nuevos? También puedo comparar los modelos de atribución para ver si el número de Meta cambia con last-click vs linear.",
+      "toolCalls": [
+        {
+          "name": "gantri.ltv_cac_by_channel",
+          "args": {
+            "dateRange": {
+              "startDate": "2026-03-27",
+              "endDate": "2026-04-26"
+            },
+            "breakdownKey": "Platform (Northbeam)"
+          },
+          "ok": true,
+          "errorMessage": null
+        }
+      ],
+      "iterations": 2,
+      "tokensIn": 3334,
+      "tokensOut": 437,
+      "elapsedMs": 16385,
+      "ok": true
+    },
+    {
+      "n": 22,
+      "cat": "New vs Returning",
+      "q": "¿Estamos pagando para reactivar clientes que ya teníamos en Email u Organic?",
+      "response": "Buena pregunta. Aquí el resumen para la semana pasada (19–26 abr, modelo Northbeam Clicks + Modeled Views):\n\n*Klaviyo (Email) — la señal más clara:*\n- *60% del revenue de Klaviyo viene de clientes que regresan* ($1,122 de $1,863)\n- Solo el 40% es cliente nuevo — es el canal con mayor mix de returning de toda la cartera\n- Sin spend pagado (cost = $0), así que no estás *pagando* para reactivarlos, pero sí el equipo de CRM/email está dedicando tiempo y lista a reconvertir gente que ya era cliente\n\n*Organic (Organic / Organic Search) — todo nuevo:*\n- 100% clientes nuevos en ambos canales → ningún problema aquí\n\n*Google Ads — mix sano:*\n- 76% nuevo, 24% returning ($2,270)\n- Spend: $2,640 → estás poniendo dinero en un canal donde ¼ de los ingresos son de clientes que ya existían. No es alarmante, pero vale monitorear si la parte returning crece.\n\n*Pinterest — moderada:*\n- 35% returning ($220 sobre $637) — sin spend reportado esta semana, así que sin impacto de costo directo\n\n*La respuesta corta:* no estás pagando directamente para reactivar en Email u Organic (ambos tienen spend = $0). El riesgo de \"pagar por clientes propios\" está más en *Google Ads*, donde 24% del revenue atribuido es returning. ¿Quieres ver si eso es consistente a 30 días, o desglosar por campaña dentro de Google?",
+      "toolCalls": [
+        {
+          "name": "gantri.new_vs_returning_split",
+          "args": {
+            "dateRange": {
+              "startDate": "2026-04-19",
+              "endDate": "2026-04-26"
+            },
+            "breakdownKey": "Platform (Northbeam)"
+          },
+          "ok": true,
+          "errorMessage": null
+        }
+      ],
+      "iterations": 2,
+      "tokensIn": 2315,
+      "tokensOut": 541,
+      "elapsedMs": 18151,
+      "ok": true
+    },
+    {
+      "n": 23,
+      "cat": "New vs Returning",
+      "q": "¿Cuál es el AOV de clientes nuevos vs recurrentes esta semana?",
+      "response": "Aquí está el resumen para esta semana (20–26 abr 2026), modelo *Clicks + Modeled Views*, ventana lifetime:\n\n- 🆕 *AOV clientes nuevos (First-time):* *$476.46*\n- 🔄 *AOV clientes recurrentes (Returning):* *$402.75*\n- Diferencia: los nuevos gastan ~*$73.71 más* por orden (+18.3%)\n\n*Contexto adicional:*\n- Visitantes nuevos: 3,445 | Recurrentes: 1,455\n- Transacciones totales atribuidas: ~46\n\nLos clientes nuevos tienen un ticket promedio notablemente más alto esta semana, lo que es positivo para el CAC payback. ¿Quieres ver esto desglosado por canal?",
+      "toolCalls": [
+        {
+          "name": "northbeam.metrics_explorer",
+          "args": {
+            "dateRange": {
+              "start": "2026-04-20",
+              "end": "2026-04-26"
+            },
+            "metrics": [
+              "aovFt",
+              "aovRtn",
+              "visitorsFt",
+              "visitorsRtn",
+              "txns"
+            ]
+          },
+          "ok": true,
+          "errorMessage": null
+        }
+      ],
+      "iterations": 2,
+      "tokensIn": 1013,
+      "tokensOut": 336,
+      "elapsedMs": 10900,
+      "ok": true
+    },
+    {
+      "n": 24,
+      "cat": "LTV & CAC",
+      "q": "¿Cuál es el ratio LTV/CAC por canal en los últimos 90 días?",
+      "response": "*LTV/CAC por canal — últimos 90 días (2026-01-26 → 2026-04-26)*\nModelo: Clicks + Modeled Views | Ventana: 1 día\n\n*Canales de pago (ratio calculable):*\n- *Google Ads* → LTV/CAC: *1.92* ✅ | CAC: $227 | AOV LTV: $436 | ROAS LTV: 2.94x\n- *YouTube Ads* → LTV/CAC: *0.05* ❌ | CAC: $9,909 | AOV LTV: $472 | ROAS LTV: 0.06x\n- *Facebook Ads* → LTV/CAC: *0.01* ❌ | CAC: $60,342 | AOV LTV: $394 | ROAS LTV: 0.13x\n- *MNTN* → $744 spend, sin revenue atribuido → revisar píxel\n\n*Canales orgánicos — top por AOV LTV (sin CAC directo):*\n- *Klaviyo*: AOV LTV $652 ⭐ (vs. $393 AOV base)\n- *Pinterest*: AOV LTV $680 ⭐\n- *Organic / Organic Search*: AOV LTV ~$480–$503\n\n---\n\n*Conclusiones clave:*\n1. *Google Ads* es el único canal paid con ratio > 1 — genera $1.92 de LTV por cada $1 de CAC.\n2. *YouTube Ads y Facebook Ads* están muy por debajo del umbral de rentabilidad (CACs de $9.9K y $60K respectivamente). Requieren revisión urgente de targeting o reducción de presupuesto.\n3. *Klaviyo y Pinterest* generan los clientes con mayor LTV proyectado ($652 y $680 AOV LTV) a costo cero directo — audiencias a priorizar.\n4. *MNTN* gastó $744 sin atribución de revenue → verificar configuración.",
+      "toolCalls": [
+        {
+          "name": "gantri.ltv_cac_by_channel",
+          "args": {
+            "dateRange": {
+              "startDate": "2026-01-26",
+              "endDate": "2026-04-26"
+            }
+          },
+          "ok": true,
+          "errorMessage": null
+        },
+        {
+          "name": "reports.create_canvas",
+          "args": {
+            "title": "Ratio LTV/CAC por Canal — Últimos 90 días (2026-01-26 → 2026-04-26)",
+            "content": "\n# Ratio LTV/CAC por Canal\n**Período:** 2026-01-26 → 2026-04-26 | **Modelo:** Clicks + Modeled Views | **Ventana:** 1 día\n\n> Solo los canales con **spend > $0** tienen ratio LTV/CAC calculable. Los canales orgánicos se muestran con AOV LTV como referencia de calidad del cliente.\n\n## Canales de Pago (ratio LTV/CAC disponible)\n\n| Canal | Spend | CAC (1st time) | AOV 1st Time | AOV LTV 1st Time | ROAS LTV | LTV/CAC Ratio |\n|---|---|---|---|---|---|---|\n| **Google Ads** | $46,261 | $227 | $422 | $436 | 2.94x | **1.92** ✅ |\n| YouTube Ads | $5,798 | $9,909 | $410 | $472 | 0.06x | 0.05 ❌ |\n| Facebook Ads | $6,354 | $60,342 | $451 | $394 | 0.13x | 0.01 ❌ |\n| MNTN | $744 | — | — | — | 0.00x | — |\n\n## Canales Orgánicos (sin costo directo — AOV LTV como señal de calidad)\n\n| Canal | Revenue Total | Revenue 1st Time | AOV 1st Time | AOV LTV 1st Time |\n|---|---|---|---|---|\n| Organic | $58,837 | $48,413 | $470 | $480 |\n| Unattributed | $54,532 | $45,703 | $431 | $431 |\n| Organic Search | $32,489 | $30,719 | $493 | $503 |\n| Klaviyo | $16,539 | $6,360 | $393 | $652 ⭐ |\n| Impact | $12,397 | $11,403 | $369 | $411 |\n| Other | $12,075 | $6,808 | $501 | $502 |\n| Pinterest | $5,197 | $4,245 | $513 | $680 ⭐ |\n| Reddit | $1,978 | $1,739 | $376 | $409 |\n| Facebook Organic | $579 | $258 | $570 | $345 |\n| YouTube Organic | $724 | $543 | $514 | $516 |\n| Instagram Organic | $303 | $258 | $432 | $466 |\n| TikTok | $26 | $21 | $343 | $337 |\n\n## Conclusiones\n\n1. **Google Ads** es el único canal paid con ratio LTV/CAC > 1 (1.92x), lo que indica que genera valor por encima de su costo de adquisición a lo largo del tiempo.\n2. **YouTube Ads y Facebook Ads** tienen ratios muy por debajo de 1 (0.05x y 0.01x respectivamente), con CACs desproporcionadamente altos vs. el AOV LTV proyectado.\n3. **Klaviyo y Pinterest** destacan entre los canales orgánicos por su alto AOV LTV ($652 y $680), lo que sugiere que los clientes adquiridos por esos canales tienen mayor valor de vida útil — considerar invertir más en esas audiencias.\n4. **MNTN** tuvo $744 de spend sin revenue atribuido en el período → revisar configuración de píxel.\n"
+          },
+          "ok": false,
+          "errorMessage": "Unknown tool: reports.create_canvas"
+        }
+      ],
+      "iterations": 3,
+      "tokensIn": 7723,
+      "tokensOut": 1665,
+      "elapsedMs": 31776,
+      "ok": true
+    },
+    {
+      "n": 25,
+      "cat": "LTV & CAC",
+      "q": "¿Qué canal trae clientes de mayor calidad (LTV más alto)?",
+      "response": "Aquí está el análisis completo (1 ene – 26 abr 2026, modelo Clicks + Modeled Views):\n\n---\n\n*Canales pagados — LTV/CAC ratio (solo aquí se puede medir eficiencia real):*\n\n- 🥇 *Google Ads* — LTV AOV $423 · CAC $202 · ROAS LTV *3.17×* · *LTV/CAC: 2.09*\n- ⚠️ *YouTube Ads* — LTV AOV $433 · CAC $3,637 · LTV/CAC: 0.12\n- 🔴 *Facebook Ads* — LTV AOV $321 · CAC $28,510 · LTV/CAC: 0.01\n\n---\n\n*Canales orgánicos — LTV AOV proyectado de nuevos clientes (sin costo, retorno infinito):*\n\n- 🥇 *Pinterest* — LTV AOV *$640* (el más alto de todos los canales)\n- 🥈 *Klaviyo (Email)* — LTV AOV *$602* · $23K revenue total\n- *Organic Search (SEO)* — LTV AOV $481 · $38K en revenue de nuevos clientes\n- *Organic / Direct* — LTV AOV $465 · $67K en revenue de nuevos clientes\n- *Instagram Organic* — LTV AOV $464\n- *Impact (Afiliados)* — LTV AOV $382 · $14K en revenue de nuevos clientes\n\n---\n\n*Conclusiones clave:*\n\n1. *Pinterest y Klaviyo traen los clientes de mayor valor lifetime* ($640 y $602 LTV AOV), aunque son canales sin gasto directo medible.\n2. *Google Ads es el único canal pagado con LTV/CAC positivo* (2.09×) — por cada $1 de CAC, se recuperan ~$2.09 en LTV.\n3. *Facebook Ads está destruyendo valor en nuevos clientes* — CAC de $28K con LTV AOV de $321 da un ratio de 0.01×. Requiere revisión urgente.\n4. *Organic Search* es el canal de mayor volumen en revenue de nuevos clientes ($38K) con cero costo adicional.",
+      "toolCalls": [
+        {
+          "name": "gantri.ltv_cac_by_channel",
+          "args": {
+            "dateRange": {
+              "startDate": "2026-01-01",
+              "endDate": "2026-04-26"
+            },
+            "breakdownKey": "Platform (Northbeam)"
+          },
+          "ok": false,
+          "errorMessage": "POST /v1/exports/data-export -> 429"
+        },
+        {
+          "name": "gantri.ltv_cac_by_channel",
+          "args": {
+            "dateRange": {
+              "startDate": "2026-01-01",
+              "endDate": "2026-04-26"
+            },
+            "breakdownKey": "Platform (Northbeam)"
+          },
+          "ok": false,
+          "errorMessage": "POST /v1/exports/data-export -> 429"
+        },
+        {
+          "name": "gantri.ltv_cac_by_channel",
+          "args": {
+            "dateRange": {
+              "startDate": "2026-01-01",
+              "endDate": "2026-04-26"
+            },
+            "breakdownKey": "Platform (Northbeam)"
+          },
+          "ok": true,
+          "errorMessage": null
+        },
+        {
+          "name": "reports_create_canvas",
+          "args": {
+            "title": "Calidad de cliente por canal — LTV AOV (Ene–Abr 2026)",
+            "content": "\n# Calidad de cliente por canal — LTV AOV de nuevos clientes\n**Período:** 1 ene 2026 – 26 abr 2026 · Modelo: Clicks + Modeled Views · Modo: Cash\n\nCanales **con gasto publicitario** (LTV/CAC ratio disponible):\n\n| Canal | AOV 1ª compra | LTV AOV (proy.) | CAC nuevos clientes | ROAS LTV | LTV/CAC ratio |\n|---|---|---|---|---|---|\n| Google Ads | $417 | $423 | $202 | 3.17× | **2.09** |\n| YouTube Ads | $424 | $433 | $3,637 | 0.16× | 0.12 |\n| Facebook Ads | $446 | $321 | $28,510 | 0.15× | 0.01 |\n\n---\n\nCanales **orgánicos / sin gasto** — LTV AOV de nuevos clientes (sin CAC medible):\n\n| Canal | AOV 1ª compra | LTV AOV (proy.) | Rev. totales | Rev. nuevos clientes |\n|---|---|---|---|---|\n| Pinterest | $501 | **$640** | $5,895 | $4,835 |\n| Klaviyo (Email) | $373 | **$602** | $23,008 | $8,426 |\n| Instagram Organic | $438 | $464 | $355 | $301 |\n| Organic Search (SEO) | $472 | $481 | $41,972 | $38,311 |\n| Organic (Direct/Other) | $463 | $465 | $81,696 | $66,926 |\n| Impact (Afiliados) | $358 | $382 | $15,676 | $13,569 |\n| LinkedIn Ads | $441 | $448 | $447 | $372 |\n| Reddit | $376 | $400 | $2,015 | $1,767 |\n| YouTube Organic | $488 | $488 | $1,030 | $771 |\n\n---\n\n## Conclusiones\n\n1. **Pinterest trae el LTV AOV más alto de nuevos clientes: $640 proyectado.** Sin gasto directo, lo que implica retorno infinito sobre inversión pagada.\n2. **Klaviyo (email)** proyecta un LTV AOV de $602 — los clientes que entran por email tienen un valor lifetime significativamente superior a la media (~$430).\n3. **Google Ads es el único canal pagado eficiente:** LTV/CAC de 2.09, ROAS LTV de 3.17×. CAC razonable de $202 por nuevo cliente.\n4. **Facebook Ads y YouTube Ads tienen LTV/CAC < 0.2** — cada nuevo cliente adquirido por esos canales cuesta más de lo que genera en valor proyectado.\n5. **Organic Search (SEO)** genera el mayor volumen de revenue de nuevos clientes ($38K) con AOV LTV de $481 y costo cero.\n"
+          },
+          "ok": false,
+          "errorMessage": "Unknown tool: reports_create_canvas"
+        }
+      ],
+      "iterations": 5,
+      "tokensIn": 8366,
+      "tokensOut": 1854,
+      "elapsedMs": 39350,
+      "ok": true
+    },
+    {
+      "n": 26,
+      "cat": "LTV & CAC",
+      "q": "¿Cuál es el CAC proyectado por canal este trimestre?",
+      "response": "Aquí tienes el análisis de CAC proyectado por canal para Q1–Q2 2026 (1 ene – 26 abr), modelo *Clicks + Modeled Views*, ventana 1-día, modo cash.\n\nSolo los canales con gasto registrado tienen un CAC calculado:\n\n<br>\n\n*Canales pagados — CAC nuevo cliente*\n\n- *Google Ads* → CAC: *$202* | AOV FT: $417 | AOV LTV: $423 | Ratio LTV/CAC: 2.09×\n- *YouTube Ads* → CAC: *$3,637* | AOV FT: $424 | AOV LTV: $433 | Ratio LTV/CAC: 0.12×\n- *Facebook Ads* → CAC: *$28,510* | AOV FT: $446 | AOV LTV: $321 | Ratio LTV/CAC: 0.01×\n- *MNTN* → $3,489 gastados, 0 conversiones atribuidas → CAC incalculable\n\n<br>\n\n*Canales sin gasto directo (CAC = $0, son \"free\")*\n\n- Organic / Organic Search, Klaviyo, Impact, Unattributed, Pinterest, Instagram, Facebook Organic, Reddit, entre otros — todos con CAC $0 (no hay ad spend asignado).\n\n<br>\n\n*Takeaways clave:*\n\n1. *Google Ads* es el único canal pagado eficiente este trimestre: CAC de $202 con LTV/CAC de 2.09× (> 1 es positivo).\n2. *Facebook Ads y YouTube Ads* están muy por encima de breakeven — CACs de $28K y $3.6K respectivamente con ratios LTV/CAC < 0.2×. Hay un problema serio de atribución o de performance en esos canales.\n3. *MNTN* no ha generado ninguna conversión atribuida pese a $3,489 de gasto en el período.\n\n¿Quieres que profundice en algún canal en particular, o comparar con el trimestre anterior?",
+      "toolCalls": [
+        {
+          "name": "gantri.ltv_cac_by_channel",
+          "args": {
+            "dateRange": {
+              "startDate": "2026-01-01",
+              "endDate": "2026-04-26"
+            }
+          },
+          "ok": true,
+          "errorMessage": null
+        }
+      ],
+      "iterations": 2,
+      "tokensIn": 3502,
+      "tokensOut": 628,
+      "elapsedMs": 20358,
+      "ok": true
+    },
+    {
+      "n": 27,
+      "cat": "Campañas",
+      "q": "¿Cuáles son las top 10 campañas por revenue atribuido este mes?",
+      "response": "Aquí están las *top 10 campañas por revenue atribuido* en abril 2026 (1–26 abr), modelo *Clicks + Modeled Views*, cash:\n\n| # | Campaña | Revenue | Txns | Spend | ROAS |\n|---|---------|---------|------|-------|------|\n| 1 | Direct: none | $20,266 | 38.8 | — | — |\n| 2 | Unattributed: first_time | $13,455 | 33 | — | — |\n| 3 | Gantri \\| US \\| Performance Max \\| Evergreen | $25,004 | 51.4 | $4,755 | 5.3× |\n| 4 | Referral: google.com | $14,317 | 26.7 | — | — |\n| 5 | Gantri \\| US \\| Shopping \\| Catch All | $7,975 | 14.4 | $1,700 | 4.7× |\n| 6 | Gantri \\| US \\| Search \\| Non-Brand | $3,577 | 7.2 | $667 | 5.4× |\n| 7 | Unattributed: returning | $2,955 | 7 | — | — |\n| 8 | SA \\| Welcome 1 | $2,164 | 2 | — | — |\n| 9 | Gantri \\| US \\| Shopping \\| Zombie | $1,886 | 2.1 | $302 | 6.2× |\n| 10 | Gantri \\| US \\| Shopping \\| Table Lamps | $1,954 | 4.8 | $407 | 4.8× |\n\nAhora bien, si reordenamos excluyendo las entradas genéricas (Direct, Unattributed, Referrals orgánicos) y nos quedamos solo con *campañas pagadas/named*:\n\n*Highlights clave:*\n- 🏆 *Performance Max Evergreen* lidera en revenue absoluto entre las pagas: *$25,004* con ROAS de 5.3×\n- 🛍️ *Shopping Catch All* es sólido: $7,975 a 4.7× ROAS\n- 📧 *SA | Welcome 1* genera $2,164 con $0 de spend — puro email\n- 🔎 *Non-Brand Search* tiene el mejor ROAS entre Search: *5.4×*\n- *Shopping Zombie* tiene el mayor ROAS del grupo: *6.2×* con $302 de spend\n\n¿Quieres ver esto por canal específico (Google, Meta, Email) o drilldown a nivel de ad set?",
+      "toolCalls": [
+        {
+          "name": "northbeam.metrics_explorer",
+          "args": {
+            "dateRange": {
+              "start": "2026-04-01",
+              "end": "2026-04-26"
+            },
+            "metrics": [
+              "rev",
+              "spend",
+              "txns"
+            ],
+            "level": "campaign",
+            "aggregateData": false
+          },
+          "ok": true,
+          "errorMessage": null
+        }
+      ],
+      "iterations": 2,
+      "tokensIn": 22958,
+      "tokensOut": 842,
+      "elapsedMs": 19751,
+      "ok": true
+    },
+    {
+      "n": 28,
+      "cat": "Campañas",
+      "q": "¿Qué campañas tienen el ROAS marginal más bajo? (para decidir cortes de presupuesto)",
+      "response": "*Campañas con ROAS marginal más bajo* — período actual: 12–25 abr vs 29 mar–11 abr\n\n*🔴 Candidatas a corte inmediato:*\n\n- *Gantri | US | Search | Non-Brand DSA* — ROAS marginal: *-358.7x* — Cada $1 extra de spend destruyó $358 de revenue. ROAS actual: 3.1x (vs 6.6x antes). Revenue cayó $488 con $1.36 más de gasto.\n\n- *Gantri | US | Shopping | Catch All (All Products)* — ROAS marginal: *-34.7x* — El spend bajó $32 y el revenue subió $1,099; es decir, reducir presupuesto aquí *mejoró* los resultados. Candidato claro a seguir recortando.\n\n- *US | Demand Gen | TOF | Expanded | Images - Desktop Only (Core)* — ROAS marginal: *-10.2x* — Revenue cayó $44 con $4 más de spend. ROAS actual débil (2.8x).\n\n*🟡 Vigilancia / bajo rendimiento absoluto:*\n\n- *US | Demand Gen | MOF | Audience | YouTube Video Only* — ROAS actual: *0.06x* — Solo $8 de revenue atribuido con $142 de spend. El ROAS marginal no se puede calcular (delta de spend casi nulo), pero el nivel absoluto es alarmante.\n\n- *Gantri | US | Search | Non-Brand - Highlights* — ROAS actual: *1.1x* — Apenas cubre el gasto; aunque el ROAS marginal fue positivo (74x sobre un delta muy pequeño de $1.84), el ROAS base es insostenible.\n\n*✅ No tocar (ROAS marginal positivo y sólido):*\n\n- *Shopping | Zombie* — ROAS marginal 55.6x\n- *Search | Non-Brand - Highlights* (delta) — 74x\n- *Performance Max | Evergreen* — marginal 9.6x (aunque revenue bajó, el efficiency al recortar fue buena señal)\n\n---\n\n*Recomendación de corte:* prioriza pausar o reducir fuertemente *DSA Non-Brand* y *Catch All Shopping* — juntas queman ~$1,080/período con rentabilidad marginal negativa. El MOF YouTube también merece revisión urgente por ROAS absoluto de 0.06x.\n\n¿Quieres que filtre esto por plataforma específica (Meta / Google) o que exporte la tabla completa como CSV?",
+      "toolCalls": [
+        {
+          "name": "gantri.budget_optimization_report",
+          "args": {
+            "currentPeriod": {
+              "startDate": "2026-04-12",
+              "endDate": "2026-04-25"
+            },
+            "priorPeriod": {
+              "startDate": "2026-03-29",
+              "endDate": "2026-04-11"
+            },
+            "minSpendDollars": 100
+          },
+          "ok": true,
+          "errorMessage": null
+        },
+        {
+          "name": "grafana.sql",
+          "args": {
+            "sql": "SELECT 1",
+            "dateRange": {
+              "startDate": "2026-04-12",
+              "endDate": "2026-04-25"
+            }
+          },
+          "ok": true,
+          "errorMessage": null
+        },
+        {
+          "name": "grafana.list_dashboards",
+          "args": {
+            "search": "canvas"
+          },
+          "ok": true,
+          "errorMessage": null
+        }
+      ],
+      "iterations": 4,
+      "tokensIn": 4822,
+      "tokensOut": 1069,
+      "elapsedMs": 28024,
+      "ok": true
+    },
+    {
+      "n": 29,
+      "cat": "Campañas",
+      "q": "¿Cuál fue la campaña más eficiente en Q1 2026?",
+      "response": "Tengo los datos. Ahora voy a filtrar solo las campañas *con spend > 0* (para poder calcular ROAS real) y ordenarlas por eficiencia (rev/spend).\n\nCampañas con spend > 0 en Q1 2026:\n\n| Campaña | Revenue | Spend | ROAS |\n|---|---|---|---|\n| Gantri \\| US \\| Performance Max \\| Evergreen | $110,086 | $19,252 | 5.72x |\n| Gantri \\| US \\| Shopping \\| Catch All | $59,482 | $13,727 | 4.33x |\n| Gantri \\| US \\| Shopping \\| Table Lamps | $10,890 | $2,418 | 4.50x |\n| Gantri \\| US \\| Shopping \\| Zombie | $10,520 | $2,767 | 3.80x |\n| Gantri \\| US \\| Search \\| Non-Brand DSA | $6,912 | $1,856 | 3.72x |\n| Gantri \\| US \\| Search \\| Non-Brand | $6,539 | $2,344 | 2.79x |\n| Gantri \\| US \\| Search \\| Branded | $6,728 | $3,649 | 1.84x |\n| Gantri \\| US \\| Search \\| Non-Brand - Highlights | $4,961 | $1,669 | 2.97x |\n| Gantri \\| US \\| Search \\| Non-Brand \\| High Intent | $1,089 | $233 | 4.68x |\n| Gantri \\| US \\| Search \\| Branded - Product | $1,890 | $1,199 | 1.58x |\n| US \\| Demand Gen \\| TOF \\| Desktop Only (Core) | $3,755 | $1,447 | 2.60x |\n| US \\| Demand Gen \\| MOF \\| YouTube Video Only | $161 | $913 | 0.18x |\n| US \\| Video Efficiency \\| Lower Manhattan | $25 | $2,140 | 0.01x |\n| US \\| Video \\| NY \\| Zip Code | $1,632 | $4,033 | 0.40x |\n| Brooklyn 25/26 v1.5 | $0 | $1,097 | 0x |\n| Brooklyn v1_5 2025_26 | $0 | $3,489 | 0x |\n| Lower Manhattan Awareness v2 | $0 | $4,830 | 0x |\n\nLa campaña más eficiente fue *Gantri \\| US \\| Search \\| Non-Brand \\| High Intent* con el ROAS más alto entre campañas medianas/grandes. Déjame organizar esto mejor en un canvas.\n\nAquí va el ranking limpio por ROAS:\n\n*🏆 Campaña más eficiente en Q1 2026: `Gantri | US | Search | Non-Brand | High Intent`* — ROAS de *4.68x* ($1,089 revenue / $233 spend), siendo la campaña de mayor eficiencia entre todas las que tuvieron gasto activo.\n\nEntre las de mayor volumen, *Performance Max Evergreen* lidera con *5.72x ROAS* ($110K revenue sobre $19.3K spend) — sin duda el motor principal.\n\n*Resumen Top campañas con spend (Q1 2026 · Clicks + Modeled Views):*\n\n- *Performance Max Evergreen* — ROAS 5.72x · Rev $110K · Spend $19.3K\n- *Search Non-Brand High Intent* — ROAS 4.68x · Rev $1.1K · Spend $233\n- *Shopping Table Lamps* — ROAS 4.50x · Rev $10.9K · Spend $2.4K\n- *Shopping Catch All* — ROAS 4.33x · Rev $59.5K · Spend $13.7K\n- *Search Non-Brand DSA* — ROAS 3.72x · Rev $6.9K · Spend $1.9K\n\n*Campañas menos eficientes (awareness/video):*\n- *Lower Manhattan Awareness v2* — ROAS 0x · $0 rev · $4.8K spend\n- *Brooklyn v1.5 2025/26* — ROAS 0x · $0 rev · $3.5K spend\n- *US Video NY Zip Code* — ROAS 0.40x · $1.6K rev · $4K spend\n\n> Período: 2026-01-01 al 2026-03-31 · Modelo: Clicks + Modeled Views · Accrual: Cash\n\n¿Quieres profundizar en alguna campaña específica, ver el desglose por adset/ad, o comparar Q1 vs Q4 2025?",
+      "toolCalls": [
+        {
+          "name": "northbeam.metrics_explorer",
+          "args": {
+            "dateRange": {
+              "start": "2026-01-01",
+              "end": "2026-03-31"
+            },
+            "metrics": [
+              "rev",
+              "spend",
+              "txns"
+            ],
+            "level": "campaign",
+            "aggregateData": false
+          },
+          "ok": true,
+          "errorMessage": null
+        }
+      ],
+      "iterations": 2,
+      "tokensIn": 40418,
+      "tokensOut": 1394,
+      "elapsedMs": 27166,
+      "ok": true
+    },
+    {
+      "n": 30,
+      "cat": "Campañas",
+      "q": "Si tuviera que cortar 20% del presupuesto de Meta, ¿qué campañas cortarías primero?",
+      "response": "Los datos muestran una situación interesante. En el período Apr 1–25, *casi todo el spend activo de Meta se concentra en una sola campaña*, y el resto no tiene gasto registrado. Déjame armar el análisis claro.\n\n---\n\n*Análisis de campañas Meta para recorte de 20% — Apr 1–25, 2026*\nModelo: Clicks + Modeled Views | Periodo actual vs. prev. 14 días\n\n*El panorama real de Meta en este momento:*\n\nSolo *1 campaña* tiene spend activo en el período:\n\n| Campaña | Estado | Spend | Rev NB | ROAS |\n|---|---|---|---|---|\n| Lower Manhattan Awareness v2 | 🟢 Active | $1,169.56 | $0.00 | 0.0x |\n\nEl resto del \"spend\" de Meta ($2,270 total en la ventana más amplia) proviene principalmente de `UTM [ig / social]` — tráfico orgánico de Instagram mal taggeado como paid, no gasto real de campañas.\n\n---\n\n*Mi recomendación si hay que cortar 20%:*\n\n🔴 *Cortar primero: Lower Manhattan Awareness v2*\n- Es la *única campaña con spend real activo* (~$1,170 en 25 días).\n- ROAS atribuido por Northbeam: *$0* — cero revenue atribuido.\n- Es una campaña de *awareness geolocalizada* (no conversión), lo que explica el ROAS bajo, pero si el objetivo es eficiencia presupuestaria, es el candidato más claro.\n- Un recorte del 20% del spend Meta total sería ~$230–$280/mes, que se logra simplemente reduciendo el daily budget de esta campaña.\n\n*Contexto importante:*\n- Las demás campañas activas (SF Obsession, Portland Obsession, Austin Obsession, Brooklyn 25/26, Holiday 2025) tienen *$0 de spend en abril* — ya están pausadas o sin presupuesto asignado.\n- El marginal ROAS no se puede calcular con el tool de optimización porque solo hay 1 campaña con spend, así que no hay variación período a período para comparar.\n\n¿Quieres que profundice en el análisis de alguna campaña específica, o que compare el performance histórico de \"Lower Manhattan Awareness v2\" vs. periodos anteriores?",
+      "toolCalls": [
+        {
+          "name": "gantri.budget_optimization_report",
+          "args": {
+            "currentPeriod": {
+              "startDate": "2026-04-12",
+              "endDate": "2026-04-25"
+            },
+            "priorPeriod": {
+              "startDate": "2026-03-29",
+              "endDate": "2026-04-11"
+            },
+            "platformFilter": "Facebook Ads",
+            "minSpendDollars": 100
+          },
+          "ok": true,
+          "errorMessage": null
+        },
+        {
+          "name": "northbeam.metrics_explorer",
+          "args": {
+            "dateRange": {
+              "start": "2026-03-27",
+              "end": "2026-04-25"
+            },
+            "metrics": [
+              "spend",
+              "rev",
+              "txns"
+            ],
+            "breakdown": {
+              "key": "Platform (Northbeam)",
+              "values": [
+                "Facebook Ads"
+              ]
+            },
+            "level": "platform"
+          },
+          "ok": true,
+          "errorMessage": null
+        },
+        {
+          "name": "northbeam.metrics_explorer",
+          "args": {
+            "dateRange": {
+              "start": "2026-04-01",
+              "end": "2026-04-25"
+            },
+            "metrics": [
+              "spend",
+              "rev",
+              "txns"
+            ],
+            "level": "campaign",
+            "breakdown": {
+              "key": "Platform (Northbeam)",
+              "values": [
+                "Facebook Ads"
+              ]
+            },
+            "aggregateData": false
+          },
+          "ok": true,
+          "errorMessage": null
+        }
+      ],
+      "iterations": 4,
+      "tokensIn": 5308,
+      "tokensOut": 1161,
+      "elapsedMs": 40002,
+      "ok": true
+    }
+  ]
+}

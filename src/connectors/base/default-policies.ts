@@ -25,4 +25,10 @@ export const DEFAULT_CACHE_POLICIES: Record<string, CachePolicy> = {
   'northbeam.orders_summary': { version: 1, settleDays: 3, openTtlSec: 600, dateRangePath: 'dateRange' },
   'northbeam.metrics_explorer': { version: 1, settleDays: 3, openTtlSec: 600, dateRangePath: 'dateRange' },
   // northbeam.orders_list left out — row-level data, too volatile.
+
+  // GA4: data is processed within hours; treat ranges ending 1+ days ago as final.
+  // ga4.list_events is the event catalog — stable across the property, big TTL win.
+  'ga4.list_events': { version: 1, settleDays: 1, openTtlSec: 3600, dateRangePath: 'dateRange' },
+  'ga4.run_report': { version: 1, settleDays: 1, openTtlSec: 600, dateRangePath: 'dateRange' },
+  // ga4.realtime is real-time by definition — never cache.
 };

@@ -27,6 +27,7 @@ const RunReportArgs = z.object({
     dimension: z.string().optional(),
     desc: z.boolean().default(true),
   }).optional().describe('Sort. Pass either `metric` or `dimension` (not both).'),
+  dimensionFilter: z.record(z.unknown()).optional().describe('GA4 FilterExpression that restricts dimension values server-side. Use to keep response size small on high-cardinality breakdowns (e.g. `pagePath × eventName` returns thousands of rows). In-list filter: `{filter:{fieldName:"eventName",inListFilter:{values:["page_view","scroll"]}}}`. Single value: `{filter:{fieldName:"pagePath",stringFilter:{value:"/products/",matchType:"BEGINS_WITH"}}}`. Combine with `{andGroup:{expressions:[...]}}` or `{orGroup:{expressions:[...]}}`.'),
 });
 type RunReportArgs = z.infer<typeof RunReportArgs>;
 
@@ -37,12 +38,18 @@ const RealtimeArgs = z.object({
 });
 type RealtimeArgs = z.infer<typeof RealtimeArgs>;
 
+const ListEventsArgs = z.object({
+  dateRange: DateRange.default('last_30_days').describe('Window over which to enumerate the events that fired.'),
+  limit: z.number().int().min(1).max(1000).default(200).describe('Max number of distinct event names to return. GA4 properties typically have 50–250 distinct events.'),
+});
+type ListEventsArgs = z.infer<typeof ListEventsArgs>;
+
 export class Ga4Connector implements Connector {
   readonly name = 'ga4';
   readonly tools: readonly ToolDef[];
 
   constructor(private readonly deps: Ga4ConnectorDeps) {
-    this.tools = [this.runReportTool(), this.realtimeTool()];
+    this.tools = [this.runReportTool(), this.realtimeTool(), this.listEventsTool()];
   }
 
   async healthCheck(): Promise<{ ok: boolean; detail?: string }> {
@@ -85,12 +92,27 @@ export class Ga4Connector implements Connector {
     };
   }
 
+  private listEventsTool(): ToolDef<ListEventsArgs> {
+    return {
+      name: 'ga4.list_events',
+      description: [
+        'List the GA4 event names that fired in a date range, sorted by count desc. Returns `{eventName, eventCount, totalUsers}` per event.',
+        'Use this BEFORE constructing any `ga4.run_report` query that filters by `eventName`, so you can pick the right events for the question. Event names are CUSTOM per property — names like `add_to_cart`, `product_gallery_view_next`, `product_color_changed`, `search_products_searched`, `topnavigation_*` exist only because Gantri tracks them; you cannot guess. ALWAYS call this tool first when the user asks about a behavior that maps to an event (gallery interaction, search behavior, customization usage, navigation clicks, etc.).',
+        'Cheap call — single GA4 request, ~50–250 rows.',
+      ].join(' '),
+      schema: ListEventsArgs as z.ZodType<ListEventsArgs>,
+      jsonSchema: zodToJsonSchema(ListEventsArgs),
+      execute: (args) => this.listEvents(args),
+    };
+  }
+
   private async runReport(args: RunReportArgs) {
     const req: Ga4ReportRequest = {
       dateRanges: [resolveDateRange(args.dateRange)],
       metrics: args.metrics.map((name) => ({ name })),
       ...(args.dimensions && args.dimensions.length ? { dimensions: args.dimensions.map((name) => ({ name })) } : {}),
       ...(args.limit ? { limit: args.limit } : {}),
+      ...(args.dimensionFilter ? { dimensionFilter: args.dimensionFilter } : {}),
       ...(args.orderBy
         ? {
             orderBys: [{
@@ -103,6 +125,24 @@ export class Ga4Connector implements Connector {
     };
     try {
       const res = await this.deps.client.runReport(req);
+      return { period: args.dateRange, ...flattenReport(res) };
+    } catch (err) {
+      if (err instanceof Ga4ApiError) {
+        return { error: { code: 'GA4_API_ERROR', status: err.status, message: err.message, body: err.body } };
+      }
+      throw err;
+    }
+  }
+
+  private async listEvents(args: ListEventsArgs) {
+    try {
+      const res = await this.deps.client.runReport({
+        dateRanges: [resolveDateRange(args.dateRange)],
+        dimensions: [{ name: 'eventName' }],
+        metrics: [{ name: 'eventCount' }, { name: 'totalUsers' }],
+        limit: args.limit,
+        orderBys: [{ metric: { metricName: 'eventCount' }, desc: true }],
+      });
       return { period: args.dateRange, ...flattenReport(res) };
     } catch (err) {
       if (err instanceof Ga4ApiError) {

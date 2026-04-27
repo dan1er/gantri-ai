@@ -135,41 +135,61 @@ export function createDmHandler(deps: HandlerDeps) {
     const threadHistory = await deps.conversationsRepo.loadRecentByThread(threadTs, 10);
     const started = Date.now();
 
-    // Live progress: as the orchestrator hits each connector, update the
-    // placeholder text so the user can see whether the right source was
-    // chosen (e.g., "Querying Northbeam, Grafana…"). We only update when
-    // the set of unique connectors grows, and we throttle edits to no
-    // more than one per 500ms to stay well under chat.update rate limits.
-    const seenSources = new Set<string>();
+    // Live progress: render each tool the orchestrator invokes with status —
+    // running ("⏳ ga4.list_events"), done ("✓ ga4.list_events 1.5s"), or
+    // failed ("✗ ga4.list_events"). Updates are throttled to one chat.update
+    // per 600ms to stay well under Slack rate limits.
+    type ToolStatus = { name: string; state: 'running' | 'done' | 'failed'; elapsedMs?: number };
+    const toolHistory: ToolStatus[] = [];
     let lastUpdateAt = 0;
     let pendingUpdate: NodeJS.Timeout | null = null;
-    const flushSourcesUpdate = () => {
+    const renderProgress = (): string => {
+      if (toolHistory.length === 0) return '🔍 Thinking…';
+      const lines = toolHistory.map((t) => {
+        const icon = t.state === 'running' ? '⏳' : t.state === 'done' ? '✓' : '✗';
+        const timing = t.elapsedMs != null ? ` _(${(t.elapsedMs / 1000).toFixed(1)}s)_` : '';
+        return `${icon} \`${t.name}\`${timing}`;
+      });
+      const trailing = toolHistory.some((t) => t.state === 'running') ? '' : '\n_(synthesizing answer…)_';
+      return lines.join('\n') + trailing;
+    };
+    const flushProgress = () => {
       if (!placeholder.ts) return;
-      const labels = [...seenSources].map((s) => SOURCE_LABELS[s] ?? s.charAt(0).toUpperCase() + s.slice(1));
-      const text = `🔍 Querying ${labels.join(', ')}…`;
       lastUpdateAt = Date.now();
       void client.chat.update({
         channel: event.channel,
         ts: placeholder.ts,
-        text,
+        text: renderProgress(),
       }).catch((err: unknown) => {
         logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'progress chat.update failed');
       });
     };
-    const onToolCall = (toolName: string) => {
-      const prefix = toolName.split('.')[0];
-      if (!prefix || seenSources.has(prefix)) return;
-      seenSources.add(prefix);
+    const scheduleFlush = () => {
       const elapsed = Date.now() - lastUpdateAt;
       if (pendingUpdate) clearTimeout(pendingUpdate);
-      if (elapsed >= 500) {
-        flushSourcesUpdate();
+      if (elapsed >= 600) {
+        flushProgress();
       } else {
         pendingUpdate = setTimeout(() => {
           pendingUpdate = null;
-          flushSourcesUpdate();
-        }, 500 - elapsed);
+          flushProgress();
+        }, 600 - elapsed);
       }
+    };
+    const onToolCall = (toolName: string) => {
+      toolHistory.push({ name: toolName, state: 'running' });
+      scheduleFlush();
+    };
+    const onToolFinish = (toolName: string, ok: boolean, elapsedMs: number) => {
+      // Mark the most recent matching running entry as done/failed (last-one
+      // wins covers the case where the same tool fires twice in a run).
+      for (let i = toolHistory.length - 1; i >= 0; i--) {
+        if (toolHistory[i].name === toolName && toolHistory[i].state === 'running') {
+          toolHistory[i] = { name: toolName, state: ok ? 'done' : 'failed', elapsedMs };
+          break;
+        }
+      }
+      scheduleFlush();
     };
 
     try {
@@ -179,6 +199,7 @@ export function createDmHandler(deps: HandlerDeps) {
         actor: { slackUserId: event.user, slackChannelId: event.channel },
         thread: { channelId: event.channel, threadTs },
         onToolCall,
+        onToolFinish,
       });
       if (pendingUpdate) {
         clearTimeout(pendingUpdate);

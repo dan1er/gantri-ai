@@ -67,6 +67,11 @@ export interface OrchestratorInput {
    * block the underlying tool call.
    */
   onToolCall?: (toolName: string) => void | Promise<void>;
+  /**
+   * Fired right after each tool execution finishes (success or failure).
+   * Lets the Slack handler show "running" vs "done" status per tool.
+   */
+  onToolFinish?: (toolName: string, ok: boolean, elapsedMs: number) => void | Promise<void>;
 }
 
 export interface OrchestratorOutput {
@@ -189,7 +194,15 @@ export class Orchestrator {
               logger.warn({ err: err instanceof Error ? err.message : String(err), tool: registryName }, 'onToolCall callback threw');
             }
           }
+          const toolStartedAt = Date.now();
           const result = await this.opts.registry.execute(registryName, block.input);
+          if (input.onToolFinish) {
+            try {
+              await Promise.resolve(input.onToolFinish(registryName, result.ok, Date.now() - toolStartedAt));
+            } catch (err) {
+              logger.warn({ err: err instanceof Error ? err.message : String(err), tool: registryName }, 'onToolFinish callback threw');
+            }
+          }
           toolCalls.push({
             name: registryName,
             args: block.input,

@@ -137,12 +137,16 @@ export function createDmHandler(deps: HandlerDeps) {
 
     // Live progress: render each tool the orchestrator invokes with status —
     // running ("⏳ ga4.list_events"), done ("✓ ga4.list_events 1.5s"), or
-    // failed ("✗ ga4.list_events"). Updates are throttled to one chat.update
-    // per 600ms to stay well under Slack rate limits.
+    // failed ("✗ ga4.list_events"). After all tools finish, an idle ticker
+    // keeps refreshing the message every ~10s with elapsed time so the user
+    // knows the bot is still working (not hung). chat.update calls are
+    // throttled to one per 600ms to stay under Slack rate limits.
     type ToolStatus = { name: string; state: 'running' | 'done' | 'failed'; elapsedMs?: number };
     const toolHistory: ToolStatus[] = [];
+    let lastToolFinishedAt = 0;
     let lastUpdateAt = 0;
     let pendingUpdate: NodeJS.Timeout | null = null;
+    let idleTicker: NodeJS.Timeout | null = null;
     const renderProgress = (): string => {
       if (toolHistory.length === 0) return '🔍 Thinking…';
       const lines = toolHistory.map((t) => {
@@ -150,7 +154,20 @@ export function createDmHandler(deps: HandlerDeps) {
         const timing = t.elapsedMs != null ? ` _(${(t.elapsedMs / 1000).toFixed(1)}s)_` : '';
         return `${icon} \`${t.name}\`${timing}`;
       });
-      const trailing = toolHistory.some((t) => t.state === 'running') ? '' : '\n_synthesizing answer…_';
+      const anyRunning = toolHistory.some((t) => t.state === 'running');
+      let trailing = '';
+      if (!anyRunning && lastToolFinishedAt > 0) {
+        const idleSec = Math.round((Date.now() - lastToolFinishedAt) / 1000);
+        if (idleSec < 15) {
+          trailing = `\n_writing answer…_`;
+        } else if (idleSec < 45) {
+          trailing = `\n_writing answer… (${idleSec}s)_`;
+        } else if (idleSec < 90) {
+          trailing = `\n_still writing answer… (${idleSec}s — Claude is taking longer than usual)_`;
+        } else {
+          trailing = `\n_still working… (${idleSec}s — likely Claude API rate-limit retry; will resolve on its own)_`;
+        }
+      }
       return lines.join('\n') + trailing;
     };
     const flushProgress = () => {
@@ -176,18 +193,34 @@ export function createDmHandler(deps: HandlerDeps) {
         }, 600 - elapsed);
       }
     };
+    const startIdleTicker = () => {
+      if (idleTicker) return;
+      // Refresh the elapsed counter every 10s. Stops automatically when the
+      // outer try/finally clears it.
+      idleTicker = setInterval(() => {
+        if (toolHistory.some((t) => t.state === 'running')) return;
+        scheduleFlush();
+      }, 10_000);
+    };
+    const stopIdleTicker = () => {
+      if (idleTicker) { clearInterval(idleTicker); idleTicker = null; }
+    };
     const onToolCall = (toolName: string) => {
       toolHistory.push({ name: toolName, state: 'running' });
       scheduleFlush();
     };
     const onToolFinish = (toolName: string, ok: boolean, elapsedMs: number) => {
-      // Mark the most recent matching running entry as done/failed (last-one
-      // wins covers the case where the same tool fires twice in a run).
       for (let i = toolHistory.length - 1; i >= 0; i--) {
         if (toolHistory[i].name === toolName && toolHistory[i].state === 'running') {
           toolHistory[i] = { name: toolName, state: ok ? 'done' : 'failed', elapsedMs };
           break;
         }
+      }
+      // If no more tools are running, this is the start of an LLM-only phase —
+      // kick off the idle ticker so the message stays fresh.
+      if (!toolHistory.some((t) => t.state === 'running')) {
+        lastToolFinishedAt = Date.now();
+        startIdleTicker();
       }
       scheduleFlush();
     };
@@ -205,6 +238,7 @@ export function createDmHandler(deps: HandlerDeps) {
         clearTimeout(pendingUpdate);
         pendingUpdate = null;
       }
+      stopIdleTicker();
       const blocks = markdownToSlackBlocks(out.response, {
         footer: buildFooter(out),
       });
@@ -257,6 +291,8 @@ export function createDmHandler(deps: HandlerDeps) {
         duration_ms: Date.now() - started,
       });
     } catch (err) {
+      stopIdleTicker();
+      if (pendingUpdate) { clearTimeout(pendingUpdate); pendingUpdate = null; }
       const msg = err instanceof Error ? err.message : String(err);
       logger.error({ err: msg }, 'orchestrator failed');
       await client.chat.update({

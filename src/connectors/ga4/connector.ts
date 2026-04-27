@@ -44,12 +44,19 @@ const ListEventsArgs = z.object({
 });
 type ListEventsArgs = z.infer<typeof ListEventsArgs>;
 
+const PageEngagementArgs = z.object({
+  dateRange: DateRange.default('last_30_days'),
+  minPageViews: z.number().int().min(0).default(500).describe('Drop pages with fewer page_views than this from rankings (avoids noise from low-traffic URLs).'),
+  topN: z.number().int().min(1).max(100).default(20).describe('How many pages to include in each ranking (top by traffic, top by scroll rate, bottom by scroll rate).'),
+});
+type PageEngagementArgs = z.infer<typeof PageEngagementArgs>;
+
 export class Ga4Connector implements Connector {
   readonly name = 'ga4';
   readonly tools: readonly ToolDef[];
 
   constructor(private readonly deps: Ga4ConnectorDeps) {
-    this.tools = [this.runReportTool(), this.realtimeTool(), this.listEventsTool()];
+    this.tools = [this.runReportTool(), this.realtimeTool(), this.listEventsTool(), this.pageEngagementTool()];
   }
 
   async healthCheck(): Promise<{ ok: boolean; detail?: string }> {
@@ -106,6 +113,21 @@ export class Ga4Connector implements Connector {
     };
   }
 
+  private pageEngagementTool(): ToolDef<PageEngagementArgs> {
+    return {
+      name: 'ga4.page_engagement_summary',
+      description: [
+        'PAGE COMPLETION analysis. Use this for "qué páginas ven completas / which pages do users read all the way / scroll depth / page completion rate" questions.',
+        'Computes scroll-to-bottom rate (`scroll_event / page_view_event` per URL) server-side and returns three rankings — top pages by traffic, highest scroll rate, lowest scroll rate — plus site totals and a list of "anomalous" pages where the scroll listener fires multiple times per page_view (home, sign-up, checkout etc.). Output is bounded to ~`topN`*3 rows so it stays small in the LLM context.',
+        'Args: `dateRange` (default `last_30_days`), `minPageViews` (default 500 — pages with fewer views are dropped to remove noise), `topN` (default 20 — size of each ranking).',
+        'PREFER this over composing `ga4.list_events` + `ga4.run_report` manually for these questions; the manual path can return 1000+ rows and risks rate-limiting the LLM.',
+      ].join(' '),
+      schema: PageEngagementArgs as z.ZodType<PageEngagementArgs>,
+      jsonSchema: zodToJsonSchema(PageEngagementArgs),
+      execute: (args) => this.pageEngagement(args),
+    };
+  }
+
   private async runReport(args: RunReportArgs) {
     const req: Ga4ReportRequest = {
       dateRanges: [resolveDateRange(args.dateRange)],
@@ -126,6 +148,78 @@ export class Ga4Connector implements Connector {
     try {
       const res = await this.deps.client.runReport(req);
       return { period: args.dateRange, ...flattenReport(res) };
+    } catch (err) {
+      if (err instanceof Ga4ApiError) {
+        return { error: { code: 'GA4_API_ERROR', status: err.status, message: err.message, body: err.body } };
+      }
+      throw err;
+    }
+  }
+
+  private async pageEngagement(args: PageEngagementArgs) {
+    try {
+      const res = await this.deps.client.runReport({
+        dateRanges: [resolveDateRange(args.dateRange)],
+        dimensions: [{ name: 'pagePath' }, { name: 'eventName' }],
+        metrics: [{ name: 'eventCount' }, { name: 'totalUsers' }],
+        dimensionFilter: { filter: { fieldName: 'eventName', inListFilter: { values: ['page_view', 'scroll'] } } },
+        limit: 100_000,
+      });
+      const flat = flattenReport(res);
+      const byPage = new Map<string, { pageViews: number; scrolls: number; pageViewUsers: number; scrollUsers: number }>();
+      for (const r of flat.rows as Array<Record<string, unknown>>) {
+        const path = String(r.pagePath ?? '');
+        if (!path) continue;
+        const evName = String(r.eventName ?? '');
+        const count = Number(r.eventCount ?? 0);
+        const users = Number(r.totalUsers ?? 0);
+        const bucket = byPage.get(path) ?? { pageViews: 0, scrolls: 0, pageViewUsers: 0, scrollUsers: 0 };
+        if (evName === 'page_view') { bucket.pageViews += count; bucket.pageViewUsers += users; }
+        else if (evName === 'scroll') { bucket.scrolls += count; bucket.scrollUsers += users; }
+        byPage.set(path, bucket);
+      }
+      const all = [...byPage.entries()].map(([pagePath, b]) => ({
+        pagePath,
+        pageViews: b.pageViews,
+        scrolls: b.scrolls,
+        scrollRate: b.pageViews > 0 ? b.scrolls / b.pageViews : 0,
+        users: b.pageViewUsers,
+      }));
+      const totals = all.reduce(
+        (s, r) => ({ pageViews: s.pageViews + r.pageViews, scrolls: s.scrolls + r.scrolls }),
+        { pageViews: 0, scrolls: 0 },
+      );
+      const eligible = all.filter((r) => r.pageViews >= args.minPageViews);
+      // Pages where the scroll listener fires repeatedly (rate > 100%) — flag, exclude from ranking.
+      const flagged = eligible.filter((r) => r.scrollRate > 1.0)
+        .sort((a, b) => b.pageViews - a.pageViews)
+        .map((r) => ({ pagePath: r.pagePath, pageViews: r.pageViews, scrolls: r.scrolls, scrollRate: round(r.scrollRate, 3) }));
+      const ranked = eligible.filter((r) => r.scrollRate <= 1.0);
+      const fmt = (rows: typeof ranked) =>
+        rows.slice(0, args.topN).map((r) => ({
+          pagePath: r.pagePath,
+          pageViews: r.pageViews,
+          scrolls: r.scrolls,
+          scrollRate: round(r.scrollRate, 3),
+          users: r.users,
+        }));
+      return {
+        period: args.dateRange,
+        minPageViews: args.minPageViews,
+        topN: args.topN,
+        totals: {
+          pageViews: totals.pageViews,
+          scrollEvents: totals.scrolls,
+          siteScrollRate: totals.pageViews > 0 ? round(totals.scrolls / totals.pageViews, 3) : 0,
+          uniquePagesObserved: all.length,
+          eligiblePages: eligible.length,
+        },
+        topByTraffic: fmt([...ranked].sort((a, b) => b.pageViews - a.pageViews)),
+        highestScrollRate: fmt([...ranked].sort((a, b) => b.scrollRate - a.scrollRate)),
+        lowestScrollRate: fmt([...ranked].sort((a, b) => a.scrollRate - b.scrollRate)),
+        flaggedPages: flagged.slice(0, 20),
+        notes: 'scrollRate is `scroll / page_view` per URL. Pages in `flaggedPages` (rate > 100%) have a scroll listener that fires multiple times per page view (commonly home, sign-up, checkout) — use them only as engagement signals, not as completion rates.',
+      };
     } catch (err) {
       if (err instanceof Ga4ApiError) {
         return { error: { code: 'GA4_API_ERROR', status: err.status, message: err.message, body: err.body } };
@@ -203,6 +297,11 @@ function resolveDateRange(input: RunReportArgs['dateRange']): { startDate: strin
     throw new Error(`Unknown dateRange preset: ${input as string}`);
   }
   return { startDate: input.start, endDate: input.end };
+}
+
+function round(n: number, decimals: number): number {
+  const f = 10 ** decimals;
+  return Math.round(n * f) / f;
 }
 
 function flattenReport(res: Ga4ReportResponse) {

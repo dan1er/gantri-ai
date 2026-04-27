@@ -40,6 +40,15 @@ export function zodToJsonSchema(schema: z.ZodTypeAny): Record<string, unknown> {
       return { anyOf: def.options.map((o: z.ZodTypeAny) => zodToJsonSchema(o)) };
     case 'ZodLiteral':
       return { const: def.value };
+    case 'ZodEffects':
+      // .refine() / .transform() / .preprocess() wrap the inner schema. The
+      // refinement is enforced at parse time, not in the JSON schema we ship
+      // to Claude — pass the inner schema through as-is.
+      return zodToJsonSchema(def.schema);
+    case 'ZodNullable':
+      return zodToJsonSchema(def.innerType);
+    case 'ZodRecord':
+      return { type: 'object', additionalProperties: def.valueType ? zodToJsonSchema(def.valueType) : true };
     default:
       return {};
   }

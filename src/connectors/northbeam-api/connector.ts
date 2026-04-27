@@ -348,30 +348,44 @@ function presetToPeriodType(preset: string): string {
  * Resolve calendar-relative presets that NB doesn't natively support
  * (last_14_days, month_to_date, quarter_to_date, year_to_date, this_month,
  * last_month) into explicit {start, end} date objects. NB-native presets pass
- * through unchanged so the NB API can use its own timezone-aware logic.
+ * through unchanged so the NB API can use its own logic.
+ *
+ * All "today" / month / quarter / year boundaries are computed in PACIFIC TIME
+ * to match the rest of Gantri's reporting (NB orders bucketed by PT day,
+ * Grafana panels filtered by PT, late-orders cutoffs in PT).
  */
 function resolveCalendarPreset(preset: string): { start: string; end: string } | null {
-  const now = new Date();
-  const todayStr = now.toISOString().slice(0, 10);
-  const sub = (n: number): string => {
-    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - n));
-    return d.toISOString().slice(0, 10);
+  // Today's calendar date in Pacific Time.
+  const ptParts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Los_Angeles',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date());
+  const y = Number(ptParts.find((p) => p.type === 'year')?.value ?? '0');
+  const m = Number(ptParts.find((p) => p.type === 'month')?.value ?? '0');
+  const d = Number(ptParts.find((p) => p.type === 'day')?.value ?? '0');
+  const todayStr = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  // Date-only arithmetic on a noon UTC anchor is safe across DST.
+  const subDays = (n: number): string => {
+    const dt = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+    dt.setUTCDate(dt.getUTCDate() - n);
+    return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
   };
   switch (preset) {
-    case 'last_14_days': return { start: sub(13), end: todayStr };
+    case 'last_14_days': return { start: subDays(13), end: todayStr };
     case 'this_month':
-    case 'month_to_date': return { start: `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-01`, end: todayStr };
+    case 'month_to_date': return { start: `${y}-${String(m).padStart(2, '0')}-01`, end: todayStr };
     case 'last_month': {
-      const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
-      const lastDay = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 0));
-      return { start: d.toISOString().slice(0, 10), end: lastDay.toISOString().slice(0, 10) };
+      const lmYear = m === 1 ? y - 1 : y;
+      const lmMonth = m === 1 ? 12 : m - 1;
+      const lastDayOfPrev = new Date(Date.UTC(y, m - 1, 0, 12, 0, 0));
+      const endStr = `${lastDayOfPrev.getUTCFullYear()}-${String(lastDayOfPrev.getUTCMonth() + 1).padStart(2, '0')}-${String(lastDayOfPrev.getUTCDate()).padStart(2, '0')}`;
+      return { start: `${lmYear}-${String(lmMonth).padStart(2, '0')}-01`, end: endStr };
     }
     case 'quarter_to_date': {
-      const qStart = Math.floor(now.getUTCMonth() / 3) * 3;
-      const d = new Date(Date.UTC(now.getUTCFullYear(), qStart, 1));
-      return { start: d.toISOString().slice(0, 10), end: todayStr };
+      const qStart = Math.floor((m - 1) / 3) * 3 + 1;
+      return { start: `${y}-${String(qStart).padStart(2, '0')}-01`, end: todayStr };
     }
-    case 'year_to_date': return { start: `${now.getUTCFullYear()}-01-01`, end: todayStr };
+    case 'year_to_date': return { start: `${y}-01-01`, end: todayStr };
     default: return null; // NB-native preset — pass through to API
   }
 }

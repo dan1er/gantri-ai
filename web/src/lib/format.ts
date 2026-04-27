@@ -42,29 +42,64 @@ const RANGE_LABELS: Record<string, string> = {
   year_to_date: 'Year to date',
 };
 
+const PT_TZ = 'America/Los_Angeles';
+
+/** Returns today's calendar date IN Pacific Time as { y, m, d } (1-based month). */
+function todayInPt(): { y: number; m: number; d: number } {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: PT_TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date());
+  const y = Number(parts.find((p) => p.type === 'year')?.value ?? '0');
+  const m = Number(parts.find((p) => p.type === 'month')?.value ?? '0');
+  const d = Number(parts.find((p) => p.type === 'day')?.value ?? '0');
+  return { y, m, d };
+}
+
+/** Build a Date that represents PT-noon on the given calendar date. We use noon
+ * to be safe across DST shifts when formatting back through Intl. */
+function ptDate(y: number, m: number, d: number): Date {
+  // Construct "12:00 noon PT" by using the PT offset. For display purposes we
+  // only need a Date whose local fields encode (y, m, d). The simplest stable
+  // way: use a UTC Date at 18:00 (mid-PT-afternoon, never crosses midnight in
+  // any DST scenario when formatted through Intl with PT zone).
+  return new Date(Date.UTC(y, m - 1, d, 18, 0, 0));
+}
+
+function addDaysPt(base: { y: number; m: number; d: number }, deltaDays: number): { y: number; m: number; d: number } {
+  // Use UTC arithmetic on a noon-anchor; never crosses TZ boundary with ±N days.
+  const dt = new Date(Date.UTC(base.y, base.m - 1, base.d, 12, 0, 0));
+  dt.setUTCDate(dt.getUTCDate() + deltaDays);
+  return { y: dt.getUTCFullYear(), m: dt.getUTCMonth() + 1, d: dt.getUTCDate() };
+}
+
 function formatPtDate(d: Date): string {
-  return new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', month: 'short', day: 'numeric', year: 'numeric' }).format(d);
+  return new Intl.DateTimeFormat('en-US', { timeZone: PT_TZ, month: 'short', day: 'numeric', year: 'numeric' }).format(d);
 }
 
 function rangeBoundsForPreset(preset: string): { start: Date; end: Date } | null {
-  const now = new Date();
-  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-  const yesterday = new Date(today); yesterday.setUTCDate(today.getUTCDate() - 1);
-  const sub = (n: number) => { const d = new Date(today); d.setUTCDate(today.getUTCDate() - n); return d; };
+  const today = todayInPt();
+  const sub = (n: number) => addDaysPt(today, -n);
+  const toDate = (p: { y: number; m: number; d: number }) => ptDate(p.y, p.m, p.d);
   switch (preset) {
-    case 'yesterday': return { start: yesterday, end: yesterday };
-    case 'last_7_days': return { start: sub(6), end: today };
-    case 'last_14_days': return { start: sub(13), end: today };
-    case 'last_30_days': return { start: sub(29), end: today };
-    case 'last_90_days': return { start: sub(89), end: today };
-    case 'last_180_days': return { start: sub(179), end: today };
-    case 'last_365_days': return { start: sub(364), end: today };
-    case 'month_to_date': return { start: new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)), end: today };
-    case 'quarter_to_date': {
-      const q = Math.floor(now.getUTCMonth() / 3) * 3;
-      return { start: new Date(Date.UTC(now.getUTCFullYear(), q, 1)), end: today };
+    case 'yesterday': { const y = sub(1); return { start: toDate(y), end: toDate(y) }; }
+    case 'last_7_days': return { start: toDate(sub(6)), end: toDate(today) };
+    case 'last_14_days': return { start: toDate(sub(13)), end: toDate(today) };
+    case 'last_30_days': return { start: toDate(sub(29)), end: toDate(today) };
+    case 'last_90_days': return { start: toDate(sub(89)), end: toDate(today) };
+    case 'last_180_days': return { start: toDate(sub(179)), end: toDate(today) };
+    case 'last_365_days': return { start: toDate(sub(364)), end: toDate(today) };
+    case 'this_month':
+    case 'month_to_date': return { start: toDate({ y: today.y, m: today.m, d: 1 }), end: toDate(today) };
+    case 'last_month': {
+      const lm = today.m === 1 ? { y: today.y - 1, m: 12 } : { y: today.y, m: today.m - 1 };
+      const start = ptDate(lm.y, lm.m, 1);
+      // Last day of last month = day 0 of this month
+      const endNative = new Date(Date.UTC(today.y, today.m - 1, 0, 18, 0, 0));
+      return { start, end: endNative };
     }
-    case 'year_to_date': return { start: new Date(Date.UTC(now.getUTCFullYear(), 0, 1)), end: today };
+    case 'quarter_to_date': {
+      const q = Math.floor((today.m - 1) / 3) * 3 + 1; // first month of quarter (1-based)
+      return { start: toDate({ y: today.y, m: q, d: 1 }), end: toDate(today) };
+    }
+    case 'year_to_date': return { start: toDate({ y: today.y, m: 1, d: 1 }), end: toDate(today) };
     default: return null;
   }
 }

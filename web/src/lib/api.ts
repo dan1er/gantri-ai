@@ -14,11 +14,25 @@ export interface ReportPayload {
     lastRefreshedAt: string;
     sources: string[];
     spec: any;
+    effectiveRange?: unknown;
   };
 }
 
-export async function fetchReport(slug: string, token: string, refresh = false): Promise<ReportPayload> {
-  const url = `/r/${slug}/data.json?t=${encodeURIComponent(token)}${refresh ? '&refresh=1' : ''}`;
+export async function fetchReport(
+  slug: string,
+  token: string,
+  refresh = false,
+  range?: string | { start: string; end: string } | null,
+): Promise<ReportPayload> {
+  const params = new URLSearchParams({ t: token });
+  if (refresh) params.set('refresh', '1');
+  if (typeof range === 'string') {
+    params.set('range', range);
+  } else if (range && typeof range === 'object') {
+    params.set('from', range.start);
+    params.set('to', range.end);
+  }
+  const url = `/r/${slug}/data.json?${params.toString()}`;
   const res = await fetch(url);
   if (!res.ok) {
     const body = await res.text();

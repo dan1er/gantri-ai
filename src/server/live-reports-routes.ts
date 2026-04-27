@@ -24,6 +24,23 @@ export interface LiveReportsRoutesDeps {
 
 const VIEWER_COOKIE = 'lr_viewer';
 
+const VALID_PRESETS = new Set([
+  'yesterday', 'last_7_days', 'last_14_days', 'last_30_days', 'last_90_days',
+  'last_180_days', 'last_365_days', 'this_month', 'last_month',
+  'month_to_date', 'quarter_to_date', 'year_to_date',
+]);
+
+function parseRangeFromQuery(q: { range?: unknown; from?: unknown; to?: unknown }): unknown | null {
+  const from = typeof q.from === 'string' ? q.from : '';
+  const to = typeof q.to === 'string' ? q.to : '';
+  if (from && to && /^\d{4}-\d{2}-\d{2}$/.test(from) && /^\d{4}-\d{2}-\d{2}$/.test(to)) {
+    return { start: from, end: to };
+  }
+  const range = typeof q.range === 'string' ? q.range : '';
+  if (range && VALID_PRESETS.has(range)) return range;
+  return null;
+}
+
 /** In-memory cache: Slack user ID → display name. Persists for the lifetime of the process. */
 const slackNameCache = new Map<string, string>();
 const slackNameInflight = new Map<string, Promise<string>>();
@@ -87,8 +104,9 @@ export function mountLiveReportsRoutes(app: Express, deps: LiveReportsRoutesDeps
         // Fallback if cookie() helper isn't available (depends on express version)
         if (!res.cookie) res.set('Set-Cookie', `${VIEWER_COOKIE}=${viewerToken}; Path=/; Max-Age=${7 * 24 * 60 * 60}; HttpOnly; Secure; SameSite=Lax`);
       }
+      const effectiveRange = parseRangeFromQuery(req.query as { range?: unknown; from?: unknown; to?: unknown }) ?? report.spec.dateRange ?? 'last_7_days';
       const [result, ownerName] = await Promise.all([
-        runLiveSpec(report.spec, deps.registry),
+        runLiveSpec(report.spec, deps.registry, effectiveRange),
         resolveSlackName(deps.slackClient, report.ownerSlackId),
       ]);
       void Promise.resolve(deps.repo.recordVisit(slug)).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'recordVisit failed'));
@@ -108,6 +126,7 @@ export function mountLiveReportsRoutes(app: Express, deps: LiveReportsRoutesDeps
           createdAt: report.createdAt,
           updatedAt: report.updatedAt,
           lastRefreshedAt: result.meta.generatedAt,
+          effectiveRange,
         },
       });
     } catch (err) {

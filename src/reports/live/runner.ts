@@ -14,7 +14,23 @@ export interface LiveSpecRunResult {
     durationMs: number;
     sources: string[];
     spec: LiveReportSpec;
+    effectiveRange: unknown;
   };
+}
+
+/**
+ * Recursively substitutes the literal token "$REPORT_RANGE" in step args with
+ * the actual effective range (a preset string or { start, end } object).
+ */
+function substituteReportRange(args: Record<string, unknown>, effectiveRange: unknown): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(args)) {
+    if (v === '$REPORT_RANGE') out[k] = effectiveRange;
+    else if (Array.isArray(v)) out[k] = v.map((x) => x === '$REPORT_RANGE' ? effectiveRange : x);
+    else if (v && typeof v === 'object') out[k] = substituteReportRange(v as Record<string, unknown>, effectiveRange);
+    else out[k] = v;
+  }
+  return out;
 }
 
 /**
@@ -27,19 +43,22 @@ export interface LiveSpecRunResult {
  * Steps that fail produce a row in `errors[]` but do NOT abort other steps.
  * The frontend renders blocks bound to a failed step as ErrorState.
  */
-export async function runLiveSpec(spec: LiveReportSpec, registry: MinimalRegistry): Promise<LiveSpecRunResult> {
+export async function runLiveSpec(spec: LiveReportSpec, registry: MinimalRegistry, effectiveRange?: unknown): Promise<LiveSpecRunResult> {
   for (const step of spec.data) {
     if (!WHITELISTED_TOOLS.has(step.tool)) {
       throw new Error(`Tool ${step.tool} is not whitelisted for live reports`);
     }
   }
 
+  const range = effectiveRange ?? spec.dateRange ?? 'last_7_days';
+
   const startedAt = Date.now();
   const results = await Promise.all(
     spec.data.map(async (step) => {
       const t0 = Date.now();
       try {
-        const r = await registry.execute(step.tool, step.args);
+        const stepArgs = substituteReportRange(step.args, range);
+        const r = await registry.execute(step.tool, stepArgs);
         if (!r.ok) {
           logger.warn({ stepId: step.id, tool: step.tool, code: r.error?.code, ms: Date.now() - t0 }, 'live-report step failed');
           return { stepId: step.id, tool: step.tool, ok: false as const, error: r.error ?? { code: 'UNKNOWN', message: 'no detail' } };
@@ -70,6 +89,7 @@ export async function runLiveSpec(spec: LiveReportSpec, registry: MinimalRegistr
       durationMs: Date.now() - startedAt,
       sources,
       spec,
+      effectiveRange: range,
     },
   };
 }

@@ -8,12 +8,13 @@ Output: a single JSON object matching this TypeScript type (validated by Zod):
 
   type LiveReportSpec = {
     version: 1;
-    title: string;          // ALWAYS in English, ≤80 chars
+    title: string;          // ALWAYS in English, ≤80 chars — TIMELESS, no time period in title
     subtitle?: string;
-    description?: string;   // 1-3 sentences explaining what the report shows
+    description?: string;   // 1-3 sentences explaining what the report shows (no date period needed)
     data: DataStep[];       // 1..20 entries; each runs a whitelisted tool with args
     ui: UiBlock[];          // 1..60 entries; rendered top-to-bottom
     cacheTtlSec?: number;   // default 300
+    dateRange?: string;     // default range for the picker — use user's explicit ask or "last_30_days" for general asks
   }
   type DataStep = { id: string; tool: WhitelistedTool; args: object };
   type UiBlock =
@@ -22,6 +23,13 @@ Output: a single JSON object matching this TypeScript type (validated by Zod):
     | { type: 'table'; title?: string; data: string; columns: { field: string; label: string; format?: 'currency' | 'number' | 'percent' | 'date_pt' | 'admin_order_link' | 'pct_delta'; align?: 'left' | 'right' | 'center' }[]; sortBy?: { field: string; direction?: 'asc' | 'desc' }; pageSize?: number }
     | { type: 'text'; markdown: string }
     | { type: 'divider' };
+
+TITLE + DATE RANGE RULES (CRITICAL):
+- Title MUST be timeless — no time-period in it. Good: "Sales by Channel", "Late Orders Snapshot", "GA4 Page Completion". Bad: "Sales by Channel — Last 7 Days", "Weekly Sales".
+- Set \`spec.dateRange\` to the user's explicit ask (e.g. "last_7_days"), or default to "last_30_days" for general "show me X" asks. The viewer can change it from the header picker — but a sensible default is required.
+- For each data step's args that takes a \`dateRange\` field, set it to the literal string "\$REPORT_RANGE" (with the dollar sign). The runner substitutes the effective range at request time. Example: { id: 'rev', tool: 'northbeam.metrics_explorer', args: { dateRange: '\$REPORT_RANGE', metrics: ['rev','spend'] } }.
+- DO NOT hardcode a date range in step args (no \`dateRange: 'last_7_days'\` in step args). Always use "\$REPORT_RANGE" so the viewer's date picker works.
+- The frontend renders a subtitle showing the effective period (e.g. "Last 7 days · Apr 20 – Apr 26, 2026"). You don't need to mention the period in title or description.
 
 Rules:
 - Output ONLY the JSON object. No prose, no code fences.

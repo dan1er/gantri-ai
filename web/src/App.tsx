@@ -11,6 +11,7 @@ import { SpecDrawer } from './components/SpecDrawer.js';
 import { ErrorState } from './components/ErrorState.js';
 import { LoadingShimmer } from './components/LoadingShimmer.js';
 import { ReportsIndex } from './components/ReportsIndex.js';
+import { describeEffectiveRange, rangeKey } from './lib/format.js';
 
 type Route =
   | { kind: 'index'; token: string | null }
@@ -45,17 +46,29 @@ function Page({ children }: { children: React.ReactNode }) {
   );
 }
 
+function readInitialRange(): string | { start: string; end: string } | null {
+  const params = new URLSearchParams(window.location.search);
+  const range = params.get('range');
+  const from = params.get('from');
+  const to = params.get('to');
+  if (range) return range;
+  if (from && to) return { start: from, end: to };
+  return null;
+}
+
 function ReportPage({ slug, token }: { slug: string; token: string }) {
   const [data, setData] = useState<ReportPayload | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(window.location.hash === '#spec');
+  const [selectedRange, setSelectedRange] = useState<string | { start: string; end: string } | null>(readInitialRange);
 
-  async function load(refresh: boolean) {
+  async function load(refresh: boolean, range?: string | { start: string; end: string } | null) {
     if (refresh) setRefreshing(true); else setLoading(true);
     try {
-      const payload = await fetchReport(slug, token, refresh);
+      const effectiveRange = range !== undefined ? range : selectedRange;
+      const payload = await fetchReport(slug, token, refresh, effectiveRange);
       setData(payload);
       setErr(null);
     } catch (e) {
@@ -65,12 +78,30 @@ function ReportPage({ slug, token }: { slug: string; token: string }) {
       setRefreshing(false);
     }
   }
-  useEffect(() => { void load(false); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+
+  useEffect(() => { void load(false); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [selectedRange]);
   useEffect(() => {
     const onHash = () => setDrawerOpen(window.location.hash === '#spec');
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
+
+  function changeRange(r: string | { start: string; end: string }) {
+    setSelectedRange(r);
+    const params = new URLSearchParams(window.location.search);
+    if (typeof r === 'string') {
+      params.set('range', r);
+      params.delete('from');
+      params.delete('to');
+    } else {
+      params.set('from', r.start);
+      params.set('to', r.end);
+      params.delete('range');
+    }
+    history.replaceState(null, '', `${window.location.pathname}?${params.toString()}${window.location.hash}`);
+  }
+
+  const effectiveRangeForDisplay = data?.meta.effectiveRange ?? data?.meta.spec?.dateRange ?? 'last_7_days';
 
   if (err) return <Page><ErrorState title="Couldn't load this report" detail={err} /></Page>;
   return (
@@ -79,8 +110,11 @@ function ReportPage({ slug, token }: { slug: string; token: string }) {
         <ReportHeader
           title={data.meta.title}
           subtitle={data.meta.description ?? null}
+          rangeLabel={describeEffectiveRange(effectiveRangeForDisplay)}
+          currentRange={typeof selectedRange === 'string' ? selectedRange : rangeKey(effectiveRangeForDisplay)}
           lastRefreshedAt={data.meta.lastRefreshedAt}
           onRefresh={() => load(true)}
+          onChangeRange={(r) => changeRange(r)}
           refreshing={refreshing}
           onShowSpec={() => { window.location.hash = '#spec'; setDrawerOpen(true); }}
         />

@@ -1,6 +1,21 @@
 import { z } from 'zod';
 
 /**
+ * A date-range value that a step arg may reference.
+ * - Preset string (e.g. "last_7_days")
+ * - Object with explicit start/end dates (YYYY-MM-DD)
+ * - The literal token "$REPORT_RANGE" — substituted at runtime with the
+ *   viewer's effective range (URL override or spec default).
+ */
+export const DateRangeRef = z.union([
+  z.literal('$REPORT_RANGE'),
+  z.enum(['yesterday', 'last_7_days', 'last_14_days', 'last_30_days', 'last_90_days', 'last_180_days', 'last_365_days', 'this_month', 'last_month', 'month_to_date', 'quarter_to_date', 'year_to_date']),
+  z.object({ start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) }),
+]);
+
+export type DateRangeRef = z.infer<typeof DateRangeRef>;
+
+/**
  * Whitelist of tool names a Live Report spec may invoke. Enforced both at
  * compile time (Zod) and at runtime (the runner double-checks before
  * dispatching). Adding a new tool to this set means it has been audited as
@@ -109,6 +124,7 @@ export const LiveReportSpec = z.object({
   data: z.array(DataStep).min(1).max(20),
   ui: z.array(UiBlock).min(1).max(60),
   cacheTtlSec: z.number().int().min(0).max(86_400).default(300),
+  dateRange: DateRangeRef.default('last_7_days').describe('Default date range for the report. Steps reference it via "$REPORT_RANGE" — the runner substitutes the effective range (URL override or this default) before dispatching.'),
 });
 
 export type LiveReportSpec = z.infer<typeof LiveReportSpec>;

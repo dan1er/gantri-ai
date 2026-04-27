@@ -31,4 +31,13 @@ export const DEFAULT_CACHE_POLICIES: Record<string, CachePolicy> = {
   'ga4.list_events': { version: 1, settleDays: 1, openTtlSec: 3600, dateRangePath: 'dateRange' },
   'ga4.run_report': { version: 1, settleDays: 1, openTtlSec: 600, dateRangePath: 'dateRange' },
   // ga4.realtime is real-time by definition — never cache.
+
+  // Live Reports — find/list are read-only; cache briefly so repeated calls in
+  // a single conversation don't re-query Supabase.
+  // dateRangePath points to a field that doesn't exist in these tools' args,
+  // so decideCacheStrategy falls through to the openTtlSec TTL branch (range
+  // is undefined → mode:'ttl' with openTtlSec). publish/recompile/archive are
+  // mutating — never cache.
+  'reports.find_similar_reports': { version: 1, settleDays: 0, openTtlSec: 60, dateRangePath: '_none' },
+  'reports.list_my_reports': { version: 1, settleDays: 0, openTtlSec: 30, dateRangePath: '_none' },
 };

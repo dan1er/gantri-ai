@@ -22,6 +22,11 @@ import { ReportsConnector } from './connectors/reports/reports-connector.js';
 import { FeedbackConnector } from './connectors/feedback/feedback-connector.js';
 import { FeedbackRepo } from './storage/repositories/feedback.js';
 import { BroadcastConnector } from './connectors/broadcast/broadcast-connector.js';
+import { LiveReportsConnector } from './connectors/live-reports/connector.js';
+import { PublishedReportsRepo } from './storage/repositories/published-reports.js';
+import { mountLiveReportsRoutes } from './server/live-reports-routes.js';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { GantriPorterConnector } from './connectors/gantri-porter/gantri-porter-connector.js';
 import { GrafanaConnector } from './connectors/grafana/grafana-connector.js';
 import { Ga4Client } from './connectors/ga4/client.js';
@@ -204,6 +209,24 @@ async function main() {
     }),
   );
 
+  const publishedReportsRepo = new PublishedReportsRepo(supabase);
+  registry.register(
+    new LiveReportsConnector({
+      repo: publishedReportsRepo,
+      claude,
+      model: 'claude-sonnet-4-6',
+      registry: registry,                    // will be wrapped by cachingRegistry below; fine for tool execution
+      getToolCatalog: () => registry.getAllTools().map((t) => t.name).join(', '),
+      publicBaseUrl: process.env.PUBLIC_BASE_URL || 'https://gantri-ai-bot.fly.dev',
+      getActor: () => {
+        const a = getActiveActor();
+        if (!a) throw new Error('live reports tool called without actor');
+        return a;
+      },
+      getRoleForActor: (slackUserId) => usersRepo.getRole(slackUserId),
+    }),
+  );
+
   // Wrap the populated registry with a caching layer. Every subsequent
   // `cachingRegistry.execute(...)` consults the per-tool CachePolicy and
   // short-circuits closed-period queries to the cache. The Orchestrator was
@@ -248,6 +271,18 @@ async function main() {
     }
     const result = await reportsRunner.tick();
     res.json({ ok: true, result });
+  });
+
+  // Live Reports HTML SPA + data endpoint
+  const __filename = fileURLToPath(import.meta.url);
+  const webDistDir = path.resolve(path.dirname(__filename), '..', 'web', 'dist');
+  // receiver.app is express.Application; Express interface extends it with
+  // extra properties not needed at runtime. Cast is safe here.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  mountLiveReportsRoutes(receiver.app as any, {
+    repo: publishedReportsRepo,
+    registry: cachingRegistry,
+    webDistDir,
   });
 
   await app.start(env.PORT);

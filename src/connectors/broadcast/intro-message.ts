@@ -12,6 +12,8 @@ export const INTRO_MESSAGE = [
   '',
   'Think of me as the analyst you can ping at any hour without bothering anyone. No need to know SQL, no need to know which dashboard has what — just describe what you want.',
   '',
+  '*The questions below are only a sample of what I can answer.* I support many more variations across all of these data sources, plus combinations between them. If something looks close to what you need, ask it your own way — and if you\'re not sure I can answer, just ask anyway. The worst that happens is I tell you I can\'t.',
+  '',
   '---',
   '',
   '*📊 Marketing & Attribution* — Northbeam',

@@ -155,14 +155,37 @@ function buildTools(client: NorthbeamApiClient): ToolDef[] {
         logger.info({ args, payload: redactPayload(payload) }, 'northbeam.metrics_explorer →');
         try {
           const csv = await client.runExport(payload);
+          // Normalize the breakdown column name to the stable alias "breakdown_value"
+          // so specs don't need to know the actual NB column name (which varies by
+          // breakdown key, e.g. "breakdown_platform_northbeam", "breakdown_forecast").
+          // We rename whichever column starts with "breakdown_" and is NOT a metric
+          // or a known static column. If there are multiple breakdown columns we
+          // rename the first one found.
+          const STATIC_COLUMNS = new Set(['date', 'accounting_mode', 'attribution_model', 'attribution_window']);
+          const metricCols = new Set(args.metrics.map((m) => {
+            const METRIC_COL: Record<string, string> = { txns: 'transactions', rev: 'rev', spend: 'spend' };
+            return METRIC_COL[m] ?? m;
+          }));
+          const breakdownCol = csv.headers.find(
+            (h) => h.startsWith('breakdown_') && !STATIC_COLUMNS.has(h) && !metricCols.has(h),
+          );
+          let rows = csv.rows;
+          let headers = csv.headers;
+          if (breakdownCol && breakdownCol !== 'breakdown_value') {
+            headers = csv.headers.map((h) => (h === breakdownCol ? 'breakdown_value' : h));
+            rows = csv.rows.map((r) => {
+              const { [breakdownCol]: bv, ...rest } = r as Record<string, unknown>;
+              return { breakdown_value: bv, ...rest } as typeof r;
+            });
+          }
           return {
             attributionModel: args.attributionModel,
             accountingMode: args.accountingMode,
             attributionWindow: args.attributionWindow,
             metrics: args.metrics,
-            rowCount: csv.rows.length,
-            headers: csv.headers,
-            rows: csv.rows,
+            rowCount: rows.length,
+            headers,
+            rows,
           };
         } catch (err) {
           if (err instanceof NorthbeamApiError) {

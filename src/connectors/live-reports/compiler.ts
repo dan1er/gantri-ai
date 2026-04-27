@@ -33,7 +33,7 @@ Rules:
 CRITICAL — common pitfalls the LLM has tripped on:
 - dateRange enum values use UNDERSCORES not spaces. Valid: "yesterday", "last_7_days", "last_30_days", "last_90_days", "last_180_days", "last_365_days". NEVER write "last_7 days" or "last 7 days".
 - Northbeam metrics: pass the metric ID ("txns" not "transactions", "rev" not "revenue", "spend" not "ad_spend"). The CSV column NAME for txns is "transactions" — this is a separate concept from the metric ID. ID goes in \`metrics:[]\`, column name goes in valueRef paths.
-- Breakdown values: when you pass \`breakdown:{key:"Platform (Northbeam)"}\` to metrics_explorer, the returned rows have the channel name in column "breakdown_value" (literal). NOT "platform_(northbeam)" or any other name. ALWAYS use "breakdown_value" as the table column field for breakdowns.
+- Breakdown values: when you pass \`breakdown:{key:"Platform (Northbeam)"}\` (or any breakdown key) to metrics_explorer, the connector normalizes the returned rows so the channel/breakdown name is ALWAYS in column "breakdown_value". This is a stable alias — do NOT use "platform_(northbeam)", "breakdown_platform_northbeam", or any other name. ALWAYS use "breakdown_value" as the table column field for breakdowns.
 - Daily breakdowns (bucketByDate:true) add a "date" field to each row.
 - All NB numeric metric values come back as STRINGS in CSV — the runtime coerces them, but reference them via the metric ID name in the ROW (e.g. row.rev, row.spend, row.transactions).
 
@@ -48,7 +48,7 @@ CRITICAL arg constraints for northbeam.metrics_explorer:
 
 CRITICAL FIELD-NAME GUIDANCE — these are the actual column names tools return (the 'id' is for valueRef paths like "stepId.rows[0].FIELDNAME"):
 
-- northbeam.metrics_explorer returns CSV-flat rows. Common columns: \`rev\` (revenue, string), \`spend\`, \`transactions\` (NOT 'txns' — that's the metric ID, the column is 'transactions'), \`aov\`, \`visits\`, \`accounting_mode\`, \`attribution_model\`, \`attribution_window\`. When breakdown is set, the breakdown value is in a column whose name is the breakdown KEY in lowercase + underscores. For breakdown 'Platform (Northbeam)' the column is \`breakdown_value\` (a single normalized name across all breakdowns). For 'date' (when bucketByDate=true) the column is \`date\`. NUMERIC VALUES come back as STRINGS — the frontend coerces them, but the spec must reference the right column name.
+- northbeam.metrics_explorer returns CSV-flat rows. Common columns: \`rev\` (revenue, string), \`spend\`, \`transactions\` (NOT 'txns' — that's the metric ID, the column is 'transactions'), \`aov\`, \`visits\`, \`accounting_mode\`, \`attribution_model\`, \`attribution_window\`. When breakdown is set, the breakdown value is ALWAYS in a column called \`breakdown_value\` — this is a stable normalized alias the connector applies regardless of which breakdown key was passed. For 'date' (when bucketByDate=true) the column is \`date\`. NUMERIC VALUES come back as STRINGS — the frontend coerces them, but the spec must reference the right column name.
 
 - gantri.late_orders_report returns \`{ totalLate, missedDeadline, withinWindow, orders: [{orderId, customerName, type, daysPastDeliveryBy, deadlineMissed, primaryCause, causeSummary, noteFlags}] }\`. Use 'orders' for the table data ref, not 'rows'.
 

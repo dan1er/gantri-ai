@@ -71,11 +71,35 @@ export function buildCompareNbTool(deps: CompareNbToolDeps): ToolDef<Args> {
       const endDate = args.excludeToday && args.dateRange.endDate >= today ? subDays(today, 1) : args.dateRange.endDate;
 
       // ---- Porter side: type=Order, PT-bucketed ----
+      // Use `amount.total` as the source of truth for revenue when present —
+      // this matches NB's purchase_total exactly (verified day-by-day for
+      // recent dates). Modern `total` is built as `subtotal + shipping + tax
+      // − gift_discount` per Porter's checkout pipeline (services/transaction.js
+      // _getPriceForOrder + the `amount.discount = ...` capping logic);
+      // credits and gift-card redemptions are NOT subtracted from `total`,
+      // so neither does NB.
+      //
+      // Schema history: `amount.total` was added in 2025; older rows only
+      // have { subtotal, shipping, tax, transactionFee, gift?, giftData? }.
+      // Without the COALESCE fallback, SUM(NULL) silently returned 0 for the
+      // entire pre-2025 window. The fallback re-derives the same number
+      // Porter would have written: subtotal+shipping+tax minus the legacy
+      // `gift` discount field (which corresponds to today's giftDiscount /
+      // discount fields). transactionFee is Gantri's cut and is NOT part of
+      // customer-paid revenue.
       const porterSql = `
         SELECT
           DATE_TRUNC('day', t."createdAt" AT TIME ZONE 'America/Los_Angeles')::date AS day,
           COUNT(*)::int AS orders,
-          SUM((t.amount->>'total')::numeric) / 100.0 AS revenue
+          SUM(
+            COALESCE(
+              (t.amount->>'total')::numeric,
+              COALESCE((t.amount->>'subtotal')::numeric, 0)
+                + COALESCE((t.amount->>'shipping')::numeric, 0)
+                + COALESCE((t.amount->>'tax')::numeric, 0)
+                - COALESCE((t.amount->>'gift')::numeric, 0)
+            )
+          ) / 100.0 AS revenue
         FROM "Transactions" t
         WHERE t."createdAt" >= ($__timeFrom())::timestamp
           AND t."createdAt" <  ($__timeTo())::timestamp

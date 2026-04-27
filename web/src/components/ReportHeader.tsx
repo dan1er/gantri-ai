@@ -15,7 +15,7 @@ export function ReportHeader({ title, subtitle, lastRefreshedAt, onRefresh, refr
     <header className="mb-10">
       <div className="flex items-center justify-between border-b border-gray-200 pb-6">
         <a href="/r" className="block">
-          <img src="/r/logo-name.png" alt="Gantri" className="h-10 w-auto" />
+          <img src="/r/logo-name.png" alt="Gantri" className="h-12 w-auto" />
         </a>
         <div className="flex items-center gap-3">
           <span className="text-xs text-gray-500" title={lastRefreshedAt}>Updated {fmtRelativeTime(lastRefreshedAt)}</span>

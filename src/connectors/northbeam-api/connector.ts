@@ -128,13 +128,23 @@ function buildTools(client: NorthbeamApiClient): ToolDef[] {
       schema: MetricsExplorerArgs as z.ZodType<MetricsExplorerArgs>,
       jsonSchema: zodToJsonSchema(MetricsExplorerArgs),
       async execute(args: MetricsExplorerArgs) {
+        // Defensive metric-id translation. The compiler LLM has been observed
+        // to pass `transactions` (the CSV column name) where the metric ID
+        // should be `txns`. Translate common aliases before NB rejects them.
+        const METRIC_ALIASES: Record<string, string> = {
+          transactions: 'txns',
+          orders: 'txns',
+          revenue: 'rev',
+        };
+        const translatedMetrics = args.metrics.map((m) => METRIC_ALIASES[m] ?? m);
+        const normalized = { ...args, metrics: translatedMetrics };
         // The API requires breakdowns[].values to be a non-empty enum array.
         // If the caller didn't pass one, auto-populate from the catalog so the
         // LLM doesn't have to make a discovery call before every breakdown.
-        const breakdown = args.breakdown && (!args.breakdown.values || args.breakdown.values.length === 0)
-          ? { key: args.breakdown.key, values: await fetchBreakdownValues(client, args.breakdown.key) }
-          : args.breakdown;
-        const payload = buildExportPayload({ ...args, breakdown });
+        const breakdown = normalized.breakdown && (!normalized.breakdown.values || normalized.breakdown.values.length === 0)
+          ? { key: normalized.breakdown.key, values: await fetchBreakdownValues(client, normalized.breakdown.key) }
+          : normalized.breakdown;
+        const payload = buildExportPayload({ ...normalized, breakdown });
         logger.info({ args, payload: redactPayload(payload) }, 'northbeam.metrics_explorer →');
         try {
           const csv = await client.runExport(payload);

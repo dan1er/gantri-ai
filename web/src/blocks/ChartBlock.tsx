@@ -28,10 +28,23 @@ export function ChartBlock({ block, dataResults }: { block: any; dataResults: Re
     return new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(n);
   };
   const isHorizontal = block.variant === 'horizontal_bar';
-  // Truncate long string x-axis values for horizontal bar charts so labels fit
-  const processedData = isHorizontal
-    ? data.map((row: any) => ({ ...row, [block.x]: truncate(row[block.x], 28) }))
-    : data;
+  // Coerce string-numbers (NB returns metrics as strings like "482.115493") to
+  // real numbers so Tremor doesn't render them as zeroed lines. Truncate long
+  // x-axis labels for horizontal bars so they fit the y-axis margin.
+  const processedData = data.map((row: any) => {
+    const out: Record<string, unknown> = { ...row };
+    for (const cat of categories) {
+      const v = out[cat];
+      if (typeof v === 'string' && v !== '') {
+        const n = Number(v);
+        if (Number.isFinite(n)) out[cat] = n;
+      }
+    }
+    if (isHorizontal && typeof block.x === 'string') {
+      out[block.x] = truncate(out[block.x], 28);
+    }
+    return out;
+  });
 
   const common = {
     data: processedData,

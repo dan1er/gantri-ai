@@ -1,6 +1,6 @@
 # Live Reports — Design Spec
 
-**Status:** Draft for review
+**Status:** Approved (open questions resolved)
 **Author:** Danny Estevez
 **Date:** 2026-04-27
 **Branch:** `feat/live-reports`
@@ -159,6 +159,18 @@ CREATE TABLE IF NOT EXISTS published_reports (
 
 CREATE INDEX IF NOT EXISTS published_reports_owner_idx ON published_reports(owner_slack_id) WHERE archived_at IS NULL;
 CREATE INDEX IF NOT EXISTS published_reports_keywords_idx ON published_reports USING gin(intent_keywords);
+
+-- Spec history for rollback (last 5 versions per slug).
+CREATE TABLE IF NOT EXISTS published_reports_history (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  report_id       uuid NOT NULL REFERENCES published_reports(id) ON DELETE CASCADE,
+  spec            jsonb NOT NULL,
+  spec_version    int NOT NULL,
+  intent          text NOT NULL,
+  replaced_by_slack_id text NOT NULL,
+  replaced_at     timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS published_reports_history_report_idx ON published_reports_history(report_id, replaced_at DESC);
 ```
 
 `access_token` is independent of slug — slug is shareable identifier, token gates access. URLs look like `gantri-ai-bot.fly.dev/r/<slug>?t=<token>`. **Phase 1**: every authorized user shares the same per-report token. **Phase 2**: per-user OAuth so we can audit who-viewed-what.
@@ -371,17 +383,37 @@ A new section in the prompt, parallel to the existing `reports.subscribe` rules:
 
 ---
 
-## Open questions for review
+## Resolved decisions
 
-1. **Slug format** — short random (`nanoid(10)` → `Vk7-9aXqL_`) vs human-readable derived from title (`weekly-sales-2`). Random is collision-proof; readable is shareable verbally. Lean toward **random with optional `?n=Pretty+Name` query param** that we display as the page title.
+1. **Slug format — title-derived, English-only.**
+   - The LLM ALWAYS emits `title` in English (regardless of the user's input language), aligned with the codebase-language convention.
+   - Slugify deterministically: lowercase, strip diacritics → ASCII, replace non-alphanumerics with `-`, collapse repeats, trim leading/trailing `-`. Cap at 60 chars.
+   - Example: `"Weekly Sales Report"` → `weekly-sales-report`. `"ROAS por canal"` (Spanish input) → LLM normalizes title to `"ROAS by Channel"` → `roas-by-channel`.
+   - On collision, append `-2`, `-3`, etc. (`weekly-sales-report-2`).
+   - Why: shareable verbally, predictable URLs, meaningful in browser history, English keeps the indexes/admin tools consistent.
 
-2. **Per-user vs per-org dedup** — when checking for existing similar reports, do we consider only the user's own reports, or all reports (since allowlist is small and reports might be shared)? Lean toward **all non-archived reports**, with the recommendation showing who owns each match.
+2. **Dedup — cross-org.** `reports.find_similar_reports` searches ALL non-archived reports (any owner). The recommendation surfaces the owner so the user knows who built it. Phase 1 is text/keyword matching; semantic embedding is out of scope (small corpus, allowlist of 5–10 means this stays cheap).
 
-3. **Spec versioning trigger** — when do we bump from v1 → v2? Anytime a non-additive spec change happens. **Hard rule**: v1 specs must continue to render forever (at minimum, with an "upgrade available" notice).
+3. **Spec versioning — semver-flavored backwards-compat rule.**
+   - **v1 specs render forever.** Non-negotiable contract.
+   - Additive changes (new optional fields, new UI block types, new whitelisted tools) do NOT bump version. They land in v1.
+   - Breaking changes (renaming a field, removing a block type, changing the meaning of an existing field) bump to v2 in a new module (`spec-v2.ts`) with a migration helper for v1 → v2. The runner branches on `spec.version` and dispatches to the right handler.
+   - Every breaking change documented in `docs/superpowers/specs/changelog-live-report-spec.md` with date + rationale + migration note.
 
-4. **What does the "About this report" footer show?** Proposed: title, who owns it, when it was created, when it was last refreshed, the original intent string ("How was this generated?"), source links. This makes reports introspectable and trustworthy.
+4. **Footer ("About this report").** Renders below the last UI block. Contains:
+   - **Owner** — `Created by <@SLACK_USER>` (with link to their Slack profile)
+   - **Created** — ISO date (e.g. `Apr 27, 2026`)
+   - **Last refreshed** — relative time (`2 minutes ago`) + absolute on hover
+   - **Generated from** — the original natural-language intent in italics. Lets readers understand the question that produced the report. Trustworthy + introspectable.
+   - **Data sources** — list of distinct tool prefixes used (e.g. *Northbeam · Porter · Google Analytics 4*) — derived from `spec.data`.
+   - **Refresh button** — calls `/r/<slug>/data.json?refresh=1` (bypasses cache).
+   - **"Report a wrong number"** — DMs the bot in the user's name with `feedback: this report has a wrong number — <intent>`. Reuses the existing `feedback.*` connector.
 
-5. **Editing a report — full re-LLM or partial?** Phase 1: full re-LLM (simpler). Phase 3: per-block edits (e.g. "swap this chart from line to bar"). The spec format supports the partial edit case already.
+5. **Editing — phase 1 is full re-LLM via `reports.recompile_report(slug, newIntent)`.**
+   - The slug + URL stay stable (key property: bookmarks don't break).
+   - The spec is replaced atomically. The previous spec is preserved in a `published_reports_history` table for rollback (~last 5 versions retained).
+   - Access token can optionally rotate (arg `regenerateToken: true`).
+   - Phase 3 introduces partial edits ("swap this chart to bar", "add a column for AOV") via per-block tool. Out of MVP — the format already supports it because each block is independent.
 
 ---
 

@@ -16,6 +16,7 @@ export interface ReportPayload {
     spec: any;
     effectiveRange?: unknown;
     parametric?: boolean;
+    effectivePeriod?: { startDate: string; endDate: string };
   };
 }
 

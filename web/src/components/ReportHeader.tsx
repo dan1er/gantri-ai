@@ -13,8 +13,13 @@ interface Props {
   loading?: boolean;
   onShowSpec: () => void;
   /** When false, the report's data steps don't reference $REPORT_RANGE — the
-   *  date picker and the period subtitle would be misleading, so we hide them. */
+   *  date picker is hidden because viewer interaction wouldn't change the data.
+   *  The period subtitle is ALWAYS shown (driven by `effectivePeriod`). */
   parametric?: boolean;
+  /** Concrete date range the report's data covers on this render. Always
+   *  shown as the header subtitle so the viewer knows what period the
+   *  numbers reflect. */
+  effectivePeriod?: { startDate: string; endDate: string };
 }
 
 function Spinner() {
@@ -39,7 +44,28 @@ const RANGE_PRESETS: Array<{ key: string; label: string }> = [
   { key: 'year_to_date', label: 'Year to date' },
 ];
 
-export function ReportHeader({ title, subtitle, rangeLabel, currentRange, lastRefreshedAt, onRefresh, onChangeRange, refreshing, loading, onShowSpec, parametric = true }: Props) {
+function formatPtIso(iso: string): string {
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', month: 'short', day: 'numeric', year: 'numeric' })
+    .format(new Date(Date.UTC(y, m - 1, d, 18, 0, 0)));
+}
+
+function buildPeriodLabel(parametric: boolean, rangeLabel: string, effectivePeriod?: { startDate: string; endDate: string }): string {
+  // Parametric reports already get a labeled range from the picker
+  // ("Last 7 days · Apr 21 – Apr 27, 2026") via `rangeLabel`. Use that.
+  if (parametric && rangeLabel) return rangeLabel;
+  // Non-parametric reports: derive the label from the actual data window.
+  if (effectivePeriod && effectivePeriod.startDate && effectivePeriod.endDate) {
+    const a = formatPtIso(effectivePeriod.startDate);
+    const b = formatPtIso(effectivePeriod.endDate);
+    return effectivePeriod.startDate === effectivePeriod.endDate ? a : `${a} – ${b}`;
+  }
+  // Fallback (no period info at all): render the parametric label if available.
+  return rangeLabel || '';
+}
+
+export function ReportHeader({ title, subtitle, rangeLabel, currentRange, lastRefreshedAt, onRefresh, onChangeRange, refreshing, loading, onShowSpec, parametric = true, effectivePeriod }: Props) {
+  const periodLabel = buildPeriodLabel(parametric, rangeLabel, effectivePeriod);
   const isBusy = !!loading || !!refreshing;
   return (
     <header className="mb-10">
@@ -76,7 +102,7 @@ export function ReportHeader({ title, subtitle, rangeLabel, currentRange, lastRe
           <h1 className="text-3xl font-semibold tracking-tight text-gantri-ink">{title}</h1>
           {isBusy && <Spinner />}
         </div>
-        {parametric && <p className="text-sm text-blue-600 mt-2 font-medium">{rangeLabel}</p>}
+        {periodLabel && <p className="text-sm text-blue-600 mt-2 font-medium">{periodLabel}</p>}
         {subtitle && <p className="text-base text-gray-500 mt-2 max-w-3xl leading-relaxed">{subtitle}</p>}
       </div>
     </header>

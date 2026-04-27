@@ -312,6 +312,8 @@ async function main() {
     registry: cachingRegistry,
     webDistDir,
     slackClient: app.client as unknown as never,
+    feedbackRepo,
+    maintainerSlackUserId: env.MAINTAINER_SLACK_USER_ID,
   });
 
   await app.start(env.PORT);

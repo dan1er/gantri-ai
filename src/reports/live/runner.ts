@@ -17,7 +17,26 @@ export interface LiveSpecRunResult {
     sources: string[];
     spec: LiveReportSpec;
     effectiveRange: unknown;
+    /** Concrete date range covered by the report on this render — derived
+     *  from substituted args. The frontend renders it as a header subtitle so
+     *  the viewer ALWAYS sees what period the numbers reflect, regardless of
+     *  whether the spec is parametric ($REPORT_RANGE) or fixed ($DATE: macros). */
+    effectivePeriod?: { startDate: string; endDate: string };
   };
+}
+
+/** Walk every leaf string in a value tree and extract YYYY-MM-DD dates. We
+ *  use this to compute `effectivePeriod` from already-substituted step args:
+ *  the union of every date string we find is the period the report covers. */
+function collectDateStrings(value: unknown, out: string[]): void {
+  if (typeof value === 'string') {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(value)) out.push(value);
+    return;
+  }
+  if (Array.isArray(value)) { for (const v of value) collectDateStrings(v, out); return; }
+  if (value && typeof value === 'object') {
+    for (const v of Object.values(value as Record<string, unknown>)) collectDateStrings(v, out);
+  }
 }
 
 /**
@@ -65,6 +84,9 @@ export async function runLiveSpec(spec: LiveReportSpec, registry: MinimalRegistr
   // Single point-in-time anchor — all date macros across all steps in this
   // run resolve against the same `now`, so results are internally consistent.
   const now = new Date();
+  // Collect every YYYY-MM-DD date that flows into any tool's args after
+  // substitution; we'll aggregate at the end into `effectivePeriod`.
+  const collectedDates: string[] = [];
   const results = await Promise.all(
     toolSteps.map(async (step) => {
       const s = step as { id: string; tool: string; args: Record<string, unknown> };
@@ -72,6 +94,7 @@ export async function runLiveSpec(spec: LiveReportSpec, registry: MinimalRegistr
       try {
         const rangeSubbed = substituteReportRange(s.args, range);
         const stepArgs = substituteDateMacros(rangeSubbed, now);
+        collectDateStrings(stepArgs, collectedDates);
         const r = await registry.execute(s.tool, stepArgs);
         if (!r.ok) {
           logger.warn({ stepId: s.id, tool: s.tool, code: r.error?.code, ms: Date.now() - t0 }, 'live-report step failed');
@@ -106,7 +129,16 @@ export async function runLiveSpec(spec: LiveReportSpec, registry: MinimalRegistr
     }
   }
 
+  // Most tools also include a `period: { startDate, endDate }` (or similar)
+  // in their result. Pulling dates from there means presets like
+  // `last_14_days` (which collectDateStrings can't parse from args) still
+  // produce a valid `effectivePeriod` so the header subtitle is never empty.
+  collectDateStrings(dataResults, collectedDates);
   const sources = [...new Set(toolSteps.map((s) => (s as { tool: string }).tool))].sort();
+  const sortedDates = [...new Set(collectedDates)].sort();
+  const effectivePeriod = sortedDates.length > 0
+    ? { startDate: sortedDates[0], endDate: sortedDates[sortedDates.length - 1] }
+    : undefined;
   return {
     dataResults,
     ui: spec.ui,
@@ -117,6 +149,7 @@ export async function runLiveSpec(spec: LiveReportSpec, registry: MinimalRegistr
       sources,
       spec,
       effectiveRange: range,
+      effectivePeriod,
     },
   };
 }

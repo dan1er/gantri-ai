@@ -7,6 +7,7 @@ import { TextBlock } from './blocks/TextBlock.js';
 import { DividerBlock } from './blocks/DividerBlock.js';
 import { ReportHeader } from './components/ReportHeader.js';
 import { ReportFooter } from './components/ReportFooter.js';
+import { FeedbackModal } from './components/FeedbackModal.js';
 import { SpecDrawer } from './components/SpecDrawer.js';
 import { ErrorState } from './components/ErrorState.js';
 import { LoadingShimmer } from './components/LoadingShimmer.js';
@@ -62,6 +63,7 @@ function ReportPage({ slug, token }: { slug: string; token: string }) {
   const [refreshing, setRefreshing] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(window.location.hash === '#spec');
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [selectedRange, setSelectedRange] = useState<string | { start: string; end: string } | null>(readInitialRange);
 
   async function load(refresh: boolean, range?: string | { start: string; end: string } | null) {
@@ -119,6 +121,7 @@ function ReportPage({ slug, token }: { slug: string; token: string }) {
           loading={loading}
           onShowSpec={() => { window.location.hash = '#spec'; setDrawerOpen(true); }}
           parametric={data.meta.parametric !== false}
+          effectivePeriod={data.meta.effectivePeriod}
         />
       )}
       {loading && !data && <LoadingShimmer />}
@@ -159,7 +162,7 @@ function ReportPage({ slug, token }: { slug: string; token: string }) {
           intent={data.meta.intent}
           sources={data.meta.sources}
           onRefresh={() => load(true)}
-          onReportFeedback={() => alert('To report a wrong number, DM the bot: feedback: <reason>')}
+          onReportFeedback={() => setFeedbackOpen(true)}
         />
       )}
       {data && (
@@ -170,6 +173,24 @@ function ReportPage({ slug, token }: { slug: string; token: string }) {
           spec={data.meta.spec}
           meta={{ owner_slack_id: data.meta.owner_slack_id, owner_display_name: data.meta.owner_display_name, createdAt: data.meta.createdAt, lastRefreshedAt: data.meta.lastRefreshedAt, sources: data.meta.sources }}
           canModify={false}
+        />
+      )}
+      {data && (
+        <FeedbackModal
+          open={feedbackOpen}
+          reportTitle={data.meta.title}
+          onClose={() => setFeedbackOpen(false)}
+          onSubmit={async ({ reason, reporterHandle }) => {
+            const res = await fetch(`/r/${slug}/feedback?t=${encodeURIComponent(token)}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ reason, reporterHandle }),
+            });
+            if (!res.ok) {
+              const body = await res.text();
+              throw new Error(`HTTP ${res.status}: ${body.slice(0, 160)}`);
+            }
+          }}
         />
       )}
     </Page>

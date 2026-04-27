@@ -24,6 +24,19 @@ interface ToolOutputSample {
   /** A concrete (truncated) example of the actual JSON the tool returns.
    *  Field names here are the ground truth — use them VERBATIM. */
   example: unknown;
+  /** Verified-against-source contract: the EXACT set of top-level keys the
+   *  tool returns. Validated by tests/unit/live-reports/tool-output-shapes.test.ts
+   *  against `Object.keys(example)` so the example object can't drift away
+   *  from this declared contract.
+   *
+   *  When updating a tool's output, you MUST update this list AND the example
+   *  in the same commit — otherwise the LLM will get stale guidance and
+   *  generate broken specs. The unit test enforces this. */
+  expectedTopLevelKeys: readonly string[];
+  /** Optional: for each array field, declare the expected element-level keys.
+   *  Tests assert the example's first row contains all of these. This catches
+   *  the most common drift case (column rename inside a `rows[]` array). */
+  expectedArrayElementKeys?: Record<string, readonly string[]>;
 }
 
 export const TOOL_OUTPUT_SHAPES: Record<string, ToolOutputSample> = {
@@ -42,18 +55,22 @@ export const TOOL_OUTPUT_SHAPES: Record<string, ToolOutputSample> = {
         { breakdown_value: 'Organic', rev: '6266.56', spend: '0', transactions: '10.56' },
       ],
     },
+    expectedTopLevelKeys: ['attributionModel', 'accountingMode', 'attributionWindow', 'metrics', 'rowCount', 'headers', 'rows'],
+    expectedArrayElementKeys: { rows: ['breakdown_value', 'rev', 'spend', 'transactions'] },
   },
   'northbeam.list_metrics': {
-    summary: 'Catalog of metric IDs. { count, metrics: [{ id, displayName, … }] }. Use to discover metric IDs (e.g. "Revenue" → `rev`).',
+    summary: 'Catalog of metric IDs. { count, metrics: [{ id, label }] }. The display string is in `label`, NOT `displayName`. Use the `id` for `metrics_explorer.metrics[]`.',
     example: {
       count: 47,
       metrics: [
-        { id: 'rev', displayName: 'Revenue' },
-        { id: 'spend', displayName: 'Spend' },
-        { id: 'txns', displayName: 'Transactions' },
-        { id: 'aovFt', displayName: 'AOV (1st time)' },
+        { id: 'rev', label: 'Revenue' },
+        { id: 'spend', label: 'Spend' },
+        { id: 'txns', label: 'Transactions' },
+        { id: 'aovFt', label: 'AOV (1st time)' },
       ],
     },
+    expectedTopLevelKeys: ['count', 'metrics'],
+    expectedArrayElementKeys: { metrics: ['id', 'label'] },
   },
   'northbeam.list_breakdowns': {
     summary: 'Catalog of breakdown keys + their valid enum values. { count, breakdowns: [{ key, values: [...] }] }.',
@@ -64,6 +81,8 @@ export const TOOL_OUTPUT_SHAPES: Record<string, ToolOutputSample> = {
         { key: 'Forecast', values: ['Affiliate', 'Direct', 'Email', 'Google Ads'] },
       ],
     },
+    expectedTopLevelKeys: ['count', 'breakdowns'],
+    expectedArrayElementKeys: { breakdowns: ['key', 'values'] },
   },
   'northbeam.list_attribution_models': {
     summary: 'Catalog of attribution model IDs. { count, models: [{ id, name }] }.',
@@ -74,14 +93,29 @@ export const TOOL_OUTPUT_SHAPES: Record<string, ToolOutputSample> = {
         { id: 'last_touch', name: 'Last Touch' },
       ],
     },
+    expectedTopLevelKeys: ['count', 'models'],
+    expectedArrayElementKeys: { models: ['id', 'name'] },
   },
   'northbeam.list_orders': {
-    summary: 'Per-order list with attribution context. { count, orders: [{ orderId, customerEmail, channel, ... }] }. Used for drilling into individual orders attributed to a channel.',
+    summary: 'Raw NB /v2/orders for a date range. Top-level: { period, source, count, totalReturned, cancelledOrDeletedExcluded, dailyBreakdown, orders }. `count` is post-filter (excludes cancelled/deleted); `totalReturned` is raw. `orders[]` items match the NB API order shape — most-used fields shown below.',
     example: {
-      count: 2,
-      orders: [
-        { orderId: '12345', customerEmail: 'a@example.com', channel: 'Google Ads', revenue: 120.5, attributedAt: '2026-04-22' },
+      period: { startDate: '2026-04-21', endDate: '2026-04-27' },
+      source: 'northbeam_v2_orders',
+      count: 138,
+      totalReturned: 142,
+      cancelledOrDeletedExcluded: 4,
+      dailyBreakdown: [
+        { date: '2026-04-21', count: 22, revenue: 9500.5 },
+        { date: '2026-04-22', count: 18, revenue: 7820.0 },
       ],
+      orders: [
+        { order_id: '12345', time_of_purchase: '2026-04-22T18:30:00Z', purchase_total: 145.5, is_cancelled: false, is_deleted: false, customer_id: '{"northbeam_api_customer_id":"65575"}', tags: ['paid_search'] },
+      ],
+    },
+    expectedTopLevelKeys: ['period', 'source', 'count', 'totalReturned', 'cancelledOrDeletedExcluded', 'dailyBreakdown', 'orders'],
+    expectedArrayElementKeys: {
+      orders: ['order_id', 'time_of_purchase', 'purchase_total', 'is_cancelled', 'is_deleted'],
+      dailyBreakdown: ['date', 'count', 'revenue'],
     },
   },
 
@@ -106,6 +140,11 @@ export const TOOL_OUTPUT_SHAPES: Record<string, ToolOutputSample> = {
       truncated: false,
       breakdownIncomplete: false,
     },
+    expectedTopLevelKeys: ['period', 'typesFilter', 'source', 'totalOrders', 'totalRevenueDollars', 'avgOrderValueDollars', 'statusBreakdown', 'typeBreakdown', 'truncated', 'breakdownIncomplete'],
+    expectedArrayElementKeys: {
+      statusBreakdown: ['status', 'count', 'revenueDollars'],
+      typeBreakdown: ['type', 'count', 'revenueDollars'],
+    },
   },
   'gantri.orders_query': {
     summary: 'Searched/filtered list of individual orders from Porter. { totalMatching, page, returnedCount, orders: [{ id, type, status, customerName, email, totalDollars, ... }] }. Use `orders[]` for tables; `totalMatching` for KPI counts.',
@@ -118,6 +157,8 @@ export const TOOL_OUTPUT_SHAPES: Record<string, ToolOutputSample> = {
         { id: 53485, type: 'Order', status: 'Processed', customerName: 'Jane Doe', email: 'jane@example.com', userId: 1234, totalCents: 12000, totalDollars: 120 },
       ],
     },
+    expectedTopLevelKeys: ['totalMatching', 'maxPages', 'page', 'returnedCount', 'orders'],
+    expectedArrayElementKeys: { orders: ['id', 'type', 'status', 'customerName', 'totalDollars'] },
   },
   'gantri.late_orders_report': {
     summary: 'Snapshot of currently-late orders. { totalLate, ordersListed, buckets, orders }. `buckets.byDeadline.customerDeadlineMissed` is the headline. `orders[]` has primaryCause, causeSummary, daysPastDeliveryBy, deadlineMissed (boolean).',
@@ -134,6 +175,8 @@ export const TOOL_OUTPUT_SHAPES: Record<string, ToolOutputSample> = {
         { id: 51083, type: 'Marketing', status: 'Processed', customerName: 'Jennifer Pham', daysPastDeliveryBy: 64, deadlineMissed: true, daysLate: 71, totalDollars: 0, primaryCause: 'Part scrapped', causeSummary: 'Part scrapped (78) — reworked 3×, other failure modes', noteFlags: [], adminLink: 'https://admin.gantri.com/orders/51083' },
       ],
     },
+    expectedTopLevelKeys: ['totalLate', 'ordersListed', 'buckets', 'orders'],
+    expectedArrayElementKeys: { orders: ['id', 'type', 'status', 'customerName', 'daysPastDeliveryBy', 'deadlineMissed', 'primaryCause', 'causeSummary', 'adminLink'] },
   },
   'gantri.sales_report': {
     summary: 'Per-transaction-type sales rollup. { period, source, rows, totals, summary }. `rows[]` has one entry per type (Order, Wholesale, Trade, Refund, etc.). `totals` and `summary` are the SAME object (aliased). Money fields are aliased under multiple naming conventions (fullTotal === full_total === fullTotalDollars === totalRevenue).',
@@ -145,27 +188,46 @@ export const TOOL_OUTPUT_SHAPES: Record<string, ToolOutputSample> = {
       ],
       totals: { orders: 139, items: 220, giftCards: 0, fullTotal: 60446.92, fullTotalDollars: 60446.92, full_total: 60446.92, totalRevenue: 60446.92, subtotal: 50000, shipping: 1500, tax: 1500, discount: 0, salesExclTax: 51500 },
     },
+    expectedTopLevelKeys: ['period', 'source', 'rows', 'totals'],
+    expectedArrayElementKeys: { rows: ['type', 'orders', 'items', 'subtotal', 'shipping', 'tax', 'fullTotal', 'full_total'] },
   },
   'gantri.compare_orders_nb_vs_porter': {
-    summary: 'Side-by-side count + revenue from NB and Porter for the same period — used to validate that the two sources agree. { period, northbeam: { count, revenue }, porter: { count, revenue }, diff: { countDelta, revenueDelta, revenuePctDelta } }.',
+    summary: 'Per-day reconciliation between NB and Porter for type=Order. Top-level: { period, excludeToday, rows, totals, csv, notes }. THE DATA IS in `rows[]` (one entry per PT day) and `totals` (grand total). NO `northbeam`/`porter`/`diff` wrappers exist. Each row + totals has the SAME 6 numeric fields: porter_orders, porter_revenue, nb_orders, nb_revenue, order_diff, revenue_diff. `csv` is a pre-rendered comma-separated string of all rows + a TOTAL row. ARGS: `dateRange` accepts the live-reports `$REPORT_RANGE` token (preset enum or { startDate, endDate } with capital-D keys, both work).',
     example: {
       period: { startDate: '2026-04-21', endDate: '2026-04-27' },
-      northbeam: { count: 138, revenue: 60230.5 },
-      porter: { count: 139, revenue: 60446.92 },
-      diff: { countDelta: -1, revenueDelta: -216.42, revenuePctDelta: -0.0036 },
+      excludeToday: false,
+      rows: [
+        { date: '2026-04-21', porter_orders: 5, porter_revenue: 2018.63, nb_orders: 5, nb_revenue: 2018.63, order_diff: 0, revenue_diff: 0 },
+        { date: '2026-04-22', porter_orders: 9, porter_revenue: 5131.29, nb_orders: 9, nb_revenue: 5131.29, order_diff: 0, revenue_diff: 0 },
+      ],
+      totals: { porter_orders: 258, porter_revenue: 123269.13, nb_orders: 258, nb_revenue: 123269.13, order_diff: 0, revenue_diff: 0 },
+      csv: 'date,porter_orders,porter_revenue,nb_orders,nb_revenue,order_diff,revenue_diff\\n2026-04-21,5,2018.63,5,2018.63,0,0.00\\nTOTAL,258,123269.13,258,123269.13,0,0.00',
+      notes: ['porter_revenue = SUM(amount.total) for type=Order, status NOT IN (Unpaid, Cancelled).', 'Both sides PT-day bucketed.'],
     },
+    expectedTopLevelKeys: ['period', 'excludeToday', 'rows', 'totals', 'csv', 'notes'],
+    expectedArrayElementKeys: { rows: ['date', 'porter_orders', 'porter_revenue', 'nb_orders', 'nb_revenue', 'order_diff', 'revenue_diff'] },
   },
   'gantri.diff_orders_nb_vs_porter': {
-    summary: 'Per-order diff between NB and Porter for the same period. { period, onlyInPorter: [...], onlyInNorthbeam: [...], discrepancies: [...] }. Each entry includes orderId + the conflicting fields.',
+    summary: 'Per-order diff between NB and Porter. Top-level scalars come from a flat summary: { period, porter_count, nb_count, only_in_nb_count, only_in_porter_count, revenue_mismatch_count, status_mismatch_count, perfect_match }. Plus 4 row arrays: only_in_nb, only_in_porter, revenue_mismatch, status_mismatch — each capped at maxExamples. Plus `notes`. Use snake_case field names everywhere; field name is `period`, NOT `dateRange`.',
     example: {
       period: { startDate: '2026-04-21', endDate: '2026-04-27' },
-      onlyInPorter: [{ orderId: 53612, type: 'Order', revenue: 100 }],
-      onlyInNorthbeam: [{ orderId: 'NB-12345', revenue: 80 }],
-      discrepancies: [{ orderId: 53485, porterRevenue: 120, nbRevenue: 100 }],
+      porter_count: 258,
+      nb_count: 258,
+      only_in_nb_count: 0,
+      only_in_porter_count: 0,
+      revenue_mismatch_count: 0,
+      status_mismatch_count: 0,
+      perfect_match: true,
+      only_in_nb: [],
+      only_in_porter: [],
+      revenue_mismatch: [],
+      status_mismatch: [],
+      notes: ['porter_count = transactions where type=Order AND status NOT IN (Unpaid, Cancelled).'],
     },
+    expectedTopLevelKeys: ['period', 'porter_count', 'nb_count', 'only_in_nb_count', 'only_in_porter_count', 'revenue_mismatch_count', 'status_mismatch_count', 'perfect_match', 'only_in_nb', 'only_in_porter', 'revenue_mismatch', 'status_mismatch', 'notes'],
   },
   'gantri.attribution_compare_models': {
-    summary: '7-attribution-model side-by-side. { period, platformFilter, metrics, models: [{ model_id, model_name, rev, spend, txns, roas } | { model_id, model_name, error }] }.',
+    summary: '7-attribution-model side-by-side. { period, platformFilter, metrics, models }. `models[]` items have either { model_id, model_name, ...metricId } or { model_id, model_name, error } on failure. Each metric you requested becomes a key in the row using its METRIC ID name (rev, spend, txns) — `roas` is auto-computed only if you requested both rev and spend.',
     example: {
       period: 'last_30_days',
       platformFilter: null,
@@ -175,6 +237,8 @@ export const TOOL_OUTPUT_SHAPES: Record<string, ToolOutputSample> = {
         { model_id: 'last_touch', model_name: 'Last Touch', rev: 220000, spend: 50000, txns: 540, roas: 4.4 },
       ],
     },
+    expectedTopLevelKeys: ['period', 'platformFilter', 'metrics', 'models'],
+    expectedArrayElementKeys: { models: ['model_id', 'model_name'] },
   },
   'gantri.ltv_cac_by_channel': {
     summary: 'Per-channel LTV/CAC. { period, breakdown, rows: [{ channel, revenue, first_time_revenue, spend, cac_first_time, aov_first_time, aov_first_time_ltv, roas_first_time, roas_first_time_ltv, ltv_cac_ratio }], headers }.',
@@ -186,6 +250,8 @@ export const TOOL_OUTPUT_SHAPES: Record<string, ToolOutputSample> = {
       ],
       headers: ['breakdown_platform_northbeam', 'rev', 'spend', 'cacFt', 'aovFt', 'aovFtLtv', 'roasFt', 'roasFtLtv'],
     },
+    expectedTopLevelKeys: ['period', 'breakdown', 'rows', 'headers'],
+    expectedArrayElementKeys: { rows: ['channel', 'revenue', 'first_time_revenue', 'spend', 'cac_first_time', 'aov_first_time', 'aov_first_time_ltv', 'ltv_cac_ratio'] },
   },
   'gantri.new_vs_returning_split': {
     summary: 'Per-channel new vs returning split. { period, breakdown, level, rows: [{ channel, campaign?, revenue_total, revenue_new, revenue_returning, pct_new_revenue, transactions_total, transactions_new, transactions_returning, spend, cac, cac_new }] }.',
@@ -197,6 +263,8 @@ export const TOOL_OUTPUT_SHAPES: Record<string, ToolOutputSample> = {
         { channel: 'Google Ads', revenue_total: 100000, revenue_new: 60000, revenue_returning: 40000, pct_new_revenue: 60, transactions_total: 250, transactions_new: 150, transactions_returning: 100, spend: 25000, cac: 100, cac_new: 167 },
       ],
     },
+    expectedTopLevelKeys: ['period', 'breakdown', 'level', 'rows'],
+    expectedArrayElementKeys: { rows: ['channel', 'revenue_total', 'revenue_new', 'revenue_returning', 'pct_new_revenue', 'transactions_total', 'transactions_new', 'transactions_returning', 'spend', 'cac', 'cac_new'] },
   },
   'gantri.budget_optimization_report': {
     summary: 'Per-campaign current-vs-prior period marginal ROAS. { currentPeriod, priorPeriod, minSpendDollars, rows: [{ platform, campaign, current_rev, current_spend, current_roas, prior_rev, prior_spend, prior_roas, delta_rev, delta_spend, marginal_roas }] }. Sorted ascending by marginal_roas (worst first).',
@@ -208,6 +276,8 @@ export const TOOL_OUTPUT_SHAPES: Record<string, ToolOutputSample> = {
         { platform: 'Google Ads', campaign: 'Brand search', current_rev: 50000, current_spend: 8000, current_roas: 6.25, prior_rev: 45000, prior_spend: 7000, prior_roas: 6.43, delta_rev: 5000, delta_spend: 1000, marginal_roas: 5 },
       ],
     },
+    expectedTopLevelKeys: ['currentPeriod', 'priorPeriod', 'minSpendDollars', 'rows'],
+    expectedArrayElementKeys: { rows: ['platform', 'campaign', 'current_rev', 'current_spend', 'current_roas', 'prior_rev', 'prior_spend', 'prior_roas', 'delta_rev', 'delta_spend', 'marginal_roas'] },
   },
 
   // ---------- GA4 ----------
@@ -223,6 +293,7 @@ export const TOOL_OUTPUT_SHAPES: Record<string, ToolOutputSample> = {
         { pagePath: '/products', sessions: 8200, engagedSessions: 5400 },
       ],
     },
+    expectedTopLevelKeys: ['period', 'rowCount', 'dimensions', 'metrics', 'rows'],
   },
   'ga4.realtime': {
     summary: 'GA4 realtime. Same flat-row shape as run_report but no `period`. { rowCount, dimensions, metrics, rows }.',
@@ -232,6 +303,7 @@ export const TOOL_OUTPUT_SHAPES: Record<string, ToolOutputSample> = {
       metrics: ['activeUsers'],
       rows: [{ country: 'United States', activeUsers: 412 }],
     },
+    expectedTopLevelKeys: ['rowCount', 'dimensions', 'metrics', 'rows'],
   },
   'ga4.list_events': {
     summary: 'Top events by count. Same flat-row shape: { period, rowCount, dimensions: ["eventName"], metrics: ["eventCount", "totalUsers"], rows: [{ eventName, eventCount, totalUsers }] }.',
@@ -242,6 +314,7 @@ export const TOOL_OUTPUT_SHAPES: Record<string, ToolOutputSample> = {
       metrics: ['eventCount', 'totalUsers'],
       rows: [{ eventName: 'page_view', eventCount: 45000, totalUsers: 12000 }],
     },
+    expectedTopLevelKeys: ['period', 'rowCount', 'dimensions', 'metrics', 'rows'],
   },
   'ga4.page_engagement_summary': {
     summary: 'Page-level scroll & traffic summary. { period, minPageViews, topN, totals, topByTraffic, highestScrollRate, lowestScrollRate, flaggedPages, notes }. `totals` is a single object; the four list fields are arrays of `{ pagePath, pageViews, scrolls, scrollRate, users }`.',
@@ -256,6 +329,12 @@ export const TOOL_OUTPUT_SHAPES: Record<string, ToolOutputSample> = {
       flaggedPages: [],
       notes: 'scrollRate is `scroll / page_view` per URL.',
     },
+    expectedTopLevelKeys: ['period', 'minPageViews', 'topN', 'totals', 'topByTraffic', 'highestScrollRate', 'lowestScrollRate', 'flaggedPages', 'notes'],
+    expectedArrayElementKeys: {
+      topByTraffic: ['pagePath', 'pageViews', 'scrolls', 'scrollRate', 'users'],
+      highestScrollRate: ['pagePath', 'pageViews', 'scrolls', 'scrollRate', 'users'],
+      lowestScrollRate: ['pagePath', 'pageViews', 'scrolls', 'scrollRate', 'users'],
+    },
   },
 
   // ---------- Grafana ----------
@@ -268,6 +347,8 @@ export const TOOL_OUTPUT_SHAPES: Record<string, ToolOutputSample> = {
         { uid: 'ops-health', title: 'Ops Health', folder: '(root)' },
       ],
     },
+    expectedTopLevelKeys: ['count', 'dashboards'],
+    expectedArrayElementKeys: { dashboards: ['uid', 'title', 'folder'] },
   },
   'grafana.run_dashboard': {
     summary: 'Execute every panel of a dashboard. { dashboard, period, panels: [{ panelId, title, fields, rows } | { panelId, title, error, fields: [], rows: [] }] }. Each panel\'s `rows[]` is a SQL result, with column names from `fields[]` as keys.',
@@ -278,6 +359,8 @@ export const TOOL_OUTPUT_SHAPES: Record<string, ToolOutputSample> = {
         { panelId: 1, title: 'Revenue by day', fields: ['date', 'revenue'], rows: [{ date: '2026-04-21', revenue: 8500 }, { date: '2026-04-22', revenue: 9200 }] },
       ],
     },
+    expectedTopLevelKeys: ['dashboard', 'period', 'panels'],
+    expectedArrayElementKeys: { panels: ['panelId', 'title', 'fields', 'rows'] },
   },
   'grafana.sql': {
     summary: 'Run an ad-hoc SQL query against the Porter read-replica. { fields, rows }. Each `rows[]` entry is a flat object with column names as keys. Amounts on Transactions.amount are JSON in cents — divide by 100 for dollars in the SQL itself.',
@@ -288,6 +371,7 @@ export const TOOL_OUTPUT_SHAPES: Record<string, ToolOutputSample> = {
         { type: 'Wholesale', count: 43, revenue: 12697.4 },
       ],
     },
+    expectedTopLevelKeys: ['fields', 'rows'],
   },
 };
 

@@ -14,11 +14,30 @@ import type { NorthbeamApiClient } from '../northbeam-api/client.js';
  * Porter to type=Order, or summing the wrong column) or arithmetic (revenue
  * totals across days). This tool eliminates that drift.
  */
-const Args = z.object({
-  dateRange: z.object({
+/** Accept any of the date-range shapes the live-reports runner may substitute:
+ *  - `{ startDate, endDate }` (the connector's canonical form)
+ *  - `{ start, end }` (the runner's substituted shape from custom range)
+ *  - A preset string (e.g. `last_7_days`) — resolved via the same PT calendar
+ *    helper the connector uses for the rest of the system. This lets specs
+ *    pass `dateRange: '$REPORT_RANGE'` and have the picker drive the window. */
+const PT_PRESETS = new Set([
+  'yesterday', 'last_7_days', 'last_14_days', 'last_30_days', 'last_90_days',
+  'last_180_days', 'last_365_days', 'this_month', 'last_month',
+  'month_to_date', 'quarter_to_date', 'year_to_date',
+]);
+const DateRangeArg = z.union([
+  z.object({
     startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD PT'),
     endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD PT'),
   }),
+  z.object({
+    start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD PT'),
+    end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD PT'),
+  }),
+  z.string().refine((s) => PT_PRESETS.has(s), { message: 'Unknown date-range preset' }),
+]);
+const Args = z.object({
+  dateRange: DateRangeArg,
   excludeToday: z.boolean().default(false).describe('Drop the current PT day from the result (avoids the NB ingestion-lag noise on the in-progress day).'),
 });
 type Args = z.infer<typeof Args>;
@@ -40,8 +59,15 @@ export function buildCompareNbTool(deps: CompareNbToolDeps): ToolDef<Args> {
     ].join(' '),
     schema: Args as z.ZodType<Args>,
     jsonSchema: zodToJsonSchema(Args),
-    async execute(args: Args) {
+    async execute(rawArgs: Args) {
       const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles', year:'numeric', month:'2-digit', day:'2-digit' }).format(new Date());
+      // Collapse the union DateRangeArg (preset | {start,end} | {startDate,endDate})
+      // into the canonical shape we use everywhere downstream. Done up front so
+      // every reference below works against the same { startDate, endDate } object.
+      const args: { dateRange: { startDate: string; endDate: string }; excludeToday: boolean } = {
+        dateRange: normalizeDateRange(rawArgs.dateRange, today),
+        excludeToday: rawArgs.excludeToday,
+      };
       const endDate = args.excludeToday && args.dateRange.endDate >= today ? subDays(today, 1) : args.dateRange.endDate;
 
       // ---- Porter side: type=Order, PT-bucketed ----
@@ -151,6 +177,69 @@ function addDays(ymd: string, n: number): string {
 
 function subDays(ymd: string, n: number): string {
   return addDays(ymd, -n);
+}
+
+/** Translate a preset string (e.g. `last_7_days`) into a concrete
+ *  `{ startDate, endDate }` range using the Pacific Time calendar. Returns
+ *  null for unknown presets so the caller can fall through to validation. */
+function presetToRange(preset: string, todayStr: string): { startDate: string; endDate: string } | null {
+  const today = todayStr;
+  switch (preset) {
+    case 'yesterday': { const y = subDays(today, 1); return { startDate: y, endDate: y }; }
+    case 'last_7_days': return { startDate: subDays(today, 6), endDate: today };
+    case 'last_14_days': return { startDate: subDays(today, 13), endDate: today };
+    case 'last_30_days': return { startDate: subDays(today, 29), endDate: today };
+    case 'last_90_days': return { startDate: subDays(today, 89), endDate: today };
+    case 'last_180_days': return { startDate: subDays(today, 179), endDate: today };
+    case 'last_365_days': return { startDate: subDays(today, 364), endDate: today };
+    case 'this_month':
+    case 'month_to_date': {
+      const [y, m] = today.split('-');
+      return { startDate: `${y}-${m}-01`, endDate: today };
+    }
+    case 'last_month': {
+      const [yStr, mStr] = today.split('-');
+      const y = Number(yStr); const m = Number(mStr);
+      const lmY = m === 1 ? y - 1 : y;
+      const lmM = m === 1 ? 12 : m - 1;
+      const startDate = `${lmY}-${String(lmM).padStart(2, '0')}-01`;
+      // Last day of last month = day 0 of this month.
+      const lastDay = new Date(Date.UTC(y, m - 1, 0)).getUTCDate();
+      const endDate = `${lmY}-${String(lmM).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+      return { startDate, endDate };
+    }
+    case 'quarter_to_date': {
+      const [yStr, mStr] = today.split('-');
+      const m = Number(mStr);
+      const qStartMonth = Math.floor((m - 1) / 3) * 3 + 1;
+      return { startDate: `${yStr}-${String(qStartMonth).padStart(2, '0')}-01`, endDate: today };
+    }
+    case 'year_to_date': {
+      const [y] = today.split('-');
+      return { startDate: `${y}-01-01`, endDate: today };
+    }
+    default: return null;
+  }
+}
+
+/** Normalize the union DateRangeArg shape into the canonical
+ *  `{ startDate, endDate }` the rest of the connector uses. */
+function normalizeDateRange(input: unknown, todayStr: string): { startDate: string; endDate: string } {
+  if (typeof input === 'string') {
+    const r = presetToRange(input, todayStr);
+    if (!r) throw new Error(`Unknown date-range preset: ${input}`);
+    return r;
+  }
+  if (input && typeof input === 'object') {
+    const obj = input as Record<string, unknown>;
+    if (typeof obj.startDate === 'string' && typeof obj.endDate === 'string') {
+      return { startDate: obj.startDate, endDate: obj.endDate };
+    }
+    if (typeof obj.start === 'string' && typeof obj.end === 'string') {
+      return { startDate: obj.start, endDate: obj.end };
+    }
+  }
+  throw new Error(`Invalid dateRange: ${JSON.stringify(input)}`);
 }
 
 /**

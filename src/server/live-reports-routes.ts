@@ -1,6 +1,7 @@
 import path from 'node:path';
-import type { Express } from 'express';
+import express, { type Express } from 'express';
 import type { PublishedReportsRepo } from '../storage/repositories/published-reports.js';
+import type { FeedbackRepo } from '../storage/repositories/feedback.js';
 import { runLiveSpec } from '../reports/live/runner.js';
 import { substituteDateMacros } from '../reports/live/date-macros.js';
 import { logger } from '../logger.js';
@@ -13,6 +14,12 @@ interface MinimalSlackClient {
   users?: {
     info?: (args: { user: string }) => Promise<{ ok?: boolean; user?: { id?: string; real_name?: string; profile?: { display_name?: string; real_name?: string; email?: string } } }>;
   };
+  conversations?: {
+    open?: (args: { users: string }) => Promise<{ ok?: boolean; channel?: { id?: string } }>;
+  };
+  chat?: {
+    postMessage?: (args: { channel: string; text: string; unfurl_links?: boolean }) => Promise<{ ok?: boolean }>;
+  };
 }
 
 export interface LiveReportsRoutesDeps {
@@ -21,6 +28,10 @@ export interface LiveReportsRoutesDeps {
   webDistDir: string;
   /** Optional Slack client for resolving owner display names. If omitted, owner shows as raw ID. */
   slackClient?: MinimalSlackClient;
+  /** Feedback storage — when set, the /r/:slug/feedback endpoint is wired up. */
+  feedbackRepo?: FeedbackRepo;
+  /** Maintainer Slack user ID — DM'd whenever a viewer flags a report. */
+  maintainerSlackUserId?: string;
 }
 
 const VIEWER_COOKIE = 'lr_viewer';
@@ -151,6 +162,76 @@ export function mountLiveReportsRoutes(app: Express, deps: LiveReportsRoutesDeps
       return res.status(500).json({ error: 'internal', detail: msg });
     }
   });
+
+  // POST /r/:slug/feedback — viewer flags a wrong number on a report.
+  // Auth: same as data.json (token OR cookie). Body: { reason, reporterHandle? }.
+  // Per-route express.json() — Bolt's receiver mounts its own raw body parser
+  // for /slack/events, so we keep JSON parsing scoped to this endpoint.
+  app.post('/r/:slug/feedback', express.json({ limit: '32kb' }), async (req, res) => {
+    try {
+      if (!deps.feedbackRepo) return res.status(503).json({ error: 'feedback_not_configured' });
+      const slug = req.params.slug;
+      const token = String(req.query.t ?? '');
+      const report = await deps.repo.getBySlug(slug);
+      if (!report) return res.status(404).json({ error: 'not_found' });
+      const viewerToken = process.env.LIVE_REPORTS_VIEWER_TOKEN;
+      const cookieValue = parseCookie(req.headers.cookie, VIEWER_COOKIE);
+      const tokenValid = token !== '' && token === report.accessToken;
+      const cookieValid = !!viewerToken && cookieValue === viewerToken;
+      if (!tokenValid && !cookieValid) return res.status(401).json({ error: 'unauthorized' });
+
+      // Best-effort body parsing — Express might or might not have body-parser
+      // mounted; both shapes are accepted.
+      const body = (req.body as { reason?: unknown; reporterHandle?: unknown } | undefined) ?? {};
+      const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
+      const reporterHandle = typeof body.reporterHandle === 'string' ? body.reporterHandle.trim() : '';
+      if (!reason || reason.length < 3) return res.status(400).json({ error: 'reason_too_short', detail: 'Reason must be at least 3 characters.' });
+      if (reason.length > 4000) return res.status(400).json({ error: 'reason_too_long' });
+
+      const reportUrl = `${process.env.PUBLIC_BASE_URL || 'https://reports.gantri.com'}/r/${report.slug}`;
+      const reporterId = reporterHandle ? `web:${reporterHandle.slice(0, 80)}` : 'web:anonymous';
+      const inserted = await deps.feedbackRepo.insert({
+        reporter_slack_user_id: reporterId,
+        reason,
+        // Re-use the slack-thread columns as a sentinel for "live-report" source —
+        // the maintainer DM has the URL so they can navigate directly. Avoids a
+        // schema migration for what is otherwise a tiny additional surface.
+        channel_id: `live-report:${report.slug}`,
+        thread_ts: 'live-report',
+        thread_permalink: reportUrl,
+        captured_question: `Live Report: ${report.title}`,
+        captured_response: null,
+        captured_tool_calls: null,
+        captured_model: null,
+        captured_iterations: null,
+      });
+
+      // DM the maintainer with the report URL + reason — best-effort, never
+      // fails the request. The viewer's response shouldn't depend on Slack.
+      void (async () => {
+        try {
+          if (!deps.maintainerSlackUserId || !deps.slackClient?.conversations?.open || !deps.slackClient?.chat?.postMessage) return;
+          const open = await deps.slackClient.conversations.open({ users: deps.maintainerSlackUserId });
+          if (!open?.ok || !open.channel?.id) return;
+          const text = `🚨 *Live Report flagged*\n*${report.title}*\n${reportUrl}\n\nReporter: ${reporterHandle ? reporterHandle : '(anonymous)'}\nReason: ${reason}\n\n_feedback id: ${inserted.id}_`;
+          await deps.slackClient.chat.postMessage({ channel: open.channel.id, text, unfurl_links: false });
+        } catch (err) {
+          logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'live-report feedback maintainer DM failed');
+        }
+      })();
+
+      return res.json({ ok: true, id: inserted.id });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error({ err: msg }, '/r/:slug/feedback failed');
+      return res.status(500).json({ error: 'internal', detail: msg });
+    }
+  });
+
+  // GET / — redirect bare-domain hits to the reports index. The Live Reports
+  // app is the only public surface served from this domain (reports.gantri.com),
+  // so a 404 at the root is unhelpful.
+  app.get('/', (_req, res) => res.redirect(301, '/r'));
 
   // GET /r — index (SPA shell, same bundle, the SPA detects no :slug and shows index page)
   app.get('/r', (_req, res) => {

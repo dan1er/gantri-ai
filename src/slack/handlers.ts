@@ -150,7 +150,7 @@ export function createDmHandler(deps: HandlerDeps) {
         const timing = t.elapsedMs != null ? ` _(${(t.elapsedMs / 1000).toFixed(1)}s)_` : '';
         return `${icon} \`${t.name}\`${timing}`;
       });
-      const trailing = toolHistory.some((t) => t.state === 'running') ? '' : '\n_(synthesizing answer…)_';
+      const trailing = toolHistory.some((t) => t.state === 'running') ? '' : '\n_synthesizing answer…_';
       return lines.join('\n') + trailing;
     };
     const flushProgress = () => {

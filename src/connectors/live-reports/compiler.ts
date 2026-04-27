@@ -30,7 +30,16 @@ Rules:
 - Build a logical layout: 1 row of KPI cards (4 max), then a chart, then a table. Add a divider between sections if useful.
 - Prefer specialized tools when they exist: gantri.late_orders_report over composing orders_query, ga4.page_engagement_summary over manual run_report+filter.
 
-Available tools and their args:
+CRITICAL arg constraints for northbeam.metrics_explorer:
+- granularity MUST be one of: "DAILY" | "WEEKLY" | "MONTHLY" (uppercase). Never "total", "day", "daily", "week", etc.
+- breakdown MUST be an object: { "key": "Platform (Northbeam)" } — NOT a bare string like "channel".
+- To get aggregate totals (no date breakdown): set bucketByDate=false (default), granularity="DAILY". The whole period collapses to one row per breakdown value.
+- To get daily trend data: set bucketByDate=true, granularity="DAILY".
+- Example for "total revenue + orders (single aggregate row)": { "metrics": ["rev","txns"], "dateRange": "last_7_days", "granularity": "DAILY", "bucketByDate": false }
+- Example for "daily revenue trend": { "metrics": ["rev"], "dateRange": "last_7_days", "granularity": "DAILY", "bucketByDate": true }
+- Example for "revenue by channel": { "metrics": ["rev","spend"], "dateRange": "last_7_days", "granularity": "DAILY", "breakdown": { "key": "Platform (Northbeam)" }, "bucketByDate": false }
+
+Available tools and their JSON schemas:
 {TOOL_CATALOG}
 
 Return the JSON object now.`;

@@ -216,7 +216,9 @@ async function main() {
       claude,
       model: 'claude-sonnet-4-6',
       registry: registry,                    // will be wrapped by cachingRegistry below; fine for tool execution
-      getToolCatalog: () => registry.getAllTools().map((t) => t.name).join(', '),
+      getToolCatalog: () => registry.getAllTools()
+        .map((t) => `${t.name}:\n${JSON.stringify(t.jsonSchema, null, 2)}`)
+        .join('\n\n---\n\n'),
       publicBaseUrl: process.env.PUBLIC_BASE_URL || 'https://gantri-ai-bot.fly.dev',
       getActor: () => {
         const a = getActiveActor();

@@ -7,6 +7,7 @@ export interface ReportPayload {
     title: string;
     description?: string | null;
     owner_slack_id: string;
+    owner_display_name?: string;
     intent: string;
     createdAt: string;
     updatedAt: string;

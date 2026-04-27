@@ -7,6 +7,7 @@ interface ReportRow {
   title: string;
   description?: string | null;
   ownerSlackId: string;
+  ownerDisplayName?: string;
   createdAt: string;
   lastVisitedAt?: string | null;
   visitCount: number;
@@ -20,16 +21,18 @@ export function ReportsIndex({ token }: { token: string | null }) {
 
   useEffect(() => {
     (async () => {
-      if (!token) {
-        setErr('No access token. Append ?t=<viewer-token> to the URL. The viewer token is shared with the team — DM @gantri-ai if you need it.');
-        setLoading(false);
-        return;
-      }
       try {
-        const res = await fetch(`/r/all.json?t=${encodeURIComponent(token)}`);
+        // Try the cookie-based path first (set when a valid report URL was visited).
+        // Fall back to ?t=<token> if the caller passed one explicitly.
+        const url = token ? `/r/all.json?t=${encodeURIComponent(token)}` : '/r/all.json';
+        const res = await fetch(url, { credentials: 'same-origin' });
         if (!res.ok) {
-          const body = await res.text();
-          setErr(`HTTP ${res.status}: ${body}`);
+          if (res.status === 401) {
+            setErr('No access token. Open a report URL first (you\'ll get a cookie), or DM @gantri-ai for the viewer link.');
+          } else {
+            const body = await res.text();
+            setErr(`HTTP ${res.status}: ${body}`);
+          }
         } else {
           const json = await res.json();
           setReports(json.reports);
@@ -68,7 +71,7 @@ export function ReportsIndex({ token }: { token: string | null }) {
                 </div>
                 {r.description && <p className="text-sm text-gray-500 mt-2 line-clamp-2">{r.description}</p>}
                 <div className="mt-4 flex items-center gap-3 text-xs text-gray-400">
-                  <span>by <span className="text-gray-600">@{r.ownerSlackId}</span></span>
+                  <span>by <span className="text-gray-600">{r.ownerDisplayName ?? r.ownerSlackId}</span></span>
                   <span>·</span>
                   <span>{fmtRelativeTime(r.createdAt)}</span>
                   {r.lastVisitedAt && <><span>·</span><span>last viewed {fmtRelativeTime(r.lastVisitedAt)}</span></>}

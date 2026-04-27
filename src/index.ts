@@ -308,6 +308,7 @@ async function main() {
     repo: publishedReportsRepo,
     registry: cachingRegistry,
     webDistDir,
+    slackClient: app.client as unknown as never,
   });
 
   await app.start(env.PORT);

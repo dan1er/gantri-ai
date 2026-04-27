@@ -5,7 +5,7 @@ interface Props {
   onClose: () => void;
   intent: string;
   spec: any;
-  meta: { owner_slack_id: string; createdAt: string; lastRefreshedAt: string; sources: string[] };
+  meta: { owner_slack_id: string; owner_display_name?: string; createdAt: string; lastRefreshedAt: string; sources: string[] };
   canModify: boolean;
 }
 
@@ -37,7 +37,7 @@ export function SpecDrawer({ open, onClose, intent, spec, meta, canModify }: Pro
           <section>
             <h3 className="text-xs uppercase tracking-wider text-gray-500 mb-3 font-medium">Provenance</h3>
             <dl className="text-sm space-y-1.5">
-              <div><dt className="inline text-gray-500">Created by </dt><dd className="inline text-blue-600 font-medium">@{meta.owner_slack_id}</dd></div>
+              <div><dt className="inline text-gray-500">Created by </dt><dd className="inline text-blue-600 font-medium">{meta.owner_display_name ?? meta.owner_slack_id}</dd></div>
               <div><dt className="inline text-gray-500">Created </dt><dd className="inline text-gray-700">{new Date(meta.createdAt).toLocaleString('en-US')}</dd></div>
               <div><dt className="inline text-gray-500">Last refreshed </dt><dd className="inline text-gray-700">{new Date(meta.lastRefreshedAt).toLocaleString('en-US')}</dd></div>
               <div><dt className="inline text-gray-500">Spec version </dt><dd className="inline font-mono text-gray-700">v{spec?.version ?? 1}</dd></div>

@@ -108,6 +108,7 @@ function ReportPage({ slug, token }: { slug: string; token: string }) {
       {data && (
         <ReportFooter
           ownerSlackId={data.meta.owner_slack_id}
+          ownerDisplayName={data.meta.owner_display_name}
           createdAt={data.meta.createdAt}
           lastRefreshedAt={data.meta.lastRefreshedAt}
           intent={data.meta.intent}
@@ -122,7 +123,7 @@ function ReportPage({ slug, token }: { slug: string; token: string }) {
           onClose={() => { setDrawerOpen(false); if (window.location.hash === '#spec') history.replaceState(null, '', window.location.pathname + window.location.search); }}
           intent={data.meta.intent}
           spec={data.meta.spec}
-          meta={{ owner_slack_id: data.meta.owner_slack_id, createdAt: data.meta.createdAt, lastRefreshedAt: data.meta.lastRefreshedAt, sources: data.meta.sources }}
+          meta={{ owner_slack_id: data.meta.owner_slack_id, owner_display_name: data.meta.owner_display_name, createdAt: data.meta.createdAt, lastRefreshedAt: data.meta.lastRefreshedAt, sources: data.meta.sources }}
           canModify={false}
         />
       )}

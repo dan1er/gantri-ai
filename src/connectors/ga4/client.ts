@@ -34,6 +34,12 @@ export interface Ga4ReportResponse {
   metadata?: Record<string, unknown>;
 }
 
+export interface Ga4RealtimeReportRequest {
+  dimensions?: Ga4Dimension[];
+  metrics: Ga4Metric[];
+  limit?: number;
+}
+
 export class Ga4ApiError extends Error {
   constructor(public readonly status: number, public readonly body: unknown, message: string) {
     super(message);
@@ -84,6 +90,10 @@ export class Ga4Client {
 
   async runReport(req: Ga4ReportRequest): Promise<Ga4ReportResponse> {
     return this.post<Ga4ReportResponse>(`:runReport`, req);
+  }
+
+  async runRealtimeReport(req: Ga4RealtimeReportRequest): Promise<Ga4ReportResponse> {
+    return this.post<Ga4ReportResponse>(`:runRealtimeReport`, req);
   }
 
   private async post<T>(suffix: string, body: unknown): Promise<T> {

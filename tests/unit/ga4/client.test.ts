@@ -86,3 +86,29 @@ describe('Ga4Client.runReport', () => {
     ).rejects.toThrow(/403.*PERMISSION_DENIED/);
   });
 });
+
+describe('Ga4Client.runRealtimeReport', () => {
+  it('POSTs to runRealtimeReport endpoint', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      expect(url).toBe('https://analyticsdata.googleapis.com/v1beta/properties/12345:runRealtimeReport');
+      return new Response(JSON.stringify({
+        dimensionHeaders: [{ name: 'country' }],
+        metricHeaders: [{ name: 'activeUsers', type: 'TYPE_INTEGER' }],
+        rows: [{ dimensionValues: [{ value: 'United States' }], metricValues: [{ value: '12' }] }],
+        rowCount: 1,
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    const client = new Ga4Client({
+      propertyId: '12345',
+      serviceAccountKey: JSON.stringify(FAKE_KEY),
+      authFactory: () => ({ getRequestHeaders: async () => ({ Authorization: 'Bearer x' }) }) as never,
+      fetchImpl: fetchMock as never,
+    });
+    const out = await client.runRealtimeReport({
+      dimensions: [{ name: 'country' }],
+      metrics: [{ name: 'activeUsers' }],
+    });
+    expect(out.rows).toHaveLength(1);
+    expect(out.rows[0].metricValues[0].value).toBe('12');
+  });
+});

@@ -10,17 +10,42 @@ import { ReportFooter } from './components/ReportFooter.js';
 import { SpecDrawer } from './components/SpecDrawer.js';
 import { ErrorState } from './components/ErrorState.js';
 import { LoadingShimmer } from './components/LoadingShimmer.js';
+import { ReportsIndex } from './components/ReportsIndex.js';
 
-function readSlugAndToken(): { slug: string; token: string } | null {
+type Route =
+  | { kind: 'index'; token: string | null }
+  | { kind: 'report'; slug: string; token: string }
+  | { kind: 'invalid' };
+
+function readRoute(): Route {
   const m = window.location.pathname.match(/^\/r\/([^/]+)\/?$/);
-  if (!m) return null;
-  const slug = m[1];
+  if (!m) {
+    if (window.location.pathname === '/r' || window.location.pathname === '/r/') {
+      const token = new URLSearchParams(window.location.search).get('t');
+      return { kind: 'index', token };
+    }
+    return { kind: 'invalid' };
+  }
   const token = new URLSearchParams(window.location.search).get('t') ?? '';
-  return { slug, token };
+  return { kind: 'report', slug: m[1], token };
 }
 
 export function App() {
-  const ctx = readSlugAndToken();
+  const route = readRoute();
+  if (route.kind === 'invalid') return <Page><ErrorState title="Invalid URL" detail="Expected /r or /r/<slug>" /></Page>;
+  if (route.kind === 'index') return <Page><ReportsIndex token={route.token} /></Page>;
+  return <ReportPage slug={route.slug} token={route.token} />;
+}
+
+function Page({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="min-h-screen bg-gantri-paper">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10">{children}</div>
+    </div>
+  );
+}
+
+function ReportPage({ slug, token }: { slug: string; token: string }) {
   const [data, setData] = useState<ReportPayload | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -28,10 +53,9 @@ export function App() {
   const [drawerOpen, setDrawerOpen] = useState(window.location.hash === '#spec');
 
   async function load(refresh: boolean) {
-    if (!ctx) return;
     if (refresh) setRefreshing(true); else setLoading(true);
     try {
-      const payload = await fetchReport(ctx.slug, ctx.token, refresh);
+      const payload = await fetchReport(slug, token, refresh);
       setData(payload);
       setErr(null);
     } catch (e) {
@@ -41,7 +65,6 @@ export function App() {
       setRefreshing(false);
     }
   }
-
   useEffect(() => { void load(false); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
   useEffect(() => {
     const onHash = () => setDrawerOpen(window.location.hash === '#spec');
@@ -49,12 +72,9 @@ export function App() {
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
-  if (!ctx) return <div className="p-10"><ErrorState title="Invalid URL" detail="Expected /r/<slug>" /></div>;
-  if (err) return <div className="p-10"><ErrorState title="Couldn't load this report" detail={err} /></div>;
-
+  if (err) return <Page><ErrorState title="Couldn't load this report" detail={err} /></Page>;
   return (
-    <div className="min-h-screen bg-gantri-paper">
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
+    <Page>
       {data && (
         <ReportHeader
           title={data.meta.title}
@@ -73,9 +93,7 @@ export function App() {
               : typeof block.data === 'string' ? block.data.split('.')[0]
               : null;
             const stepError = stepId ? data.errors.find((e) => e.stepId === stepId) : null;
-            if (stepError) {
-              return <div key={i} className="col-span-4"><ErrorState title={`Couldn't load: ${stepError.tool}`} detail={stepError.message} /></div>;
-            }
+            if (stepError) return <div key={i} className="col-span-4"><ErrorState title={`Couldn't load: ${stepError.tool}`} detail={stepError.message} /></div>;
             switch (block.type) {
               case 'kpi': return <KpiBlock key={i} block={block} dataResults={data.dataResults} />;
               case 'chart': return <div key={i} className="col-span-4"><ChartBlock block={block} dataResults={data.dataResults} /></div>;
@@ -108,7 +126,6 @@ export function App() {
           canModify={false}
         />
       )}
-    </div>
-    </div>
+    </Page>
   );
 }

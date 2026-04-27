@@ -205,6 +205,8 @@ export class LiveReportsConnector implements Connector {
       accessToken,
     });
 
+    const verificationIssues = this.verifyResolvedRefs(spec, smoke.dataResults);
+
     const url = `${this.deps.publicBaseUrl}/r/${created.slug}?t=${accessToken}`;
     logger.info({ slug, owner: actor.slackUserId, attempts: compileOut.attempts, ms: smoke.meta.durationMs }, 'live-report published');
     return {
@@ -214,6 +216,7 @@ export class LiveReportsConnector implements Connector {
       url,
       compileAttempts: compileOut.attempts,
       smokeWarnings: smoke.errors,
+      verificationIssues,
     };
   }
   private async listMine() {
@@ -259,6 +262,7 @@ export class LiveReportsConnector implements Connector {
     if (smoke.errors.length === compileOut.spec.data.length) {
       return { error: { code: 'SMOKE_FAILED', message: 'Every step errored. Spec was not saved.' }, errors: smoke.errors };
     }
+    const verificationIssues = this.verifyResolvedRefs(compileOut.spec, smoke.dataResults);
     const actor = this.deps.getActor()!;
     const newToken = args.regenerateToken ? generateAccessToken() : undefined;
     const updated = await this.deps.repo.replaceSpec({
@@ -275,7 +279,53 @@ export class LiveReportsConnector implements Connector {
       title: updated.title,
       url: `${this.deps.publicBaseUrl}/r/${updated.slug}?t=${updated.accessToken}`,
       tokenRotated: !!newToken,
+      verificationIssues,
     };
+  }
+
+  private verifyResolvedRefs(spec: import('../../reports/live/spec.js').LiveReportSpec, dataResults: Record<string, unknown>) {
+    const issues: Array<{ blockIndex: number; ref: string; reason: string }> = [];
+    const tryResolve = (ref: string): unknown => {
+      if (!ref || typeof ref !== 'string') return undefined;
+      const segs = ref.split('.');
+      if (segs.some((s) => !s)) return undefined;
+      let cur: unknown = dataResults;
+      for (const raw of segs) {
+        const m = raw.match(/^([^[\]]+)((?:\[\d+\])*)$/);
+        if (!m) return undefined;
+        if (cur == null || typeof cur !== 'object') return undefined;
+        cur = (cur as Record<string, unknown>)[m[1]];
+        const idxs = m[2].match(/\[(\d+)\]/g) ?? [];
+        for (const ix of idxs) {
+          const i = Number(ix.slice(1, -1));
+          if (!Array.isArray(cur)) return undefined;
+          cur = cur[i];
+        }
+      }
+      return cur;
+    };
+    spec.ui.forEach((b: any, idx: number) => {
+      const checks: string[] = [];
+      if (b.type === 'kpi') checks.push(b.value);
+      if (b.type === 'chart' || b.type === 'table') checks.push(b.data);
+      if (b.type === 'kpi' && b.delta?.from) checks.push(b.delta.from);
+      for (const ref of checks) {
+        const v = tryResolve(ref);
+        if (v === undefined) issues.push({ blockIndex: idx, ref, reason: 'ref_undefined' });
+        else if (Array.isArray(v) && v.length === 0 && (b.type === 'chart' || b.type === 'table')) issues.push({ blockIndex: idx, ref, reason: 'empty_array' });
+      }
+      // Also check: for tables, do columns reference fields that exist in the first row?
+      if (b.type === 'table') {
+        const rows = tryResolve(b.data);
+        if (Array.isArray(rows) && rows.length > 0) {
+          const sample = rows[0] as Record<string, unknown>;
+          for (const col of b.columns) {
+            if (!(col.field in sample)) issues.push({ blockIndex: idx, ref: `${b.data}[].${col.field}`, reason: 'column_field_missing_in_data' });
+          }
+        }
+      }
+    });
+    return issues;
   }
 
   private async archive(args: ArchiveArgs) {

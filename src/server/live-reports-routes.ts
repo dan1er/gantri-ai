@@ -56,6 +56,37 @@ export function mountLiveReportsRoutes(app: Express, deps: LiveReportsRoutesDeps
     }
   });
 
+  // GET /r — index (SPA shell, same bundle, the SPA detects no :slug and shows index page)
+  app.get('/r', (_req, res) => {
+    res.sendFile(path.join(deps.webDistDir, 'index.html'));
+  });
+
+  // GET /r/all.json — list of all non-archived reports (token-gated)
+  app.get('/r/all.json', async (req, res) => {
+    try {
+      const token = String(req.query.t ?? '');
+      const expected = process.env.LIVE_REPORTS_VIEWER_TOKEN;
+      if (!expected) return res.status(503).json({ error: 'viewer_token_not_configured', detail: 'Set LIVE_REPORTS_VIEWER_TOKEN env var' });
+      if (token !== expected) return res.status(401).json({ error: 'unauthorized' });
+      const all = await deps.repo.listAll();
+      return res.json({
+        reports: all.map((r) => ({
+          slug: r.slug,
+          title: r.title,
+          description: r.description,
+          ownerSlackId: r.ownerSlackId,
+          createdAt: r.createdAt,
+          lastVisitedAt: r.lastVisitedAt,
+          visitCount: r.visitCount,
+          url: `/r/${r.slug}?t=${r.accessToken}`,
+        })),
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return res.status(500).json({ error: 'internal', detail: msg });
+    }
+  });
+
   // GET /r/:slug — SPA shell.
   app.get('/r/:slug', (_req, res) => {
     res.sendFile(path.join(deps.webDistDir, 'index.html'));

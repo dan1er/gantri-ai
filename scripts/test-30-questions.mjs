@@ -23,6 +23,8 @@ import { GantriPorterConnector } from '../dist/connectors/gantri-porter/gantri-p
 import { GrafanaConnector } from '../dist/connectors/grafana/grafana-connector.js';
 import { SalesReportConnector } from '../dist/connectors/sales-report/sales-report-connector.js';
 import { LateOrdersConnector } from '../dist/connectors/late-orders/late-orders-connector.js';
+import { Ga4Client } from '../dist/connectors/ga4/client.js';
+import { Ga4Connector } from '../dist/connectors/ga4/connector.js';
 import { RollupRepo } from '../dist/storage/rollup-repo.js';
 import { Orchestrator } from '../dist/orchestrator/orchestrator.js';
 
@@ -97,6 +99,7 @@ async function main() {
     nbApiKey, nbDataClientId,
     porterUrl, porterEmail, porterPw,
     grafanaUrl, grafanaToken, grafanaPgUid,
+    ga4PropertyId, ga4ServiceAccountKey,
   ] = await Promise.all([
     readVaultSecret(supabase, 'NORTHBEAM_API_KEY'),
     readVaultSecret(supabase, 'NORTHBEAM_DATA_CLIENT_ID'),
@@ -106,6 +109,8 @@ async function main() {
     readVaultSecret(supabase, 'GRAFANA_URL'),
     readVaultSecret(supabase, 'GRAFANA_TOKEN'),
     readVaultSecret(supabase, 'GRAFANA_POSTGRES_DS_UID'),
+    readVaultSecret(supabase, 'GA4_PROPERTY_ID').catch(() => null),
+    readVaultSecret(supabase, 'GA4_SERVICE_ACCOUNT_KEY').catch(() => null),
   ]);
 
   const registry = new ConnectorRegistry();
@@ -124,6 +129,15 @@ async function main() {
   registry.register(new SalesReportConnector({ grafana, nb: nbClient }));
   registry.register(new MarketingAnalysisConnector({ nb: nbClient }));
   registry.register(new LateOrdersConnector({ grafana }));
+
+  if (ga4PropertyId && ga4ServiceAccountKey) {
+    registry.register(new Ga4Connector({
+      client: new Ga4Client({ propertyId: ga4PropertyId, serviceAccountKey: ga4ServiceAccountKey }),
+    }));
+    console.log(`GA4 connector registered (property ${ga4PropertyId})`);
+  } else {
+    console.log('GA4 not configured — skipping');
+  }
 
   // Caching wrapper (matches index.ts setup)
   const cache = new TtlCache(supabase);

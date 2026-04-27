@@ -31,3 +31,58 @@ describe('Ga4Client.getAccessToken', () => {
     expect(getRequestHeadersMock).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('Ga4Client.runReport', () => {
+  it('POSTs to runReport with auth header and parses the response', async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toBe('https://analyticsdata.googleapis.com/v1beta/properties/12345:runReport');
+      expect(init?.method).toBe('POST');
+      const headers = new Headers(init?.headers);
+      expect(headers.get('authorization')).toBe('Bearer abc');
+      expect(headers.get('content-type')).toBe('application/json');
+      const body = JSON.parse(init?.body as string);
+      expect(body).toEqual({
+        dateRanges: [{ startDate: '7daysAgo', endDate: 'today' }],
+        dimensions: [{ name: 'sessionDefaultChannelGroup' }],
+        metrics: [{ name: 'sessions' }],
+        limit: 100,
+      });
+      return new Response(JSON.stringify({
+        dimensionHeaders: [{ name: 'sessionDefaultChannelGroup' }],
+        metricHeaders: [{ name: 'sessions', type: 'TYPE_INTEGER' }],
+        rows: [{ dimensionValues: [{ value: 'Direct' }], metricValues: [{ value: '1234' }] }],
+        rowCount: 1,
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    const client = new Ga4Client({
+      propertyId: '12345',
+      serviceAccountKey: JSON.stringify(FAKE_KEY),
+      authFactory: () => ({ getRequestHeaders: async () => ({ Authorization: 'Bearer abc' }) }) as never,
+      fetchImpl: fetchMock as never,
+    });
+    const out = await client.runReport({
+      dateRanges: [{ startDate: '7daysAgo', endDate: 'today' }],
+      dimensions: [{ name: 'sessionDefaultChannelGroup' }],
+      metrics: [{ name: 'sessions' }],
+      limit: 100,
+    });
+    expect(out.rowCount).toBe(1);
+    expect(out.rows[0].dimensionValues[0].value).toBe('Direct');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('throws Ga4ApiError with status + body on non-2xx', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response('{"error":{"message":"PERMISSION_DENIED","code":403}}', { status: 403 }),
+    );
+    const client = new Ga4Client({
+      propertyId: '12345',
+      serviceAccountKey: JSON.stringify(FAKE_KEY),
+      authFactory: () => ({ getRequestHeaders: async () => ({ Authorization: 'Bearer x' }) }) as never,
+      fetchImpl: fetchMock as never,
+    });
+    await expect(
+      client.runReport({ dateRanges: [{ startDate: 'today', endDate: 'today' }], metrics: [{ name: 'sessions' }] }),
+    ).rejects.toThrow(/403.*PERMISSION_DENIED/);
+  });
+});

@@ -12,6 +12,9 @@ interface Props {
   refreshing: boolean;
   loading?: boolean;
   onShowSpec: () => void;
+  /** When false, the report's data steps don't reference $REPORT_RANGE — the
+   *  date picker and the period subtitle would be misleading, so we hide them. */
+  parametric?: boolean;
 }
 
 function Spinner() {
@@ -36,7 +39,7 @@ const RANGE_PRESETS: Array<{ key: string; label: string }> = [
   { key: 'year_to_date', label: 'Year to date' },
 ];
 
-export function ReportHeader({ title, subtitle, rangeLabel, currentRange, lastRefreshedAt, onRefresh, onChangeRange, refreshing, loading, onShowSpec }: Props) {
+export function ReportHeader({ title, subtitle, rangeLabel, currentRange, lastRefreshedAt, onRefresh, onChangeRange, refreshing, loading, onShowSpec, parametric = true }: Props) {
   const isBusy = !!loading || !!refreshing;
   return (
     <header className="mb-10">
@@ -45,15 +48,17 @@ export function ReportHeader({ title, subtitle, rangeLabel, currentRange, lastRe
           <img src="/r/logo-name.png" alt="Gantri" className="h-16 w-auto" />
         </a>
         <div className="flex items-center gap-3">
-          <select
-            className="text-xs border border-gray-300 rounded-md px-2 py-1.5 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-500 disabled:opacity-60"
-            value={currentRange}
-            onChange={(e) => onChangeRange(e.target.value)}
-            aria-label="Date range"
-            disabled={isBusy}
-          >
-            {RANGE_PRESETS.map((p) => <option key={p.key} value={p.key}>{p.label}</option>)}
-          </select>
+          {parametric && (
+            <select
+              className="text-xs border border-gray-300 rounded-md px-2 py-1.5 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-500 disabled:opacity-60"
+              value={currentRange}
+              onChange={(e) => onChangeRange(e.target.value)}
+              aria-label="Date range"
+              disabled={isBusy}
+            >
+              {RANGE_PRESETS.map((p) => <option key={p.key} value={p.key}>{p.label}</option>)}
+            </select>
+          )}
           {isBusy ? (
             <span className="inline-flex items-center gap-1.5 text-xs text-blue-600 font-medium" aria-live="polite">
               <Spinner />
@@ -71,7 +76,7 @@ export function ReportHeader({ title, subtitle, rangeLabel, currentRange, lastRe
           <h1 className="text-3xl font-semibold tracking-tight text-gantri-ink">{title}</h1>
           {isBusy && <Spinner />}
         </div>
-        <p className="text-sm text-blue-600 mt-2 font-medium">{rangeLabel}</p>
+        {parametric && <p className="text-sm text-blue-600 mt-2 font-medium">{rangeLabel}</p>}
         {subtitle && <p className="text-base text-gray-500 mt-2 max-w-3xl leading-relaxed">{subtitle}</p>}
       </div>
     </header>

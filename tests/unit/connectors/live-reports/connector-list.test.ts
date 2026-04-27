@@ -11,6 +11,7 @@ function makeConn(reports: any[]) {
     publicBaseUrl: 'https://x',
     getActor: () => ({ slackUserId: 'UA' }),
     getRoleForActor: async () => 'user',
+    slackClient: { conversations: { open: vi.fn() }, chat: { postMessage: vi.fn() } } as never,
   });
 }
 

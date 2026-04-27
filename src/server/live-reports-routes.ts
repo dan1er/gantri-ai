@@ -2,6 +2,7 @@ import path from 'node:path';
 import type { Express } from 'express';
 import type { PublishedReportsRepo } from '../storage/repositories/published-reports.js';
 import { runLiveSpec } from '../reports/live/runner.js';
+import { substituteDateMacros } from '../reports/live/date-macros.js';
 import { logger } from '../logger.js';
 
 interface MinimalRegistry {
@@ -92,17 +93,23 @@ export function mountLiveReportsRoutes(app: Express, deps: LiveReportsRoutesDeps
       const refresh = String(req.query.refresh ?? '') === '1';
       const report = await deps.repo.getBySlug(slug);
       if (!report) return res.status(404).json({ error: 'not_found' });
-      if (token !== report.accessToken) return res.status(401).json({ error: 'unauthorized' });
-      // Set the viewer cookie so a subsequent visit to /r (the index) works
-      // without re-prompting for a token. Anyone with a valid report-token is
-      // already trusted to see the index.
+      // Auth: accept EITHER the per-report ?t= token OR the durable
+      // `lr_viewer` cookie (set on any prior tokenized visit). This means
+      // someone who clicked one tokenized report link gets to view ALL
+      // reports for the cookie's lifetime — bookmark a slug, share a
+      // bare URL, etc. Tokens still work for first-time / external users.
       const viewerToken = process.env.LIVE_REPORTS_VIEWER_TOKEN;
+      const cookieValue = parseCookie(req.headers.cookie, VIEWER_COOKIE);
+      const tokenValid = token !== '' && token === report.accessToken;
+      const cookieValid = !!viewerToken && cookieValue === viewerToken;
+      if (!tokenValid && !cookieValid) return res.status(401).json({ error: 'unauthorized' });
+      // Refresh the cookie on every authorized visit so it slides forward and
+      // sliding-window-style stays valid as long as the user keeps visiting.
       if (viewerToken) {
         res.cookie?.(VIEWER_COOKIE, viewerToken, {
-          httpOnly: true, secure: true, sameSite: 'lax', maxAge: 7 * 24 * 60 * 60 * 1000,
+          httpOnly: true, secure: true, sameSite: 'lax', maxAge: 30 * 24 * 60 * 60 * 1000,
         });
-        // Fallback if cookie() helper isn't available (depends on express version)
-        if (!res.cookie) res.set('Set-Cookie', `${VIEWER_COOKIE}=${viewerToken}; Path=/; Max-Age=${7 * 24 * 60 * 60}; HttpOnly; Secure; SameSite=Lax`);
+        if (!res.cookie) res.set('Set-Cookie', `${VIEWER_COOKIE}=${viewerToken}; Path=/; Max-Age=${30 * 24 * 60 * 60}; HttpOnly; Secure; SameSite=Lax`);
       }
       const effectiveRange = parseRangeFromQuery(req.query as { range?: unknown; from?: unknown; to?: unknown }) ?? report.spec.dateRange ?? 'last_7_days';
       const [result, ownerName] = await Promise.all([
@@ -111,15 +118,23 @@ export function mountLiveReportsRoutes(app: Express, deps: LiveReportsRoutesDeps
       ]);
       void Promise.resolve(deps.repo.recordVisit(slug)).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'recordVisit failed'));
       res.set('Cache-Control', refresh ? 'no-store' : `public, max-age=${report.spec.cacheTtlSec ?? 300}`);
+      // Resolve $DATE:… macros in the user-visible payload (title, description,
+      // ui block markdown, etc.) — the runner already resolves them in step
+      // args, but the LLM sometimes embeds them in prose too. Single `now`
+      // anchor keeps everything internally consistent.
+      const macroNow = new Date();
+      const resolvedUi = substituteDateMacros(result.ui, macroNow);
+      const resolvedTitle = typeof substituteDateMacros(report.title, macroNow) === 'string' ? substituteDateMacros(report.title, macroNow) as string : report.title;
+      const resolvedDescription = report.description ? (substituteDateMacros(report.description, macroNow) as string) : report.description;
       return res.json({
         dataResults: result.dataResults,
-        ui: result.ui,
+        ui: resolvedUi,
         errors: result.errors,
         meta: {
           ...result.meta,
           slug: report.slug,
-          title: report.title,
-          description: report.description,
+          title: resolvedTitle,
+          description: resolvedDescription,
           owner_slack_id: report.ownerSlackId,
           owner_display_name: ownerName,
           intent: report.intent,
@@ -127,6 +142,7 @@ export function mountLiveReportsRoutes(app: Express, deps: LiveReportsRoutesDeps
           updatedAt: report.updatedAt,
           lastRefreshedAt: result.meta.generatedAt,
           effectiveRange,
+          parametric: JSON.stringify(report.spec.data ?? []).includes('$REPORT_RANGE'),
         },
       });
     } catch (err) {

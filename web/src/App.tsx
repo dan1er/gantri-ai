@@ -118,6 +118,7 @@ function ReportPage({ slug, token }: { slug: string; token: string }) {
           refreshing={refreshing}
           loading={loading}
           onShowSpec={() => { window.location.hash = '#spec'; setDrawerOpen(true); }}
+          parametric={data.meta.parametric !== false}
         />
       )}
       {loading && !data && <LoadingShimmer />}
@@ -142,7 +143,7 @@ function ReportPage({ slug, token }: { slug: string; token: string }) {
               case 'kpi': return <KpiBlock key={i} block={block} dataResults={data.dataResults} />;
               case 'chart': return <div key={i} className="col-span-4"><ChartBlock block={block} dataResults={data.dataResults} /></div>;
               case 'table': return <div key={i} className="col-span-4"><TableBlock block={block} dataResults={data.dataResults} /></div>;
-              case 'text': return <div key={i} className="col-span-4"><TextBlock block={block} /></div>;
+              case 'text': return <div key={i} className="col-span-4"><TextBlock block={block} dataResults={data.dataResults} /></div>;
               case 'divider': return <div key={i} className="col-span-4"><DividerBlock /></div>;
               default: return null;
             }

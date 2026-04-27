@@ -26,6 +26,7 @@ function makeConnector(opts: { repo: any; getActor?: () => { slackUserId: string
     publicBaseUrl: 'https://gantri-ai-bot.fly.dev',
     getActor: opts.getActor ?? (() => ({ slackUserId: 'UDANNY' })),
     getRoleForActor: opts.isAdmin ?? (async () => 'user'),
+    slackClient: { conversations: { open: vi.fn() }, chat: { postMessage: vi.fn() } } as never,
   });
 }
 

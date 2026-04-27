@@ -46,6 +46,19 @@ export function ChartBlock({ block, dataResults }: { block: any; dataResults: Re
     return out;
   });
 
+  // For time-series charts (line/area/bar with date-like x), sort ascending so
+  // the x-axis runs left→right oldest→newest. NB returns rows newest-first.
+  // ISO dates (YYYY-MM-DD) sort correctly as strings; numbers as numbers.
+  if (!isHorizontal && block.variant !== 'donut' && typeof block.x === 'string' && processedData.length > 1) {
+    processedData.sort((a, b) => {
+      const ax = (a as any)[block.x];
+      const bx = (b as any)[block.x];
+      if (ax === bx) return 0;
+      if (typeof ax === 'number' && typeof bx === 'number') return ax - bx;
+      return String(ax) < String(bx) ? -1 : 1;
+    });
+  }
+
   const common = {
     data: processedData,
     index: block.x,

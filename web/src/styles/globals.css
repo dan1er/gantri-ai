@@ -9,12 +9,38 @@ body { font-feature-settings: 'cv11', 'ss01'; background: #FAFAFA; }
 .tremor-Card-root { box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.04), 0 1px 2px -1px rgba(0, 0, 0, 0.04) !important; border: 1px solid rgb(229 231 235) !important; }
 .tremor-Card-root:hover { box-shadow: 0 4px 12px -2px rgba(0, 0, 0, 0.06), 0 2px 4px -2px rgba(0, 0, 0, 0.04) !important; transition: box-shadow 0.2s ease; }
 
-/* Tremor chart polish */
+/* Tremor chart polish — Tremor renders its own custom tooltip via Recharts
+ * `content`, not the default one. Force opaque white background on every
+ * variant of tooltip wrapper so it never appears transparent. */
 .recharts-tooltip-wrapper { z-index: 30 !important; }
-.recharts-default-tooltip { background: white !important; border: 1px solid rgb(229 231 235) !important; border-radius: 8px !important; padding: 10px 12px !important; box-shadow: 0 4px 12px -2px rgba(0, 0, 0, 0.08) !important; font-size: 12px !important; }
+.recharts-tooltip-wrapper > div,
+.recharts-default-tooltip,
+[class*="tremor-ChartTooltip"] {
+  background-color: #ffffff !important;
+  border: 1px solid rgb(229 231 235) !important;
+  border-radius: 8px !important;
+  padding: 10px 12px !important;
+  box-shadow: 0 4px 12px -2px rgba(0, 0, 0, 0.08) !important;
+  font-size: 12px !important;
+  color: rgb(17 24 39) !important;
+}
 .recharts-tooltip-item { color: rgb(17 24 39) !important; padding: 2px 0 !important; }
 .recharts-cartesian-axis-tick text { font-size: 11px !important; fill: rgb(107 114 128) !important; }
 .recharts-legend-item-text { color: rgb(75 85 99) !important; font-size: 12px !important; }
 .tremor-Card-root { overflow: visible !important; }
 /* Make chart bars rounder + nicer */
 .recharts-bar-rectangle path { rx: 3; }
+
+/* Multi-series line/area charts: solid for series 1, dashed for series 2+.
+ * Comparison-friendly default — when two series have identical values
+ * (e.g. NB vs Porter parity), the overlapping lines are still distinguishable
+ * because one is dashed and slightly thinner.
+ * `!important` is required because Recharts' draw-on-mount animation sets
+ * `stroke-dasharray` inline (e.g. "1769px 0px"), which would otherwise win
+ * over the CSS rule. The selector targets every `.recharts-line` that comes
+ * AFTER another `.recharts-line` in the DOM, leaving series 1 solid. */
+.recharts-layer.recharts-line ~ .recharts-layer.recharts-line .recharts-line-curve,
+.recharts-layer.recharts-area ~ .recharts-layer.recharts-area .recharts-area-curve {
+  stroke-dasharray: 4 8 !important;
+  stroke-width: 1.5px !important;
+}

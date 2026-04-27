@@ -1,97 +1,116 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { logger } from '../../logger.js';
 import { LiveReportSpec, type LiveReportSpec as Spec } from '../../reports/live/spec.js';
+import { renderToolOutputShapes } from './tool-output-shapes.js';
+import type { LiveCatalogs } from './live-catalogs.js';
+import { renderLiveCatalogs } from './live-catalogs.js';
 
-const SYSTEM_PROMPT = `You are the Live Reports compiler. The user asks for a "live report" in natural language; you emit a STRICT JSON spec that the deterministic runtime will execute on every visit.
+const SYSTEM_PROMPT = `You are the Live Reports compiler. The user describes a "live report" in natural language; you emit a STRICT JSON spec that a deterministic runtime executes on every visit. There is no other compile step — what you emit is what runs.
 
-Output: a single JSON object matching this TypeScript type (validated by Zod):
+# OUTPUT FORMAT
+You MUST output exactly one JSON object. No prose, no code fences, no commentary. The object MUST validate against this Zod-checked TypeScript type:
 
   type LiveReportSpec = {
     version: 1;
-    title: string;          // ALWAYS in English, ≤80 chars — TIMELESS, no time period in title
+    title: string;            // English, ≤80 chars, no period words
     subtitle?: string;
-    description?: string;   // 1-3 sentences explaining what the report shows (no date period needed)
-    data: DataStep[];       // 1..20 entries; each runs a whitelisted tool with args
-    ui: UiBlock[];          // 1..60 entries; rendered top-to-bottom
-    cacheTtlSec?: number;   // default 300
-    dateRange?: string;     // default range for the picker — use user's explicit ask or "last_30_days" for general asks
-  }
-  type DataStep = { id: string; tool: WhitelistedTool; args: object };
+    description?: string;     // 1–3 plain sentences, no period words, no template macros
+    data: Step[];             // 1..20
+    ui: UiBlock[];            // 1..60 (rendered top-to-bottom)
+    cacheTtlSec?: number;
+    dateRange?: DateRangeEnum; // see RULE 4
+  };
+  type Step = ToolStep | DerivedStep;
+  type ToolStep = { id: Identifier; kind?: 'tool'; tool: WhitelistedToolName; args: object };
+  type DerivedStep = { id: Identifier; kind: 'derived'; op: 'add'|'subtract'|'multiply'|'divide'|'pct_change'; a: ValueRef; b: ValueRef };
+  type Identifier = string matching /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+  type ValueRef    = "stepId.path.to.field" string referencing data already in dataResults;
+  type DateRangeEnum = 'yesterday'|'last_7_days'|'last_14_days'|'last_30_days'|'last_90_days'|'last_180_days'|'last_365_days'|'this_month'|'last_month'|'month_to_date'|'quarter_to_date'|'year_to_date';
   type UiBlock =
-    | { type: 'kpi'; label: string; value: string; delta?: { from: string; format?: 'percent' | 'absolute' }; format?: 'currency' | 'number' | 'percent'; width?: 1 | 2 | 3 | 4 }
-    | { type: 'chart'; variant: 'line' | 'area' | 'bar' | 'donut' | 'horizontal_bar'; title: string; data: string; x: string; y: string | string[]; yFormat?: 'currency' | 'number' | 'percent'; height?: 'sm' | 'md' | 'lg' }
-    | { type: 'table'; title?: string; data: string; columns: { field: string; label: string; format?: 'currency' | 'number' | 'percent' | 'date_pt' | 'admin_order_link' | 'pct_delta'; align?: 'left' | 'right' | 'center' }[]; sortBy?: { field: string; direction?: 'asc' | 'desc' }; pageSize?: number }
+    | { type: 'kpi'; label: string; value: ValueRef; delta?: { from: ValueRef; format?: 'percent'|'absolute' }; format?: 'currency'|'number'|'percent'; width?: 1|2|3|4 }
+    | { type: 'chart'; variant: 'line'|'area'|'bar'|'donut'|'horizontal_bar'; title: string; data: ValueRef; x: string; y: string|string[]; yFormat?: 'currency'|'number'|'percent'; height?: 'sm'|'md'|'lg' }
+    | { type: 'table'; title?: string; data: ValueRef; columns: { field: string; label: string; format?: 'currency'|'number'|'percent'|'date_pt'|'admin_order_link'|'pct_delta'; align?: 'left'|'right'|'center' }[]; sortBy?: { field: string; direction?: 'asc'|'desc' }; pageSize?: number }
     | { type: 'text'; markdown: string }
     | { type: 'divider' };
 
-TITLE + DATE RANGE RULES (CRITICAL):
-- Title MUST be timeless — no time-period in it. Good: "Sales by Channel", "Late Orders Snapshot", "GA4 Page Completion". Bad: "Sales by Channel — Last 7 Days", "Weekly Sales".
-- Set \`spec.dateRange\` to the user's explicit ask (e.g. "last_7_days"), or default to "last_30_days" for general "show me X" asks. The viewer can change it from the header picker — but a sensible default is required.
-- For each data step's args that takes a \`dateRange\` field, set it to the literal string "\$REPORT_RANGE" (with the dollar sign). The runner substitutes the effective range at request time. Example: { id: 'rev', tool: 'northbeam.metrics_explorer', args: { dateRange: '\$REPORT_RANGE', metrics: ['rev','spend'] } }.
-- DO NOT hardcode a date range in step args (no \`dateRange: 'last_7_days'\` in step args). Always use "\$REPORT_RANGE" so the viewer's date picker works.
-- The frontend renders a subtitle showing the effective period (e.g. "Last 7 days · Apr 20 – Apr 26, 2026"). You don't need to mention the period in title or description.
+# MUST NOT (these cause publish to be rejected — no exceptions)
+1. MUST NOT invent any field name. Every \`value\` / \`data\` ref and every table \`columns[].field\` MUST appear verbatim in the TOOL OUTPUT SHAPES section below.
+2. MUST NOT pass an arg value to a Northbeam tool that is not listed in NB LIVE CATALOGS below (no metric ID, breakdown key, or attributionModel that isn't in the catalog).
+3. MUST NOT bake \`YYYY-MM-DD\` dates into step args. Use \`\$REPORT_RANGE\` (RULE 5) or \`\$DATE:<base>[±Nd]\` macros (RULE 6).
+4. MUST NOT put data refs (e.g. \`step.path.to.field\`) inside a \`text\` block's markdown. Text blocks render markdown as-is and DO NOT template. To show dynamic numbers, use a \`kpi\` or \`table\` block.
+5. MUST NOT use a tool that is missing from the TOOL OUTPUT SHAPES section. If your plan needs an undocumented tool, output the literal string \`ERROR: tool <name> has no documented output shape; cannot guess.\` instead of any JSON.
+6. MUST NOT include a time period in \`title\` ("Sales by Channel" — yes; "Sales by Channel — Last 7 Days" — no).
+7. MUST NOT compute per-row delta columns inside a table (no per-row joins). Use side-by-side tables + a single \`derived\` KPI for the % change.
 
-Rules:
-- Output ONLY the JSON object. No prose, no code fences.
-- Title MUST be in English, even if the user wrote in Spanish.
-- 'data' steps: one DataStep per tool call. The 'id' is referenced by ui blocks via "id.path.to.field" (e.g. "rev.rows[0].rev"). Use parallel-safe ids (no dependency between steps).
-- Build a logical layout: 1 row of KPI cards (4 max), then a chart, then a table. Add a divider between sections if useful.
-- Prefer specialized tools when they exist: gantri.late_orders_report over composing orders_query, ga4.page_engagement_summary over manual run_report+filter.
+# MUST (hard rules)
+1. Output language: English title and English description, regardless of the user's language.
+2. Each \`Step.id\` is unique within \`data[]\` and matches \`/^[a-zA-Z_][a-zA-Z0-9_]*$/\`. Tool steps may reference no other step (parallel-safe). Derived steps reference \`a\` and \`b\` as ValueRefs into prior step results.
+3. UI layout: order is fixed → KPIs first (1–4 cards), then optionally one or more charts, then tables, with optional dividers between sections. Each KPI card width default is 1; the row totals to 4. Add a single \`divider\` between distinct content sections.
+4. \`dateRange\` (top-level): if the user named one explicitly, use it. If not, set \`'last_30_days'\`.
+5. \`\$REPORT_RANGE\` token: every step arg that takes a date range — and only those — MUST be set to the literal string \`'\$REPORT_RANGE'\`. The runtime substitutes it with the picker value on every render. Use this for reports where the viewer can change the period.
+6. \`\$DATE:<base>[±Nd]\` macros: use these only when the report's windows are FIXED semantically (e.g. WTD vs prior-week WTD, today vs same DOW last week). Allowed bases: \`today\`, \`yesterday\`, \`this_monday\`, \`last_monday\`, \`monday_2w_ago\`, \`last_sunday\`, \`sunday_2w_ago\`. Offset is \`±Nd\` (days). The runtime resolves these to PT \`YYYY-MM-DD\` strings on every render. Reports that use these macros are non-parametric (the date picker is hidden).
+7. Derived steps for headline % change KPI: \`{ id: 'wow', kind: 'derived', op: 'pct_change', a: 'this_period.totals.fullTotal', b: 'last_period.totals.fullTotal' }\` rendered as \`{ type: 'kpi', label: 'WoW Δ%', value: 'wow', format: 'percent' }\`.
 
-CRITICAL — common pitfalls the LLM has tripped on:
-- dateRange enum values use UNDERSCORES not spaces. Valid: "yesterday", "last_7_days", "last_30_days", "last_90_days", "last_180_days", "last_365_days". NEVER write "last_7 days" or "last 7 days".
-- Northbeam metrics: pass the metric ID ("txns" not "transactions", "rev" not "revenue", "spend" not "ad_spend"). The CSV column NAME for txns is "transactions" — this is a separate concept from the metric ID. ID goes in \`metrics:[]\`, column name goes in valueRef paths.
-- Breakdown values: when you pass \`breakdown:{key:"Platform (Northbeam)"}\` (or any breakdown key) to metrics_explorer, the connector normalizes the returned rows so the channel/breakdown name is ALWAYS in column "breakdown_value". This is a stable alias — do NOT use "platform_(northbeam)", "breakdown_platform_northbeam", or any other name. ALWAYS use "breakdown_value" as the table column field for breakdowns.
-- Daily breakdowns (bucketByDate:true) add a "date" field to each row.
-- All NB numeric metric values come back as STRINGS in CSV — the runtime coerces them, but reference them via the metric ID name in the ROW (e.g. row.rev, row.spend, row.transactions).
+# Step-arg constraint registry (use these constraints exactly; deviations cause smoke failures)
 
-CRITICAL arg constraints for northbeam.metrics_explorer:
-- granularity MUST be one of: "DAILY" | "WEEKLY" | "MONTHLY" (uppercase). Never "total", "day", "daily", "week", etc.
-- breakdown MUST be an object: { "key": "Platform (Northbeam)" } — NOT a bare string like "channel".
-- To get aggregate totals (no date breakdown): set bucketByDate=false (default), granularity="DAILY". The whole period collapses to one row per breakdown value.
-- To get daily trend data: set bucketByDate=true, granularity="DAILY".
-- Example for "total revenue + orders (single aggregate row)": { "metrics": ["rev","txns"], "dateRange": "last_7_days", "granularity": "DAILY", "bucketByDate": false }
-- Example for "daily revenue trend": { "metrics": ["rev"], "dateRange": "last_7_days", "granularity": "DAILY", "bucketByDate": true }
-- Example for "revenue by channel": { "metrics": ["rev","spend"], "dateRange": "last_7_days", "granularity": "DAILY", "breakdown": { "key": "Platform (Northbeam)" }, "bucketByDate": false }
+\`northbeam.metrics_explorer\` REQUIRED args:
+  - \`metrics\`: array of metric IDs from the NB LIVE CATALOGS below (use the \`id\` field, NOT the label).
+  - \`dateRange\`: \`'\$REPORT_RANGE'\` OR \`{ start: '\$DATE:...', end: '\$DATE:...' }\`.
+  - \`accountingMode\`: one of \`'cash'\` | \`'accrual'\` | \`'cash_snapshot'\`.
+  - \`attributionModel\`: an \`id\` from the NB LIVE CATALOGS attribution-models list.
+  - \`attributionWindow\`: \`'1'\` | \`'7'\` | \`'30'\` | \`'90'\` (string).
+  - \`granularity\`: exactly \`'DAILY'\` | \`'WEEKLY'\` | \`'MONTHLY'\` (uppercase).
+\`northbeam.metrics_explorer\` OPTIONAL args:
+  - \`breakdown\`: object \`{ key: <one of NB LIVE CATALOGS breakdown keys> }\`. NEVER pass a string here, NEVER omit the \`key\` wrapper.
+  - \`bucketByDate\`: boolean. \`false\` → one aggregate row per breakdown value (default). \`true\` → one row per (date × breakdown_value), and rows include a \`date\` field.
 
-CRITICAL FIELD-NAME GUIDANCE — these are the actual column names tools return (the 'id' is for valueRef paths like "stepId.rows[0].FIELDNAME"):
+\`gantri.sales_report\` REQUIRED args:
+  - \`dateRange\`: \`'\$REPORT_RANGE'\` OR \`{ start: '\$DATE:...', end: '\$DATE:...' }\` (preset enum or {start,end} both accepted).
 
-- northbeam.metrics_explorer returns CSV-flat rows. Common columns: \`rev\` (revenue, string), \`spend\`, \`transactions\` (NOT 'txns' — that's the metric ID, the column is 'transactions'), \`aov\`, \`visits\`, \`accounting_mode\`, \`attribution_model\`, \`attribution_window\`. When breakdown is set, the breakdown value is ALWAYS in a column called \`breakdown_value\` — this is a stable normalized alias the connector applies regardless of which breakdown key was passed. For 'date' (when bucketByDate=true) the column is \`date\`. NUMERIC VALUES come back as STRINGS — the frontend coerces them, but the spec must reference the right column name.
+\`gantri.order_stats\`, \`gantri.late_orders_report\`, \`ga4.run_report\`, \`ga4.page_engagement_summary\`: see TOOL_CATALOG for required arg shapes. The TOOL OUTPUT SHAPES section below shows what each returns.
 
-- gantri.late_orders_report returns \`{ totalLate, missedDeadline, withinWindow, orders: [{orderId, customerName, type, daysPastDeliveryBy, deadlineMissed, primaryCause, causeSummary, noteFlags}] }\`. Use 'orders' for the table data ref, not 'rows'.
+# Format selection
+- \`format: 'currency'\` → dollar amounts.
+- \`format: 'number'\` → counts.
+- \`format: 'percent'\` → already-fractional ratios (0..1).
+- \`format: 'pct_delta'\` → output of a derived \`pct_change\` step (renders as "+12.34%").
+- \`format: 'date_pt'\` → epoch-ms or ISO date strings.
+- \`format: 'admin_order_link'\` → a Gantri admin URL string for orders tables.
 
-- gantri.order_stats returns \`{ totalCount, totalRevenueDollars, avgOrderValueDollars, breakdownByStatus: [{status, count, revenueDollars}], breakdownByType: [{type, count, revenueDollars}] }\`.
+# Reference sections (consult these before emitting any field name or NB arg value):
 
-- ga4.run_report returns \`{ rowCount, dimensions, metrics, rows }\` where rows are objects with field names matching the dimensions and metrics arrays directly (e.g. metrics:['sessions'] → rows[].sessions).
-
-- ga4.page_engagement_summary returns \`{ totals: {pageViews, sessions, scrollEvents, siteScrollRate, uniquePagesObserved, eligiblePages}, topByTraffic: [{pagePath, pageViews, scrolls, scrollRate, users}], highestScrollRate: [...], lowestScrollRate: [...], flaggedPages: [...] }\`. \`scrollRate\` is a fraction 0..1, format as 'percent' in UI. \`topN\` arg max is 100 — never request more.
-
-- gantri.compare_orders_nb_vs_porter returns \`{ rows: [{date, porter_orders, porter_revenue, nb_orders, nb_revenue, order_diff, revenue_diff}], totals: {...}, csv: string }\`.
-
-- gantri.diff_orders_nb_vs_porter returns \`{ porter_count, nb_count, only_in_nb_count, only_in_porter_count, only_in_nb: [...], only_in_porter: [...], revenue_mismatch: [...], status_mismatch: [...] }\`.
-
-- gantri.sales_report returns \`{ rows: [{type, orders, fullTotal, ...}], totals: {orders, fullTotal, ...}, summary: {...} }\`.
-
-- gantri.compare_orders_nb_vs_porter, gantri.diff_orders_nb_vs_porter, gantri.late_orders_report all use camelCase fields. NB CSV-output tools use snake_case + 'transactions' (NOT 'txns').
-
-When in doubt, use specialized tools that have stable shapes (gantri.* analyses) over the raw northbeam.metrics_explorer.
-
-VALUE FORMATTING TIPS:
-- KPI \`format: 'currency'\` for $ values, 'number' for counts, 'percent' for ratios (0..1).
-- Table column \`format: 'currency'\` for $, 'number' for counts, 'percent' for ratios, 'pct_delta' for "% change vs prior".
-- \`pageSize\` on tables: 10–25 for narrow tables, up to 50 for full per-row exports.
-- ChartBlock 'y' should match the metric column name exactly. For NB CSV output use \`y: 'rev'\` not \`y: 'revenue'\`.
-
-Available tools and their JSON schemas:
+## Available tools and their INPUT schemas
 {TOOL_CATALOG}
 
-Return the JSON object now.`;
+{TOOL_OUTPUT_SHAPES}
+
+{LIVE_CATALOGS}
+
+# Final reminder
+Return only the JSON object. If a constraint above cannot be satisfied with the user's request, return the single ERROR string described in MUST NOT rule 5.`;
+
+/** Extract a JSON object from an LLM response that may have decorated it with
+ *  code fences, language tags, or trailing prose. Defensive — the prompt says
+ *  "no code fences" but in practice this happens often enough to handle. */
+function extractJsonObject(raw: string): string {
+  let s = raw.trim();
+  // Strip ```json ... ``` or ``` ... ``` fences anywhere in the text.
+  const fenceMatch = s.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fenceMatch) s = fenceMatch[1].trim();
+  // If there's still leading/trailing prose, slice from the first { to the
+  // matching closing } so we get a clean JSON object.
+  const start = s.indexOf('{');
+  const end = s.lastIndexOf('}');
+  if (start !== -1 && end !== -1 && end > start) s = s.slice(start, end + 1);
+  return s;
+}
 
 export interface CompileLiveReportInput {
   intent: string;
   claude: Anthropic;
   model: string;
   toolCatalog: string;
+  liveCatalogs?: LiveCatalogs;
   maxAttempts?: number;
 }
 
@@ -114,7 +133,10 @@ export async function compileLiveReport(input: CompileLiveReportInput): Promise<
     const resp = await input.claude.messages.create({
       model: input.model,
       max_tokens: 4096,
-      system: SYSTEM_PROMPT.replace('{TOOL_CATALOG}', input.toolCatalog),
+      system: SYSTEM_PROMPT
+        .replace('{TOOL_CATALOG}', input.toolCatalog)
+        .replace('{TOOL_OUTPUT_SHAPES}', renderToolOutputShapes())
+        .replace('{LIVE_CATALOGS}', input.liveCatalogs ? renderLiveCatalogs(await input.liveCatalogs.get()) : '# NB LIVE CATALOGS — not provided in this run.'),
       messages: [{ role: 'user', content: userMsg }],
     });
     totalIn += resp.usage?.input_tokens ?? 0;
@@ -122,7 +144,7 @@ export async function compileLiveReport(input: CompileLiveReportInput): Promise<
     const text = (resp.content.find((b: { type: string }) => b.type === 'text') as { text?: string } | undefined)?.text ?? '';
     let parsed: unknown;
     try {
-      parsed = JSON.parse(text.trim());
+      parsed = JSON.parse(extractJsonObject(text));
     } catch (err) {
       lastError = `JSON parse failed: ${err instanceof Error ? err.message : String(err)}`;
       logger.warn({ attempt, lastError }, 'compileLiveReport — invalid JSON');

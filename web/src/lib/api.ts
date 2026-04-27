@@ -15,6 +15,7 @@ export interface ReportPayload {
     sources: string[];
     spec: any;
     effectiveRange?: unknown;
+    parametric?: boolean;
   };
 }
 

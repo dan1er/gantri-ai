@@ -37,6 +37,7 @@ function makeConn(opts: {
     publicBaseUrl: 'https://x',
     getActor: () => ({ slackUserId: opts.actorSlackId }),
     getRoleForActor: async () => (opts.isAdmin ? 'admin' : 'user'),
+    slackClient: { conversations: { open: vi.fn() }, chat: { postMessage: vi.fn() } } as never,
   });
 }
 

@@ -55,11 +55,38 @@ const ToolName = z.string().refine((t) => WHITELISTED_TOOLS.has(t), {
   message: 'Tool is not whitelisted for live reports',
 });
 
-const DataStep = z.object({
-  id: z.string().min(1).max(64).regex(/^[a-zA-Z_][a-zA-Z0-9_]*$/, 'id must be a valid identifier'),
+const StepId = z.string().min(1).max(64).regex(/^[a-zA-Z_][a-zA-Z0-9_]*$/, 'id must be a valid identifier');
+
+/** A regular tool-invoking step. `kind` is optional (defaults to "tool") so
+ *  existing persisted specs without the field continue to validate. */
+const ToolStep = z.object({
+  id: StepId,
+  kind: z.literal('tool').optional(),
   tool: ToolName,
   args: z.record(z.unknown()),
 });
+
+/**
+ * Scalar arithmetic over already-resolved step results. Evaluated AFTER all
+ * tool steps complete. The result is stored at `dataResults[id]` and
+ * referenced from kpi blocks like any data ref.
+ *
+ * Example — week-over-week % change:
+ *   { id: 'wow', kind: 'derived', op: 'pct_change',
+ *     a: 'this_week.totals.fullTotal', b: 'last_week.totals.fullTotal' }
+ *
+ * Both `a` and `b` MUST be ValueRefs (paths into `dataResults`); literals
+ * are not supported — keeps the spec auditable and the eval trivial.
+ */
+const DerivedStep = z.object({
+  id: StepId,
+  kind: z.literal('derived'),
+  op: z.enum(['add', 'subtract', 'multiply', 'divide', 'pct_change']),
+  a: z.string().min(1).max(200),
+  b: z.string().min(1).max(200),
+});
+
+const DataStep = z.union([ToolStep, DerivedStep]);
 
 const ValueRef = z.string().min(1).max(200);
 

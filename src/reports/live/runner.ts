@@ -1,5 +1,7 @@
 import { logger } from '../../logger.js';
 import { WHITELISTED_TOOLS, type LiveReportSpec, type UiBlock } from './spec.js';
+import { substituteDateMacros } from './date-macros.js';
+import { evaluateDerivedStep, isDerivedStep, type DerivedStep } from './derived-steps.js';
 
 interface MinimalRegistry {
   execute(toolName: string, args: unknown): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>;
@@ -44,30 +46,42 @@ function substituteReportRange(args: Record<string, unknown>, effectiveRange: un
  * The frontend renders blocks bound to a failed step as ErrorState.
  */
 export async function runLiveSpec(spec: LiveReportSpec, registry: MinimalRegistry, effectiveRange?: unknown): Promise<LiveSpecRunResult> {
-  for (const step of spec.data) {
-    if (!WHITELISTED_TOOLS.has(step.tool)) {
-      throw new Error(`Tool ${step.tool} is not whitelisted for live reports`);
+  // Tool steps are dispatched in parallel; derived steps run after, reading
+  // from `dataResults`. We split them up front so the parallel section sees
+  // tool steps only.
+  const toolSteps = spec.data.filter((s) => !isDerivedStep(s));
+  const derivedSteps = spec.data.filter((s) => isDerivedStep(s)) as unknown as DerivedStep[];
+
+  for (const step of toolSteps) {
+    const tool = (step as { tool: string }).tool;
+    if (!WHITELISTED_TOOLS.has(tool)) {
+      throw new Error(`Tool ${tool} is not whitelisted for live reports`);
     }
   }
 
   const range = effectiveRange ?? spec.dateRange ?? 'last_7_days';
 
   const startedAt = Date.now();
+  // Single point-in-time anchor — all date macros across all steps in this
+  // run resolve against the same `now`, so results are internally consistent.
+  const now = new Date();
   const results = await Promise.all(
-    spec.data.map(async (step) => {
+    toolSteps.map(async (step) => {
+      const s = step as { id: string; tool: string; args: Record<string, unknown> };
       const t0 = Date.now();
       try {
-        const stepArgs = substituteReportRange(step.args, range);
-        const r = await registry.execute(step.tool, stepArgs);
+        const rangeSubbed = substituteReportRange(s.args, range);
+        const stepArgs = substituteDateMacros(rangeSubbed, now);
+        const r = await registry.execute(s.tool, stepArgs);
         if (!r.ok) {
-          logger.warn({ stepId: step.id, tool: step.tool, code: r.error?.code, ms: Date.now() - t0 }, 'live-report step failed');
-          return { stepId: step.id, tool: step.tool, ok: false as const, error: r.error ?? { code: 'UNKNOWN', message: 'no detail' } };
+          logger.warn({ stepId: s.id, tool: s.tool, code: r.error?.code, ms: Date.now() - t0 }, 'live-report step failed');
+          return { stepId: s.id, tool: s.tool, ok: false as const, error: r.error ?? { code: 'UNKNOWN', message: 'no detail' } };
         }
-        return { stepId: step.id, tool: step.tool, ok: true as const, data: r.data };
+        return { stepId: s.id, tool: s.tool, ok: true as const, data: r.data };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        logger.error({ stepId: step.id, tool: step.tool, err: message, ms: Date.now() - t0 }, 'live-report step threw');
-        return { stepId: step.id, tool: step.tool, ok: false as const, error: { code: 'THREW', message } };
+        logger.error({ stepId: s.id, tool: s.tool, err: message, ms: Date.now() - t0 }, 'live-report step threw');
+        return { stepId: s.id, tool: s.tool, ok: false as const, error: { code: 'THREW', message } };
       }
     }),
   );
@@ -79,7 +93,20 @@ export async function runLiveSpec(spec: LiveReportSpec, registry: MinimalRegistr
     else errors.push({ stepId: r.stepId, tool: r.tool, code: r.error.code, message: r.error.message });
   }
 
-  const sources = [...new Set(spec.data.map((s) => s.tool))].sort();
+  // Derived steps run sequentially after tool steps. Failures degrade the
+  // single derived value (NaN/null) but never abort the run.
+  for (const dstep of derivedSteps) {
+    try {
+      const value = evaluateDerivedStep(dstep, dataResults);
+      dataResults[dstep.id] = value;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.warn({ stepId: dstep.id, op: dstep.op, err: message }, 'derived step failed');
+      errors.push({ stepId: dstep.id, tool: `derived:${dstep.op}`, code: 'DERIVED_FAILED', message });
+    }
+  }
+
+  const sources = [...new Set(toolSteps.map((s) => (s as { tool: string }).tool))].sort();
   return {
     dataResults,
     ui: spec.ui,

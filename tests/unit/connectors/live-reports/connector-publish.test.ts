@@ -36,13 +36,21 @@ function fakeRepo() {
   };
 }
 
+function fakeSlackClient() {
+  const postMessage = vi.fn(async () => ({ ok: true, ts: '1', channel: 'D1' }));
+  const open = vi.fn(async () => ({ ok: true, channel: { id: 'D1' } }));
+  return { conversations: { open }, chat: { postMessage }, _postMessage: postMessage, _open: open };
+}
+
 function makeConnector(opts: { intentJson: string; runOk?: boolean; isAdmin?: boolean; existing?: any[] }) {
   const repo = fakeRepo();
   if (opts.existing) (repo.listAll as any).mockResolvedValue(opts.existing);
   const claude = fakeClaude(opts.intentJson);
   const registry = fakeRegistry(opts.runOk === false ? {} : { 'gantri.order_stats': { totalOrders: 87 } });
+  const slackClient = fakeSlackClient();
   return {
     repo,
+    slackClient,
     conn: new LiveReportsConnector({
       repo: repo as never,
       claude: claude as never,
@@ -52,6 +60,7 @@ function makeConnector(opts: { intentJson: string; runOk?: boolean; isAdmin?: bo
       publicBaseUrl: 'https://gantri-ai-bot.fly.dev',
       getActor: () => ({ slackUserId: 'UDANNY' }),
       getRoleForActor: async () => (opts.isAdmin ? 'admin' : 'user'),
+      slackClient: slackClient as never,
     }),
   };
 }
@@ -68,21 +77,95 @@ describe('reports.publish_live_report', () => {
     expect(out.matches.length).toBeGreaterThan(0);
   });
 
-  it('compiles + smoke-runs + persists with slug derived from title', async () => {
-    const { conn, repo } = makeConnector({ intentJson: JSON.stringify(validSpec) });
+  it('returns queued immediately, then compiles + smoke-runs + persists + DMs in background', async () => {
+    const { conn, repo, slackClient } = makeConnector({ intentJson: JSON.stringify(validSpec) });
     const tool = conn.tools.find((t) => t.name === 'reports.publish_live_report')!;
     const out = await tool.execute({ intent: 'weekly sales by channel', forceCreate: false }) as any;
-    expect(out.status).toBe('created');
-    expect(out.slug).toBe('weekly-sales');
-    expect(out.url).toMatch(/\/r\/weekly-sales\?t=/);
+    expect(out.status).toBe('queued');
+    expect(out.requesterSlackUserId).toBe('UDANNY');
+    // The compile + persist runs in the background. Await it before asserting.
+    await conn._backgroundPublish;
     expect(repo.create).toHaveBeenCalledTimes(1);
+    const created = (repo.create as any).mock.calls[0][0];
+    expect(created.slug).toBe('weekly-sales');
+    expect(slackClient._postMessage).toHaveBeenCalledTimes(1);
+    const dmText = (slackClient._postMessage as any).mock.calls[0][0].text as string;
+    expect(dmText).toContain('listo');
+    expect(dmText).toContain('/r/weekly-sales?t=');
   });
 
-  it('aborts if smoke-execute errors on every step', async () => {
-    const { conn } = makeConnector({ intentJson: JSON.stringify(validSpec), runOk: false });
+  it('returns queued, but on smoke failure DMs the requester with the error and persists nothing', async () => {
+    const { conn, repo, slackClient } = makeConnector({ intentJson: JSON.stringify(validSpec), runOk: false });
     const tool = conn.tools.find((t) => t.name === 'reports.publish_live_report')!;
     const out = await tool.execute({ intent: 'sales', forceCreate: false }) as any;
-    expect(out.status).toBe('smoke_failed');
-    expect(out.errors.length).toBeGreaterThan(0);
+    expect(out.status).toBe('queued');
+    await conn._backgroundPublish;
+    expect(repo.create).not.toHaveBeenCalled();
+    expect(slackClient._postMessage).toHaveBeenCalledTimes(1);
+    const dmText = (slackClient._postMessage as any).mock.calls[0][0].text as string;
+    expect(dmText).toContain('smoke_failed');
+  });
+
+  it('does NOT publish when hard verification issues remain after retry — DMs failure instead', async () => {
+    // Spec where the kpi block references a path that does not exist in tool output.
+    const brokenSpec = {
+      version: 1,
+      title: 'Broken Sales',
+      data: [{ id: 'a', tool: 'gantri.order_stats', args: {} }],
+      ui: [
+        { type: 'kpi', label: 'Revenue', value: 'a.totally_nonexistent_field', format: 'currency' },
+      ],
+    };
+    const { conn, repo, slackClient } = makeConnector({ intentJson: JSON.stringify(brokenSpec) });
+    const tool = conn.tools.find((t) => t.name === 'reports.publish_live_report')!;
+    await tool.execute({ intent: 'broken sales', forceCreate: false });
+    await conn._backgroundPublish;
+    expect(repo.create).not.toHaveBeenCalled();
+    const dmText = (slackClient._postMessage as any).mock.calls[0][0].text as string;
+    expect(dmText).toContain('verification_failed');
+    expect(dmText).toContain('ref_undefined');
+    expect(dmText).toContain('totally_nonexistent_field');
+  });
+
+  it('catches unresolved $DATE macros that leaked into prose / spec fields', async () => {
+    const leakySpec = {
+      version: 1,
+      title: 'Sales for $DATE:this_monday',
+      description: 'WTD revenue from $DATE:this_monday to $DATE:today',
+      data: [{ id: 'a', tool: 'gantri.order_stats', args: {} }],
+      ui: [
+        { type: 'text', markdown: 'See `$DATE:today` for context.' },
+        { type: 'kpi', label: 'Revenue', value: 'a.totalOrders', format: 'number' },
+      ],
+    };
+    const { conn, slackClient } = makeConnector({ intentJson: JSON.stringify(leakySpec) });
+    const tool = conn.tools.find((t) => t.name === 'reports.publish_live_report')!;
+    await tool.execute({ intent: 'sales wtd', forceCreate: false });
+    await conn._backgroundPublish;
+    const dmText = (slackClient._postMessage as any).mock.calls[0][0].text as string;
+    expect(dmText).toContain('unresolved_date_macro');
+  });
+
+  it('detects when text blocks contain backtick-wrapped data refs (LLM templating anti-pattern)', async () => {
+    // Spec where the LLM put a data ref inside a text block instead of using a kpi/table.
+    const badSpec = {
+      version: 1,
+      title: 'Bad Sales',
+      data: [{ id: 'this_week', tool: 'gantri.order_stats', args: {} }],
+      ui: [
+        {
+          type: 'text',
+          markdown: '| Period | Revenue |\n|---|---|\n| This Week | `this_week.totalOrders` |',
+        },
+      ],
+    };
+    const { conn, slackClient } = makeConnector({ intentJson: JSON.stringify(badSpec) });
+    const tool = conn.tools.find((t) => t.name === 'reports.publish_live_report')!;
+    await tool.execute({ intent: 'bad weekly sales', forceCreate: false });
+    await conn._backgroundPublish;
+    // The DM should warn about the verification issue.
+    const dmText = (slackClient._postMessage as any).mock.calls[0][0].text as string;
+    expect(dmText).toContain('text_block_uses_data_refs');
+    expect(dmText).toContain('this_week.totalOrders');
   });
 });

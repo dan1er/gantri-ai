@@ -23,6 +23,7 @@ import { FeedbackConnector } from './connectors/feedback/feedback-connector.js';
 import { FeedbackRepo } from './storage/repositories/feedback.js';
 import { BroadcastConnector } from './connectors/broadcast/broadcast-connector.js';
 import { LiveReportsConnector } from './connectors/live-reports/connector.js';
+import { LiveCatalogs } from './connectors/live-reports/live-catalogs.js';
 import { PublishedReportsRepo } from './storage/repositories/published-reports.js';
 import { mountLiveReportsRoutes } from './server/live-reports-routes.js';
 import path from 'node:path';
@@ -226,6 +227,8 @@ async function main() {
         return a;
       },
       getRoleForActor: (slackUserId) => usersRepo.getRole(slackUserId),
+      slackClient: app.client,
+      liveCatalogs: new LiveCatalogs(nbClient),
     }),
   );
 

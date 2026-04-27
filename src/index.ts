@@ -23,6 +23,8 @@ import { FeedbackConnector } from './connectors/feedback/feedback-connector.js';
 import { FeedbackRepo } from './storage/repositories/feedback.js';
 import { GantriPorterConnector } from './connectors/gantri-porter/gantri-porter-connector.js';
 import { GrafanaConnector } from './connectors/grafana/grafana-connector.js';
+import { Ga4Client } from './connectors/ga4/client.js';
+import { Ga4Connector } from './connectors/ga4/connector.js';
 import { Orchestrator, getActiveActor, getActiveThread } from './orchestrator/orchestrator.js';
 import { buildSlackApp } from './slack/app.js';
 import { ReportSubscriptionsRepo } from './reports/reports-repo.js';
@@ -41,6 +43,7 @@ async function main() {
     nbApiKey, nbDataClientId,
     porterApiBaseUrl, porterBotEmail, porterBotPassword,
     grafanaUrl, grafanaToken, grafanaPostgresDsUid,
+    ga4PropertyId, ga4ServiceAccountKey,
   ] = await Promise.all([
     readVaultSecret(supabase, 'NORTHBEAM_EMAIL'),
     readVaultSecret(supabase, 'NORTHBEAM_PASSWORD'),
@@ -53,6 +56,8 @@ async function main() {
     readVaultSecret(supabase, 'GRAFANA_URL'),
     readVaultSecret(supabase, 'GRAFANA_TOKEN'),
     readVaultSecret(supabase, 'GRAFANA_POSTGRES_DS_UID'),
+    readVaultSecret(supabase, 'GA4_PROPERTY_ID').catch(() => null),
+    readVaultSecret(supabase, 'GA4_SERVICE_ACCOUNT_KEY').catch(() => null),
   ]);
 
   const registry = new ConnectorRegistry();
@@ -113,6 +118,16 @@ async function main() {
   registry.register(new MarketingAnalysisConnector({ nb: nbClient }));
 
   registry.register(new LateOrdersConnector({ grafana }));
+
+  if (ga4PropertyId && ga4ServiceAccountKey) {
+    const ga4 = new Ga4Connector({
+      client: new Ga4Client({ propertyId: ga4PropertyId, serviceAccountKey: ga4ServiceAccountKey }),
+    });
+    registry.register(ga4);
+    logger.info({ propertyId: ga4PropertyId }, 'ga4 connector registered');
+  } else {
+    logger.warn('ga4 not configured (GA4_PROPERTY_ID and/or GA4_SERVICE_ACCOUNT_KEY missing) — skipping registration');
+  }
 
   const claude = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
   const orchestrator = new Orchestrator({

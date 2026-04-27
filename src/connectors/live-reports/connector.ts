@@ -6,6 +6,10 @@ import type { PublishedReportsRepo } from '../../storage/repositories/published-
 import type { ConnectorRegistry } from '../base/registry.js';
 import type { ActorContext } from '../../orchestrator/orchestrator.js';
 import { extractKeywords, rankCandidates } from '../../reports/live/dedup.js';
+import { compileLiveReport } from './compiler.js';
+import { runLiveSpec } from '../../reports/live/runner.js';
+import { slugifyTitle, generateAccessToken, findFreeSlug } from '../../reports/live/identifiers.js';
+import { logger } from '../../logger.js';
 
 export interface LiveReportsConnectorDeps {
   repo: PublishedReportsRepo;
@@ -142,8 +146,76 @@ export class LiveReportsConnector implements Connector {
     };
   }
 
-  // ---- stubs for next tasks ----
-  private async publish(_args: PublishArgs): Promise<unknown> { throw new Error('publish: implemented in Task 9'); }
+  // ---- publish ----
+  private async publish(args: PublishArgs) {
+    const actor = this.deps.getActor();
+    if (!actor) return { error: { code: 'NO_ACTOR', message: 'no active actor' } };
+
+    // 1. Dedup gate
+    if (!args.forceCreate) {
+      const dedup = await this.find({ intent: args.intent });
+      if (dedup.matches.length > 0) {
+        return {
+          status: 'existing_match' as const,
+          keywords: dedup.keywords,
+          matches: dedup.matches,
+          notes: 'Existing reports match this intent. Recommend them to the user. To create a new one anyway, call again with forceCreate: true.',
+        };
+      }
+    }
+
+    // 2. Compile via LLM (with Zod retry inside)
+    let compileOut;
+    try {
+      compileOut = await compileLiveReport({
+        intent: args.intent,
+        claude: this.deps.claude,
+        model: this.deps.model,
+        toolCatalog: this.deps.getToolCatalog(),
+      });
+    } catch (err) {
+      return { status: 'compile_failed' as const, message: err instanceof Error ? err.message : String(err) };
+    }
+    const spec = compileOut.spec;
+
+    // 3. Smoke-execute the spec end-to-end. If EVERY step errors, abort.
+    const smoke = await runLiveSpec(spec, this.deps.registry);
+    if (smoke.errors.length === spec.data.length) {
+      return {
+        status: 'smoke_failed' as const,
+        errors: smoke.errors,
+        spec,
+        message: 'Every data step failed during smoke execution. Spec was not persisted.',
+      };
+    }
+
+    // 4. Persist
+    const slugBase = slugifyTitle(spec.title);
+    const slug = await findFreeSlug(slugBase, async (s) => (await this.deps.repo.getBySlug(s)) !== null);
+    const accessToken = generateAccessToken();
+    const intentKeywords = extractKeywords(args.intent);
+    const created = await this.deps.repo.create({
+      slug,
+      title: spec.title,
+      description: spec.description ?? null,
+      ownerSlackId: actor.slackUserId,
+      intent: args.intent,
+      intentKeywords,
+      spec,
+      accessToken,
+    });
+
+    const url = `${this.deps.publicBaseUrl}/r/${created.slug}?t=${accessToken}`;
+    logger.info({ slug, owner: actor.slackUserId, attempts: compileOut.attempts, ms: smoke.meta.durationMs }, 'live-report published');
+    return {
+      status: 'created' as const,
+      slug: created.slug,
+      title: created.title,
+      url,
+      compileAttempts: compileOut.attempts,
+      smokeWarnings: smoke.errors,
+    };
+  }
   private async listMine(): Promise<unknown> { throw new Error('listMine: implemented in Task 10'); }
   private async recompile(_a: RecompileArgs): Promise<unknown> { throw new Error('recompile: implemented in Task 11'); }
   private async archive(_a: ArchiveArgs): Promise<unknown> { throw new Error('archive: implemented in Task 11'); }

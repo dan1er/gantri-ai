@@ -39,6 +39,34 @@ CRITICAL arg constraints for northbeam.metrics_explorer:
 - Example for "daily revenue trend": { "metrics": ["rev"], "dateRange": "last_7_days", "granularity": "DAILY", "bucketByDate": true }
 - Example for "revenue by channel": { "metrics": ["rev","spend"], "dateRange": "last_7_days", "granularity": "DAILY", "breakdown": { "key": "Platform (Northbeam)" }, "bucketByDate": false }
 
+CRITICAL FIELD-NAME GUIDANCE — these are the actual column names tools return (the 'id' is for valueRef paths like "stepId.rows[0].FIELDNAME"):
+
+- northbeam.metrics_explorer returns CSV-flat rows. Common columns: \`rev\` (revenue, string), \`spend\`, \`transactions\` (NOT 'txns' — that's the metric ID, the column is 'transactions'), \`aov\`, \`visits\`, \`accounting_mode\`, \`attribution_model\`, \`attribution_window\`. When breakdown is set, the breakdown value is in a column whose name is the breakdown KEY in lowercase + underscores. For breakdown 'Platform (Northbeam)' the column is \`breakdown_value\` (a single normalized name across all breakdowns). For 'date' (when bucketByDate=true) the column is \`date\`. NUMERIC VALUES come back as STRINGS — the frontend coerces them, but the spec must reference the right column name.
+
+- gantri.late_orders_report returns \`{ totalLate, missedDeadline, withinWindow, orders: [{orderId, customerName, type, daysPastDeliveryBy, deadlineMissed, primaryCause, causeSummary, noteFlags}] }\`. Use 'orders' for the table data ref, not 'rows'.
+
+- gantri.order_stats returns \`{ totalCount, totalRevenueDollars, avgOrderValueDollars, breakdownByStatus: [{status, count, revenueDollars}], breakdownByType: [{type, count, revenueDollars}] }\`.
+
+- ga4.run_report returns \`{ rowCount, dimensions, metrics, rows }\` where rows are objects with field names matching the dimensions and metrics arrays directly (e.g. metrics:['sessions'] → rows[].sessions).
+
+- ga4.page_engagement_summary returns \`{ totals: {pageViews, sessions, scrollEvents, siteScrollRate, uniquePagesObserved, eligiblePages}, topByTraffic: [{pagePath, pageViews, scrolls, scrollRate, users}], highestScrollRate: [...], lowestScrollRate: [...], flaggedPages: [...] }\`. \`scrollRate\` is a fraction 0..1, format as 'percent' in UI. \`topN\` arg max is 100 — never request more.
+
+- gantri.compare_orders_nb_vs_porter returns \`{ rows: [{date, porter_orders, porter_revenue, nb_orders, nb_revenue, order_diff, revenue_diff}], totals: {...}, csv: string }\`.
+
+- gantri.diff_orders_nb_vs_porter returns \`{ porter_count, nb_count, only_in_nb_count, only_in_porter_count, only_in_nb: [...], only_in_porter: [...], revenue_mismatch: [...], status_mismatch: [...] }\`.
+
+- gantri.sales_report returns \`{ rows: [{type, orders, fullTotal, ...}], totals: {orders, fullTotal, ...}, summary: {...} }\`.
+
+- gantri.compare_orders_nb_vs_porter, gantri.diff_orders_nb_vs_porter, gantri.late_orders_report all use camelCase fields. NB CSV-output tools use snake_case + 'transactions' (NOT 'txns').
+
+When in doubt, use specialized tools that have stable shapes (gantri.* analyses) over the raw northbeam.metrics_explorer.
+
+VALUE FORMATTING TIPS:
+- KPI \`format: 'currency'\` for $ values, 'number' for counts, 'percent' for ratios (0..1).
+- Table column \`format: 'currency'\` for $, 'number' for counts, 'percent' for ratios, 'pct_delta' for "% change vs prior".
+- \`pageSize\` on tables: 10–25 for narrow tables, up to 50 for full per-row exports.
+- ChartBlock 'y' should match the metric column name exactly. For NB CSV output use \`y: 'rev'\` not \`y: 'revenue'\`.
+
 Available tools and their JSON schemas:
 {TOOL_CATALOG}
 

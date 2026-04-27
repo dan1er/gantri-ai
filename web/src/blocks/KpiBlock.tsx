@@ -1,31 +1,30 @@
-import { Card, Metric, Text, Flex, BadgeDelta } from '@tremor/react';
+import { Card, BadgeDelta } from '@tremor/react';
 import { resolveRef } from '../lib/valueRef.js';
 import { fmt } from '../lib/format.js';
 
 export function KpiBlock({ block, dataResults }: { block: any; dataResults: Record<string, unknown> }) {
   const v = resolveRef(block.value, dataResults);
   const display = fmt(v, block.format ?? 'number');
-  let delta: { pct: number; abs: number } | null = null;
+  let delta: { pct: number } | null = null;
   if (block.delta && typeof v === 'number') {
     const fromV = resolveRef(block.delta.from, dataResults);
-    if (typeof fromV === 'number' && fromV !== 0) {
-      delta = { pct: (v - fromV) / fromV, abs: v - fromV };
+    const fromN = typeof fromV === 'number' ? fromV : Number(fromV);
+    if (Number.isFinite(fromN) && fromN !== 0) {
+      delta = { pct: (Number(v) - fromN) / fromN };
     }
   }
-  const widthClass = (
-    { 1: 'col-span-1', 2: 'col-span-2', 3: 'col-span-3', 4: 'col-span-4' } as Record<number, string>
-  )[block.width ?? 1];
+  const widthClass = ({ 1: 'col-span-1', 2: 'col-span-2', 3: 'col-span-3', 4: 'col-span-4' } as Record<number, string>)[block.width ?? 1];
   return (
-    <Card decoration="left" decorationColor="blue" className={widthClass}>
-      <Text>{block.label}</Text>
-      <Metric>{display}</Metric>
+    <Card className={`${widthClass} !p-5`}>
+      <p className="text-xs uppercase tracking-wider text-gray-500 font-medium">{block.label}</p>
+      <p className="mt-2 text-3xl font-semibold tracking-tight text-gantri-ink tabular-nums">{display}</p>
       {delta && (
-        <Flex justifyContent="start" className="mt-2">
+        <div className="mt-3 flex items-center gap-2">
           <BadgeDelta deltaType={delta.pct >= 0 ? 'increase' : 'decrease'}>
             {fmt(delta.pct, 'pct_delta')}
           </BadgeDelta>
-          <Text className="ml-2">vs. previous period</Text>
-        </Flex>
+          <span className="text-xs text-gray-500">vs. previous period</span>
+        </div>
       )}
     </Card>
   );

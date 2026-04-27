@@ -53,7 +53,8 @@ export function App() {
   if (err) return <div className="p-10"><ErrorState title="Couldn't load this report" detail={err} /></div>;
 
   return (
-    <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <div className="min-h-screen bg-gantri-paper">
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
       {data && (
         <ReportHeader
           title={data.meta.title}
@@ -66,7 +67,7 @@ export function App() {
       )}
       {loading && <LoadingShimmer />}
       {data && (
-        <main className="grid grid-cols-1 sm:grid-cols-4 gap-4">
+        <main className="grid grid-cols-1 sm:grid-cols-4 gap-5">
           {data.ui.map((block: any, i: number) => {
             const stepId = typeof block.value === 'string' ? block.value.split('.')[0]
               : typeof block.data === 'string' ? block.data.split('.')[0]
@@ -107,6 +108,7 @@ export function App() {
           canModify={false}
         />
       )}
+    </div>
     </div>
   );
 }

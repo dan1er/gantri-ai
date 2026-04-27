@@ -1,24 +1,29 @@
 export type FormatKind = 'currency' | 'number' | 'percent' | 'date_pt' | 'pct_delta' | 'admin_order_link';
 
-const numberFmt = new Intl.NumberFormat('en-US');
-const currencyFmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
+const currencyFmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const integerFmt = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
+const numberFmt = new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 });
 const percentFmt = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
+function isClose(n: number, target: number): boolean { return Math.abs(n - target) < 1e-6; }
+
 export function fmt(v: unknown, kind: FormatKind): string {
-  if (v === null || v === undefined) return '—';
-  if (typeof v === 'string') {
-    if (kind === 'admin_order_link') return v;
-    return v;
-  }
+  if (v === null || v === undefined || v === '') return '—';
+  if (typeof v === 'string' && kind === 'admin_order_link') return v;
   const n = typeof v === 'number' ? v : Number(v);
-  if (!Number.isFinite(n)) return String(v);
+  if (!Number.isFinite(n)) return typeof v === 'string' ? v : '—';
   switch (kind) {
     case 'currency': return currencyFmt.format(n);
     case 'percent': return percentFmt.format(n);
     case 'pct_delta': return `${n >= 0 ? '+' : ''}${percentFmt.format(n)}`;
-    case 'date_pt': return new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', year: 'numeric', month: 'short', day: 'numeric' }).format(new Date(n));
+    case 'date_pt':
+      return new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', year: 'numeric', month: 'short', day: 'numeric' }).format(new Date(n));
     case 'number':
-    default: return numberFmt.format(n);
+    default: {
+      // If it's effectively an integer (within float-rounding noise), show as integer.
+      if (isClose(n, Math.round(n))) return integerFmt.format(Math.round(n));
+      return numberFmt.format(n);
+    }
   }
 }
 

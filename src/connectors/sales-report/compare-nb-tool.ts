@@ -71,21 +71,20 @@ export function buildCompareNbTool(deps: CompareNbToolDeps): ToolDef<Args> {
       const endDate = args.excludeToday && args.dateRange.endDate >= today ? subDays(today, 1) : args.dateRange.endDate;
 
       // ---- Porter side: type=Order, PT-bucketed ----
-      // Use `amount.total` as the source of truth for revenue when present —
-      // this matches NB's purchase_total exactly (verified day-by-day for
-      // recent dates). Modern `total` is built as `subtotal + shipping + tax
-      // − gift_discount` per Porter's checkout pipeline (services/transaction.js
-      // _getPriceForOrder + the `amount.discount = ...` capping logic);
-      // credits and gift-card redemptions are NOT subtracted from `total`,
-      // so neither does NB.
+      // Use `amount.total` as the source of truth when present — verified
+      // empirically that modern `total` equals `subtotal + shipping + tax
+      // − gift − credit − giftCardTotal` (Porter checkout writes the fully
+      // net customer-paid amount into `total`). NB's purchase_total matches
+      // `total` to the cent for every modern order, including those with
+      // credits / gift-card redemptions.
       //
-      // Schema history: `amount.total` was added in 2025; older rows only
-      // have { subtotal, shipping, tax, transactionFee, gift?, giftData? }.
-      // Without the COALESCE fallback, SUM(NULL) silently returned 0 for the
-      // entire pre-2025 window. The fallback re-derives the same number
-      // Porter would have written: subtotal+shipping+tax minus the legacy
-      // `gift` discount field (which corresponds to today's giftDiscount /
-      // discount fields). transactionFee is Gantri's cut and is NOT part of
+      // Schema history: `amount.total` was added to the Transactions JSON
+      // in 2025; older rows only have { subtotal, shipping, tax,
+      // transactionFee, gift?, credit?, giftCardTotal? }. The fallback
+      // replicates the SAME formula modern `total` uses, so old-row rev
+      // computations track NB just like new-row ones do. Without this,
+      // SUM(NULL) silently zeroed Porter revenue for the entire pre-2025
+      // window. transactionFee is Gantri's cut and is NOT part of
       // customer-paid revenue.
       const porterSql = `
         SELECT
@@ -98,6 +97,8 @@ export function buildCompareNbTool(deps: CompareNbToolDeps): ToolDef<Args> {
                 + COALESCE((t.amount->>'shipping')::numeric, 0)
                 + COALESCE((t.amount->>'tax')::numeric, 0)
                 - COALESCE((t.amount->>'gift')::numeric, 0)
+                - COALESCE((t.amount->>'credit')::numeric, 0)
+                - COALESCE((t.amount->>'giftCardTotal')::numeric, 0)
             )
           ) / 100.0 AS revenue
         FROM "Transactions" t

@@ -114,14 +114,26 @@ describe('computeBuckets', () => {
   });
 });
 
-describe('derivePrimaryCause — deadline missed promotion', () => {
-  it('beats every other production cause when deadline is missed', () => {
+describe('derivePrimaryCause — deadline missed is not a cause', () => {
+  it('returns the production cause even when the customer deadline was missed', () => {
+    // Deadline missed is an outcome, not a cause. It is exposed via
+    // `deadlineMissed` / `daysPastDeliveryBy` / `byDeadline` instead.
     expect(
       derivePrimaryCause({
         attentionCount: 50, reworkJobCount: 5, lostPartCount: 3,
         failedJobCount: 4, cancelledJobCount: 0, maxAttempt: 4,
         failureModes: ['gunk'], daysPastDeliveryBy: 7,
       }),
-    ).toBe('🚨 Deadline missed (7d)');
+    ).toBe('Part scrapped');
+  });
+
+  it('falls back to rework / failure modes when no scrap, regardless of deadline', () => {
+    expect(
+      derivePrimaryCause({
+        attentionCount: 0, reworkJobCount: 4, lostPartCount: 0,
+        failedJobCount: 0, cancelledJobCount: 0, maxAttempt: 4,
+        failureModes: [], daysPastDeliveryBy: 12,
+      }),
+    ).toBe('Reworked 4×');
   });
 });

@@ -325,20 +325,19 @@ export interface CauseStats {
 }
 
 /**
- * Pick the dominant cause category for an order. Priority reflects what's
- * actionable for ops:
- *   0. Customer-facing deadline missed — promoted above everything else.
+ * Pick the dominant *production* cause category for an order. "Deadline missed"
+ * is NOT a cause — it is an outcome — and lives in the separate `deadlineMissed`
+ * / `daysPastDeliveryBy` fields and the `byDeadline` aggregate bucket.
+ *
+ * Priority reflects what's actionable for ops:
  *   1. Lost parts (stocks scrapped) — biggest production hit, longest tail.
- *   2. Heavy rework (≥2 attempts on the same op) — quality issues compounding.
+ *   2. Heavy rework (≥3 attempts on the same op) — quality issues compounding.
  *   3. Failed jobs with concrete failure modes — actively blocked on rework.
  *   4. Mass cancellation (jobs cancelled, parts replaced).
  *   5. Has attention — generic "needs human review" flag (noisiest).
  *   6. Unknown.
  */
 export function derivePrimaryCause(s: CauseStats): string {
-  if (s.daysPastDeliveryBy != null && s.daysPastDeliveryBy > 0) {
-    return `🚨 Deadline missed (${s.daysPastDeliveryBy}d)`;
-  }
   if (s.lostPartCount > 0) return 'Part scrapped';
   if (s.maxAttempt >= 3) return `Reworked ${s.maxAttempt}×`;
   if (s.failedJobCount > 0 && s.failureModes.length > 0) return s.failureModes[0];
@@ -354,6 +353,10 @@ export function derivePrimaryCause(s: CauseStats): string {
  * Combines counts (parts scrapped, rework attempts) with concrete failure
  * modes from the failedReason JSON. Capped at ~90 characters.
  *
+ * Deadline-missed status is NOT mixed in here — it lives in the dedicated
+ * `deadlineMissed` / `daysPastDeliveryBy` fields and the `byDeadline`
+ * aggregate so consumers can present it separately (it's an outcome, not a cause).
+ *
  * Example outputs:
  *   "Part scrapped (3) — gunk, layer lines (failed jobs: 12)"
  *   "Reworked 4× — feature damage, cracking"
@@ -363,10 +366,6 @@ export function derivePrimaryCause(s: CauseStats): string {
 export function deriveCauseSummary(input: CauseStats & { flagged: string[] }): string {
   const parts: string[] = [];
 
-  // Customer-facing deadline missed always leads — it's the signal ops needs to act on.
-  if (input.daysPastDeliveryBy != null && input.daysPastDeliveryBy > 0) {
-    parts.push(`🚨 Deadline missed by ${input.daysPastDeliveryBy}d`);
-  }
   // Lead with the most actionable production signal.
   if (input.lostPartCount > 0) {
     parts.push(`Part scrapped (${input.lostPartCount})`);

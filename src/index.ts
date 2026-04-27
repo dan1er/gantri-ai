@@ -21,6 +21,7 @@ import { MarketingAnalysisConnector } from './connectors/marketing-analysis/conn
 import { ReportsConnector } from './connectors/reports/reports-connector.js';
 import { FeedbackConnector } from './connectors/feedback/feedback-connector.js';
 import { FeedbackRepo } from './storage/repositories/feedback.js';
+import { BroadcastConnector } from './connectors/broadcast/broadcast-connector.js';
 import { GantriPorterConnector } from './connectors/gantri-porter/gantri-porter-connector.js';
 import { GrafanaConnector } from './connectors/grafana/grafana-connector.js';
 import { Ga4Client } from './connectors/ga4/client.js';
@@ -171,6 +172,20 @@ async function main() {
     new ReportsConnector({
       slackClient: app.client,
       getActor: () => getActiveActor(),
+    }),
+  );
+
+  // BroadcastConnector — admin-only one-off DM-blast to every authorized user.
+  // Same Slack-client + actor-context pattern as ReportsConnector.
+  registry.register(
+    new BroadcastConnector({
+      slackClient: app.client,
+      usersRepo,
+      getActor: () => {
+        const a = getActiveActor();
+        if (!a) throw new Error('bot.broadcast_notification called without an actor context');
+        return a;
+      },
     }),
   );
 

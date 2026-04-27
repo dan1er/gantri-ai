@@ -31,7 +31,7 @@ import { GantriPorterConnector } from './connectors/gantri-porter/gantri-porter-
 import { GrafanaConnector } from './connectors/grafana/grafana-connector.js';
 import { Ga4Client } from './connectors/ga4/client.js';
 import { Ga4Connector } from './connectors/ga4/connector.js';
-import { Orchestrator, getActiveActor, getActiveThread } from './orchestrator/orchestrator.js';
+import { Orchestrator, getActiveActor, getActiveThread, runWithContext } from './orchestrator/orchestrator.js';
 import { buildSlackApp } from './slack/app.js';
 import { ReportSubscriptionsRepo } from './reports/reports-repo.js';
 import { ScheduledReportsConnector } from './reports/reports-connector.js';
@@ -273,6 +273,29 @@ async function main() {
     }
     const result = await reportsRunner.tick();
     res.json({ ok: true, result });
+  });
+
+  // POST /internal/recompile-report — admin-only endpoint to recompile a report spec.
+  // Body: { slug: string; intent: string; actorSlackId?: string }
+  // Header: x-internal-secret
+  receiver.router.post('/internal/recompile-report', async (req, res) => {
+    const auth = req.header('x-internal-secret');
+    if (!process.env.INTERNAL_SHARED_SECRET || auth !== process.env.INTERNAL_SHARED_SECRET) {
+      return res.status(403).json({ ok: false, error: 'forbidden' });
+    }
+    const { slug, intent, actorSlackId } = req.body as { slug?: string; intent?: string; actorSlackId?: string };
+    if (!slug || !intent) return res.status(400).json({ ok: false, error: 'slug and intent required' });
+    try {
+      const actor = { slackUserId: actorSlackId ?? 'UK0JM2PTM' };
+      const result = await runWithContext({ actor }, () =>
+        registry.execute('reports.recompile_report', { slug, newIntent: intent, regenerateToken: false }),
+      );
+      res.json({ ok: true, result });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error({ err: msg, slug }, 'internal recompile failed');
+      res.status(500).json({ ok: false, error: msg });
+    }
   });
 
   // Live Reports HTML SPA + data endpoint

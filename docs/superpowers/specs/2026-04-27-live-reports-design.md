@@ -267,6 +267,33 @@ Errors: if any tool fails inside the runner, we return partial results with an `
 
 ---
 
+## Spec drawer ("View spec")
+
+Every report has a small button in the header (icon: `</>` or `ⓘ`, label: *View spec*) that opens a **slide-over drawer from the left** showing the report's full provenance. This is the trust + debug + curiosity surface.
+
+**Drawer contents (top to bottom):**
+- **Intent** — the natural-language ask, exactly as the user typed it. Rendered as a quote block.
+- **Owner + timestamps** — `Created by @user` · `Apr 27, 2026` · `Last refreshed 3 minutes ago` · `Spec version 1`
+- **Data sources** — the distinct tool names referenced by the spec, with the count of calls each (e.g. `northbeam.metrics_explorer × 3`, `gantri.order_stats × 1`).
+- **Spec JSON** — the full validated spec, pretty-printed and syntax-highlighted (Shiki `github-light` theme to match Tremor). Collapsible by section (`data`, `ui`, top-level meta).
+- **Actions** (admin or owner only — checked client-side via the response payload):
+  - *Copy spec JSON* (clipboard)
+  - *Regenerate with new intent…* — opens an inline textarea, on submit fires `reports.recompile_report` and reloads the page.
+  - *View history* — opens a sub-panel listing the last 5 spec versions from `published_reports_history` with timestamps; can preview an old spec or restore.
+  - *Archive report*
+
+**Behavior:**
+- Slides in from the left, ~40% viewport width on desktop, full-width sheet on mobile.
+- Backdrop click or Escape closes.
+- URL hash updates to `#spec` so the drawer state is shareable / linkable (someone can paste `gantri-ai-bot.fly.dev/r/weekly-sales?t=…#spec` and the drawer opens on load).
+- Keyboard shortcut `?` to toggle (Slack-style).
+
+**Why slide-over and not a modal:** modals interrupt the page; a slide-over preserves the report behind the backdrop so the reader can cross-reference. Left-side because the right side is reserved for tooltips and Tremor chart hover cards.
+
+**API impact:** `/r/<slug>/data.json` includes the full `spec` in `meta` (size is sub-5KB — no separate round-trip). Action endpoints (regenerate / archive) are existing tools the drawer calls via `/api/tools/<name>` (already gated by the actor — the drawer reads the actor from a Slack-OAuth cookie or, in phase 1, from a query param tied to the access token).
+
+**Component:** `web/src/components/SpecDrawer.tsx` — shared across all reports. Receives `{intent, spec, meta, canModify}` as props. No report-specific code.
+
 ## The HTML shell
 
 ```ts
@@ -306,8 +333,9 @@ web/
 │   │   ├── TextBlock.tsx
 │   │   └── DividerBlock.tsx
 │   ├── components/
-│   │   ├── ReportHeader.tsx             ← title, subtitle, refresh button, last-updated
+│   │   ├── ReportHeader.tsx             ← title, subtitle, refresh button, last-updated, "View spec" button
 │   │   ├── ReportFooter.tsx             ← sources, "About this report"
+│   │   ├── SpecDrawer.tsx               ← left slide-over: intent, spec JSON (Shiki), actions
 │   │   ├── ErrorState.tsx               ← graceful per-block errors
 │   │   └── LoadingShimmer.tsx
 │   ├── lib/
@@ -345,6 +373,7 @@ A new section in the prompt, parallel to the existing `reports.subscribe` rules:
 - Endpoints: `GET /r/:slug` (HTML), `GET /r/:slug/data.json`
 - Token-based auth (no OAuth yet)
 - Frontend: `kpi`, `chart` (line + bar), `table`, `text`, `divider` block types
+- **`SpecDrawer.tsx`** — left slide-over with intent, spec JSON, owner/timestamps, copy + (owner-gated) regenerate/archive
 - Theming: Inter font, Tailwind, Tremor's default palette tweaked to Gantri colors
 - Deploy
 - Smoke test with 2-3 real reports

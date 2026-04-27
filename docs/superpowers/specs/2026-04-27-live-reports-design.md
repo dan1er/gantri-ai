@@ -267,6 +267,15 @@ Errors: if any tool fails inside the runner, we return partial results with an `
 
 ---
 
+## Brand: logo + favicon
+
+Every report shows the Gantri logo. Location:
+- **Top-left of `ReportHeader`** — the wordmark (`logo-name.png` from `gantri/mantle/public/`), height ~28px, links back to `/r` (a small "your reports" landing page in phase 1, just a list of the user's reports).
+- **Browser favicon** — `favicon.png` from the same source.
+- **Open Graph image** for link unfurls in Slack — uses `logo-bg.png` (1800×1800).
+
+Assets are copied into `web/public/` at build time so they ship with the SPA bundle.
+
 ## Spec drawer ("View spec")
 
 Every report has a small button in the header (icon: `</>` or `ⓘ`, label: *View spec*) that opens a **slide-over drawer from the left** showing the report's full provenance. This is the trust + debug + curiosity surface.

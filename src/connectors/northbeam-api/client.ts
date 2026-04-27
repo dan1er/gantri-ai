@@ -199,10 +199,32 @@ export class NorthbeamApiClient {
    *      to absorb up to 8 hours of TZ offset on either side), then filter
    *      client-side by PT-bucketed time_of_purchase. Caller-facing
    *      startDate/endDate are end-inclusive PT dates.
+   *   4. Undocumented row cap (~1000 per response). With a wide window the
+   *      response truncates and silently drops the most recent days (NB
+   *      returns oldest first). Fix: chunk the request into 30-day windows,
+   *      dedupe by order_id, and concatenate. Each chunk stays well under
+   *      the cap.
    */
   async listOrders(opts: { startDate: string; endDate: string }): Promise<Array<Record<string, unknown>>> {
-    const wideStart = addDays(opts.startDate, -1);
-    const wideEnd = addDays(opts.endDate, 2); // +1 for end-inclusive, +1 more for the PT→UTC offset
+    const CHUNK_DAYS = 30;
+    const chunks = splitDateRange(opts.startDate, opts.endDate, CHUNK_DAYS);
+    const seen = new Set<string>();
+    const all: Array<Record<string, unknown>> = [];
+    for (const c of chunks) {
+      const rows = await this.listOrdersChunk(c.startDate, c.endDate);
+      for (const r of rows) {
+        const id = String(r.order_id ?? r.client_id ?? '');
+        if (id && seen.has(id)) continue;
+        if (id) seen.add(id);
+        all.push(r);
+      }
+    }
+    return all;
+  }
+
+  private async listOrdersChunk(startDate: string, endDate: string): Promise<Array<Record<string, unknown>>> {
+    const wideStart = addDays(startDate, -1);
+    const wideEnd = addDays(endDate, 2); // +1 for end-inclusive, +1 more for the PT→UTC offset
     const qs = `?start_date=${encodeURIComponent(wideStart)}&end_date=${encodeURIComponent(wideEnd)}`;
     let body: unknown = await this.request<unknown>('GET', `/v2/orders${qs}`);
     if (typeof body === 'string') {
@@ -213,12 +235,11 @@ export class NorthbeamApiClient {
     else if (body && typeof body === 'object' && 'data' in body && Array.isArray((body as any).data)) {
       rows = (body as { data: Array<Record<string, unknown>> }).data;
     } else rows = [];
-    // Filter to the requested PT window (inclusive on both ends).
     return rows.filter((o) => {
       const t = o.time_of_purchase;
-      if (typeof t !== 'string') return true; // unknown shape — keep it
+      if (typeof t !== 'string') return true;
       const ptDay = ptDayOf(t);
-      return ptDay >= opts.startDate && ptDay <= opts.endDate;
+      return ptDay >= startDate && ptDay <= endDate;
     });
   }
 
@@ -249,6 +270,23 @@ export class NorthbeamApiClient {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((res) => setTimeout(res, ms));
+}
+
+/**
+ * Split [startDate, endDate] into chunks of at most `chunkDays` calendar days
+ * each, inclusive on both ends. Used by `listOrders` to stay under NB's
+ * undocumented per-response row cap.
+ */
+function splitDateRange(startDate: string, endDate: string, chunkDays: number): Array<{ startDate: string; endDate: string }> {
+  const out: Array<{ startDate: string; endDate: string }> = [];
+  let cursor = startDate;
+  while (cursor <= endDate) {
+    const chunkEnd = addDays(cursor, chunkDays - 1);
+    const end = chunkEnd < endDate ? chunkEnd : endDate;
+    out.push({ startDate: cursor, endDate: end });
+    cursor = addDays(end, 1);
+  }
+  return out;
 }
 
 function addDays(ymd: string, n: number): string {

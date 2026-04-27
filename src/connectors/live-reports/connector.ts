@@ -216,7 +216,76 @@ export class LiveReportsConnector implements Connector {
       smokeWarnings: smoke.errors,
     };
   }
-  private async listMine(): Promise<unknown> { throw new Error('listMine: implemented in Task 10'); }
-  private async recompile(_a: RecompileArgs): Promise<unknown> { throw new Error('recompile: implemented in Task 11'); }
-  private async archive(_a: ArchiveArgs): Promise<unknown> { throw new Error('archive: implemented in Task 11'); }
+  private async listMine() {
+    const actor = this.deps.getActor();
+    if (!actor) return { error: { code: 'NO_ACTOR', message: 'no actor' } };
+    const rows = await this.deps.repo.listByOwner(actor.slackUserId);
+    return {
+      reports: rows.map((r) => ({
+        slug: r.slug,
+        title: r.title,
+        url: `${this.deps.publicBaseUrl}/r/${r.slug}?t=${r.accessToken}`,
+        createdAt: r.createdAt,
+        updatedAt: r.updatedAt,
+        visitCount: r.visitCount,
+        lastVisitedAt: r.lastVisitedAt,
+      })),
+    };
+  }
+
+  private async assertCanModify(slug: string): Promise<{ allowed: boolean; report?: any; reason?: string }> {
+    const actor = this.deps.getActor();
+    if (!actor) return { allowed: false, reason: 'NO_ACTOR' };
+    const report = await this.deps.repo.getBySlug(slug);
+    if (!report) return { allowed: false, reason: 'NOT_FOUND' };
+    const role = await this.deps.getRoleForActor(actor.slackUserId);
+    if (report.ownerSlackId === actor.slackUserId || role === 'admin') return { allowed: true, report };
+    return { allowed: false, reason: 'FORBIDDEN', report };
+  }
+
+  private async recompile(args: RecompileArgs) {
+    const gate = await this.assertCanModify(args.slug);
+    if (!gate.allowed) {
+      const code = gate.reason ?? 'FORBIDDEN';
+      return { error: { code, message: code === 'NOT_FOUND' ? 'Report not found' : 'Only the report author or an admin can recompile' } };
+    }
+    const compileOut = await compileLiveReport({
+      intent: args.newIntent,
+      claude: this.deps.claude,
+      model: this.deps.model,
+      toolCatalog: this.deps.getToolCatalog(),
+    });
+    const smoke = await runLiveSpec(compileOut.spec, this.deps.registry);
+    if (smoke.errors.length === compileOut.spec.data.length) {
+      return { error: { code: 'SMOKE_FAILED', message: 'Every step errored. Spec was not saved.' }, errors: smoke.errors };
+    }
+    const actor = this.deps.getActor()!;
+    const newToken = args.regenerateToken ? generateAccessToken() : undefined;
+    const updated = await this.deps.repo.replaceSpec({
+      slug: args.slug,
+      spec: compileOut.spec,
+      intent: args.newIntent,
+      intentKeywords: extractKeywords(args.newIntent),
+      replacedBy: actor.slackUserId,
+      newAccessToken: newToken,
+    });
+    return {
+      status: 'recompiled' as const,
+      slug: updated.slug,
+      title: updated.title,
+      url: `${this.deps.publicBaseUrl}/r/${updated.slug}?t=${updated.accessToken}`,
+      tokenRotated: !!newToken,
+    };
+  }
+
+  private async archive(args: ArchiveArgs) {
+    const gate = await this.assertCanModify(args.slug);
+    if (!gate.allowed) {
+      const code = gate.reason ?? 'FORBIDDEN';
+      return { error: { code, message: code === 'NOT_FOUND' ? 'Report not found' : 'Only the report author or an admin can archive' } };
+    }
+    const actor = this.deps.getActor()!;
+    await this.deps.repo.archive(args.slug, actor.slackUserId);
+    return { status: 'archived' as const, slug: args.slug };
+  }
 }

@@ -128,6 +128,13 @@ function buildTools(client: NorthbeamApiClient): ToolDef[] {
       schema: MetricsExplorerArgs as z.ZodType<MetricsExplorerArgs>,
       jsonSchema: zodToJsonSchema(MetricsExplorerArgs),
       async execute(args: MetricsExplorerArgs) {
+        // Normalize the dateRange string: LLM has been observed to type
+        // "last_7 days" (with a space) instead of "last_7_days". Replace any
+        // single space inside `last_N days` with an underscore before forwarding.
+        const normalizedDateRange = typeof args.dateRange === 'string'
+          ? (args.dateRange.replace(/\s+/g, '_').toLowerCase() as MetricsExplorerArgs['dateRange'])
+          : args.dateRange;
+
         // Defensive metric-id translation. The compiler LLM has been observed
         // to pass `transactions` (the CSV column name) where the metric ID
         // should be `txns`. Translate common aliases before NB rejects them.
@@ -137,7 +144,7 @@ function buildTools(client: NorthbeamApiClient): ToolDef[] {
           revenue: 'rev',
         };
         const translatedMetrics = args.metrics.map((m) => METRIC_ALIASES[m] ?? m);
-        const normalized = { ...args, metrics: translatedMetrics };
+        const normalized = { ...args, dateRange: normalizedDateRange, metrics: translatedMetrics };
         // The API requires breakdowns[].values to be a non-empty enum array.
         // If the caller didn't pass one, auto-populate from the catalog so the
         // LLM doesn't have to make a discovery call before every breakdown.

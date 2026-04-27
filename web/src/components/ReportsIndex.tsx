@@ -46,7 +46,7 @@ export function ReportsIndex({ token }: { token: string | null }) {
     <div>
       <header className="mb-10">
         <div className="flex items-center justify-between border-b border-gray-200 pb-6">
-          <a href="/r" className="block"><img src="/r/logo-name.png" alt="Gantri" className="h-10 w-auto" /></a>
+          <a href="/r" className="block"><img src="/r/logo-name.png" alt="Gantri" className="h-16 w-auto" /></a>
           <span className="text-xs text-gray-500">Live Reports · all reports</span>
         </div>
         <div className="mt-8">

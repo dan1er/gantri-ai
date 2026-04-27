@@ -189,33 +189,60 @@ export class LiveReportsConnector implements Connector {
       };
     }
 
+    let verificationIssues = this.verifyResolvedRefs(spec, smoke.dataResults);
+    let finalSpec = spec;
+    let finalSmoke = smoke;
+    let finalCompileAttempts = compileOut.attempts;
+    if (verificationIssues.length > 0) {
+      // Retry once with verification feedback
+      const feedback = `Your previous spec produced these verification issues:\n${verificationIssues.map((i) => `- block ${i.blockIndex}: ref="${i.ref}" reason=${i.reason}`).join('\n')}\nFix the data refs / column field names so they match the actual tool output shape. Common pitfall: NB metrics_explorer with breakdown returns rows where the channel name lives under field "breakdown_value" (literally — not the breakdown KEY name). Daily breakdowns include a "date" field. Check field names match real tool output.`;
+      try {
+        const retry = await compileLiveReport({
+          intent: `${args.intent}\n\n--- VERIFICATION FEEDBACK FROM PREVIOUS ATTEMPT ---\n${feedback}`,
+          claude: this.deps.claude,
+          model: this.deps.model,
+          toolCatalog: this.deps.getToolCatalog(),
+          maxAttempts: 1,
+        });
+        const retrySmoke = await runLiveSpec(retry.spec, this.deps.registry);
+        const retryIssues = this.verifyResolvedRefs(retry.spec, retrySmoke.dataResults);
+        if (retrySmoke.errors.length < finalSmoke.errors.length || retryIssues.length < verificationIssues.length) {
+          finalSpec = retry.spec;
+          finalSmoke = retrySmoke;
+          finalCompileAttempts += retry.attempts;
+          verificationIssues = retryIssues;
+        }
+      } catch (err) {
+        // Retry failed; keep original spec.
+        logger.warn({ err }, 'publish re-validation retry failed — keeping original spec');
+      }
+    }
+
     // 4. Persist
-    const slugBase = slugifyTitle(spec.title);
+    const slugBase = slugifyTitle(finalSpec.title);
     const slug = await findFreeSlug(slugBase, async (s) => (await this.deps.repo.getBySlug(s)) !== null);
     const accessToken = generateAccessToken();
     const intentKeywords = extractKeywords(args.intent);
     const created = await this.deps.repo.create({
       slug,
-      title: spec.title,
-      description: spec.description ?? null,
+      title: finalSpec.title,
+      description: finalSpec.description ?? null,
       ownerSlackId: actor.slackUserId,
       intent: args.intent,
       intentKeywords,
-      spec,
+      spec: finalSpec,
       accessToken,
     });
 
-    const verificationIssues = this.verifyResolvedRefs(spec, smoke.dataResults);
-
     const url = `${this.deps.publicBaseUrl}/r/${created.slug}?t=${accessToken}`;
-    logger.info({ slug, owner: actor.slackUserId, attempts: compileOut.attempts, ms: smoke.meta.durationMs }, 'live-report published');
+    logger.info({ slug, owner: actor.slackUserId, attempts: finalCompileAttempts, ms: finalSmoke.meta.durationMs }, 'live-report published');
     return {
       status: 'created' as const,
       slug: created.slug,
       title: created.title,
       url,
-      compileAttempts: compileOut.attempts,
-      smokeWarnings: smoke.errors,
+      compileAttempts: finalCompileAttempts,
+      smokeWarnings: finalSmoke.errors,
       verificationIssues,
     };
   }

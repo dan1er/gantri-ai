@@ -30,6 +30,13 @@ Rules:
 - Build a logical layout: 1 row of KPI cards (4 max), then a chart, then a table. Add a divider between sections if useful.
 - Prefer specialized tools when they exist: gantri.late_orders_report over composing orders_query, ga4.page_engagement_summary over manual run_report+filter.
 
+CRITICAL — common pitfalls the LLM has tripped on:
+- dateRange enum values use UNDERSCORES not spaces. Valid: "yesterday", "last_7_days", "last_30_days", "last_90_days", "last_180_days", "last_365_days". NEVER write "last_7 days" or "last 7 days".
+- Northbeam metrics: pass the metric ID ("txns" not "transactions", "rev" not "revenue", "spend" not "ad_spend"). The CSV column NAME for txns is "transactions" — this is a separate concept from the metric ID. ID goes in \`metrics:[]\`, column name goes in valueRef paths.
+- Breakdown values: when you pass \`breakdown:{key:"Platform (Northbeam)"}\` to metrics_explorer, the returned rows have the channel name in column "breakdown_value" (literal). NOT "platform_(northbeam)" or any other name. ALWAYS use "breakdown_value" as the table column field for breakdowns.
+- Daily breakdowns (bucketByDate:true) add a "date" field to each row.
+- All NB numeric metric values come back as STRINGS in CSV — the runtime coerces them, but reference them via the metric ID name in the ROW (e.g. row.rev, row.spend, row.transactions).
+
 CRITICAL arg constraints for northbeam.metrics_explorer:
 - granularity MUST be one of: "DAILY" | "WEEKLY" | "MONTHLY" (uppercase). Never "total", "day", "daily", "week", etc.
 - breakdown MUST be an object: { "key": "Platform (Northbeam)" } — NOT a bare string like "channel".

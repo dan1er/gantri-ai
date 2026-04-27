@@ -189,7 +189,7 @@ function buildTools(client: NorthbeamApiClient): ToolDef[] {
           };
         } catch (err) {
           if (err instanceof NorthbeamApiError) {
-            return { error: { code: 'NORTHBEAM_API_ERROR', status: err.status, message: err.message, body: err.body } };
+            return { ok: false, error: { code: 'NORTHBEAM_API_ERROR', status: err.status, message: err.message, body: err.body } };
           }
           throw err;
         }
@@ -280,7 +280,7 @@ function buildTools(client: NorthbeamApiClient): ToolDef[] {
           };
         } catch (err) {
           if (err instanceof NorthbeamApiError) {
-            return { error: { code: 'NORTHBEAM_API_ERROR', status: err.status, message: err.message, body: err.body } };
+            return { ok: false, error: { code: 'NORTHBEAM_API_ERROR', status: err.status, message: err.message, body: err.body } };
           }
           throw err;
         }
@@ -333,13 +333,19 @@ export function buildExportPayload(args: MetricsExplorerArgs): DataExportPayload
 }
 
 function presetToPeriodType(preset: string): string {
+  // NB's enum is restricted: only specific N-day buckets are native
+  // (LAST_3/7/14/28/30/60/90/180_DAYS). 365 days isn't one of them — see
+  // their 422 response. Map to LAST_52_WEEKS which is the closest native
+  // bucket; resolveCalendarPreset can produce an exact FIXED range when
+  // truly needed.
   switch (preset) {
     case 'yesterday': return 'YESTERDAY';
     case 'last_7_days': return 'LAST_7_DAYS';
+    case 'last_14_days': return 'LAST_14_DAYS';
     case 'last_30_days': return 'LAST_30_DAYS';
     case 'last_90_days': return 'LAST_90_DAYS';
     case 'last_180_days': return 'LAST_180_DAYS';
-    case 'last_365_days': return 'LAST_365_DAYS';
+    case 'last_365_days': return 'LAST_52_WEEKS';
     default: throw new Error(`unknown date preset: ${preset}`);
   }
 }

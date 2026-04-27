@@ -68,11 +68,11 @@ const QUESTIONS = [
   { n: 29, cat: 'Campañas', q: '¿Cuál fue la campaña más eficiente en Q1 2026?' },
   { n: 30, cat: 'Campañas', q: 'Si tuviera que cortar 20% del presupuesto de Meta, ¿qué campañas cortarías primero?' },
   // GA4 — only fire when user explicitly mentions it
-  { n: 31, cat: 'GA4', q: '¿Cuántas sesiones tuvimos en GA4 los últimos 7 días?' },
-  { n: 32, cat: 'GA4', q: 'Top 10 landing pages por sesiones la semana pasada en Google Analytics' },
-  { n: 33, cat: 'GA4', q: '¿Cuántos usuarios activos hay en el sitio ahora mismo?' },
-  // Routing-canary: this should still fire NB, NOT GA4 (no GA4 trigger words)
-  { n: 34, cat: 'Routing canary (must use NB)', q: '¿Qué canal generó más revenue atribuido la semana pasada?' },
+  { n: 31, cat: 'GA4', q: 'How many sessions did we have in GA4 over the last 7 days?' },
+  { n: 32, cat: 'GA4', q: 'Top 10 landing pages by sessions last week in Google Analytics' },
+  { n: 33, cat: 'GA4', q: 'How many active users are on the site right now?' },
+  // Routing canary: this must fire NB, NOT GA4 (no GA4 trigger words)
+  { n: 34, cat: 'Routing canary (must use NB)', q: 'Which channel generated the most attributed revenue last week?' },
 ];
 
 function parseArgs() {

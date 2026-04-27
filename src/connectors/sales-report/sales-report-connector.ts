@@ -3,7 +3,7 @@ import type { Connector, ToolDef } from '../base/connector.js';
 import { zodToJsonSchema } from '../base/zod-to-json-schema.js';
 import type { GrafanaConnector } from '../grafana/grafana-connector.js';
 import type { NorthbeamApiClient } from '../northbeam-api/client.js';
-import { buildCompareNbTool } from './compare-nb-tool.js';
+import { buildCompareNbTool, buildDiffNbTool } from './compare-nb-tool.js';
 
 /**
  * Wraps Grafana's Sales-dashboard "Full Total" panel SQL as a single tool. The
@@ -78,6 +78,7 @@ export class SalesReportConnector implements Connector {
     const tools: ToolDef[] = [tool];
     if (this.deps.nb) {
       tools.push(buildCompareNbTool({ grafana: this.deps.grafana, nb: this.deps.nb }) as ToolDef);
+      tools.push(buildDiffNbTool({ grafana: this.deps.grafana, nb: this.deps.nb }) as ToolDef);
     }
     return tools;
   }

@@ -152,3 +152,203 @@ function addDays(ymd: string, n: number): string {
 function subDays(ymd: string, n: number): string {
   return addDays(ymd, -n);
 }
+
+/**
+ * Per-order DIFF tool: which specific orders are in NB but not Porter, and
+ * vice versa, joined by `order_id`. Use this when daily counts diverge and the
+ * user wants to know exactly which orders cause the mismatch (and why).
+ */
+const DiffArgs = z.object({
+  dateRange: z.object({
+    startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD PT'),
+    endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD PT'),
+  }),
+  maxExamples: z.number().int().min(1).max(200).default(50).describe('Max sample rows of each diff bucket to include in the response.'),
+});
+type DiffArgs = z.infer<typeof DiffArgs>;
+
+export function buildDiffNbToolPair(): { tool: ToolDef<DiffArgs> } {
+  return { tool: undefined as unknown as ToolDef<DiffArgs> };
+}
+
+export function buildDiffNbTool(deps: CompareNbToolDeps): ToolDef<DiffArgs> {
+  return {
+    name: 'gantri.diff_orders_nb_vs_porter',
+    description: [
+      'Per-order DIFF between Northbeam and Porter for a date range. Use when the user asks why two counts differ, or wants to see WHICH specific orders are missing/extra on either side.',
+      'Pulls Porter orders (type=Order, status NOT IN Unpaid/Cancelled) and NB orders (/v2/orders, excluding is_cancelled/is_deleted), joins by `order_id`, and returns four buckets: only_in_nb, only_in_porter, status_mismatch (same id, Porter has it as Refunded/Lost while NB still treats it as active), revenue_mismatch (same id, totals differ by >$0.50).',
+      'Each bucket entry includes order_id, both totals where available, both timestamps (NB time_of_purchase + Porter placedAt), Porter status, NB tags, and an automatically-classified `likelyCause` field: "tz_edge", "porter_refunded_after", "porter_cancelled_after", "nb_only_record", "porter_only_record", "rounding", or "unknown".',
+      'Returns aggregate counts + a sampling of up to `maxExamples` rows per bucket (full lists can be huge). Always quote the period back. If totals match exactly, all buckets will be empty and the tool returns an explicit "perfect match" flag.',
+    ].join(' '),
+    schema: DiffArgs as z.ZodType<DiffArgs>,
+    jsonSchema: zodToJsonSchema(DiffArgs),
+    async execute(args: DiffArgs) {
+      const { startDate, endDate } = args.dateRange;
+      // ---- Porter: full per-order rows (id, status, placedAt PT, total, type) ----
+      const porterSql = `
+        SELECT
+          t.id::text                                           AS order_id,
+          t.status                                             AS status,
+          t.type                                               AS type,
+          to_char(t."createdAt"   AT TIME ZONE 'America/Los_Angeles', 'YYYY-MM-DD"T"HH24:MI:SS') AS created_pt,
+          to_char(t."placedAt"    AT TIME ZONE 'America/Los_Angeles', 'YYYY-MM-DD"T"HH24:MI:SS') AS placed_pt,
+          to_char(t."completedAt" AT TIME ZONE 'America/Los_Angeles', 'YYYY-MM-DD"T"HH24:MI:SS') AS completed_pt,
+          ROUND((t.amount->>'total')::numeric / 100.0, 2)      AS total
+        FROM "Transactions" t
+        WHERE t."createdAt" >= ($__timeFrom())::timestamp
+          AND t."createdAt" <  ($__timeTo())::timestamp
+          AND t.type = 'Order'
+          AND t.status NOT IN ('Unpaid','Cancelled')
+        ORDER BY t."createdAt"
+      `;
+      const fromMs = Date.parse(`${startDate}T07:00:00.000Z`);
+      const toMs = Date.parse(`${addDays(endDate, 1)}T08:00:00.000Z`);
+      const porterRes = await deps.grafana.runSql({ sql: porterSql, fromMs, toMs, maxRows: 50000 });
+      const idx = (k: string) => porterRes.fields.indexOf(k);
+      const porterById = new Map<string, { orderId: string; total: number; placedPt: string | null; completedPt: string | null; status: string }>();
+      for (const r of porterRes.rows) {
+        const id = String(r[idx('order_id')] ?? '');
+        if (!id) continue;
+        porterById.set(id, {
+          orderId: id,
+          total: Number(r[idx('total')] ?? 0),
+          placedPt: (r[idx('placed_pt')] as string | null) ?? (r[idx('created_pt')] as string | null) ?? null,
+          completedPt: (r[idx('completed_pt')] as string | null) ?? null,
+          status: String(r[idx('status')] ?? ''),
+        });
+      }
+
+      // ---- NB: per-order rows, filter cancelled/deleted ----
+      const nbAll = await deps.nb.listOrders({ startDate, endDate });
+      const nbById = new Map<string, { orderId: string; total: number; timeOfPurchase: string | null; tags: string[]; isCancelled: boolean; isDeleted: boolean; customerEmail: string | null }>();
+      for (const o of nbAll) {
+        const id = String(o.order_id ?? '');
+        if (!id) continue;
+        nbById.set(id, {
+          orderId: id,
+          total: Number(o.purchase_total ?? 0),
+          timeOfPurchase: typeof o.time_of_purchase === 'string' ? (o.time_of_purchase as string) : null,
+          tags: Array.isArray(o.order_tags) ? (o.order_tags as string[]) : [],
+          isCancelled: Boolean(o.is_cancelled),
+          isDeleted: Boolean(o.is_deleted),
+          customerEmail: typeof o.customer_email === 'string' ? (o.customer_email as string) : null,
+        });
+      }
+      // Active NB only for the headline counts
+      const nbActiveCount = [...nbById.values()].filter((o) => !o.isCancelled && !o.isDeleted).length;
+
+      // ---- Bucketize ----
+      type DiffEntry = {
+        order_id: string;
+        nb_total?: number;
+        porter_total?: number;
+        nb_time?: string | null;
+        porter_placed?: string | null;
+        porter_completed?: string | null;
+        porter_status?: string;
+        nb_tags?: string[];
+        nb_is_cancelled?: boolean;
+        nb_is_deleted?: boolean;
+        diff?: number;
+        likelyCause: string;
+      };
+      const onlyInNb: DiffEntry[] = [];
+      const onlyInPorter: DiffEntry[] = [];
+      const revenueMismatch: DiffEntry[] = [];
+      const statusMismatch: DiffEntry[] = [];
+
+      for (const [id, nb] of nbById) {
+        if (nb.isCancelled || nb.isDeleted) continue; // active-only diff
+        const p = porterById.get(id);
+        if (!p) {
+          onlyInNb.push({
+            order_id: id,
+            nb_total: round2(nb.total),
+            nb_time: nb.timeOfPurchase,
+            nb_tags: nb.tags,
+            likelyCause: classifyOnlyInNb(nb.timeOfPurchase, startDate, endDate),
+          });
+          continue;
+        }
+        if (Math.abs(p.total - nb.total) > 0.5) {
+          revenueMismatch.push({
+            order_id: id,
+            nb_total: round2(nb.total),
+            porter_total: round2(p.total),
+            diff: round2(nb.total - p.total),
+            nb_time: nb.timeOfPurchase,
+            porter_placed: p.placedPt,
+            porter_status: p.status,
+            likelyCause: classifyRevenueMismatch(nb.total, p.total, p.status),
+          });
+        }
+        if (p.status === 'Refunded' || p.status === 'Lost') {
+          statusMismatch.push({
+            order_id: id,
+            nb_total: round2(nb.total),
+            porter_total: round2(p.total),
+            porter_status: p.status,
+            porter_completed: p.completedPt,
+            nb_time: nb.timeOfPurchase,
+            likelyCause: p.status === 'Refunded' ? 'porter_refunded_after' : 'porter_lost_after',
+          });
+        }
+      }
+      for (const [id, p] of porterById) {
+        const nb = nbById.get(id);
+        if (!nb || nb.isCancelled || nb.isDeleted) {
+          onlyInPorter.push({
+            order_id: id,
+            porter_total: round2(p.total),
+            porter_placed: p.placedPt,
+            porter_status: p.status,
+            likelyCause: classifyOnlyInPorter(nb, p.placedPt, startDate, endDate),
+          });
+        }
+      }
+
+      const summary = {
+        period: args.dateRange,
+        porter_count: porterById.size,
+        nb_count: nbActiveCount,
+        only_in_nb_count: onlyInNb.length,
+        only_in_porter_count: onlyInPorter.length,
+        revenue_mismatch_count: revenueMismatch.length,
+        status_mismatch_count: statusMismatch.length,
+        perfect_match: onlyInNb.length === 0 && onlyInPorter.length === 0 && revenueMismatch.length === 0 && statusMismatch.length === 0,
+      };
+
+      const cap = args.maxExamples;
+      return {
+        ...summary,
+        only_in_nb: onlyInNb.slice(0, cap),
+        only_in_porter: onlyInPorter.slice(0, cap),
+        revenue_mismatch: revenueMismatch.slice(0, cap),
+        status_mismatch: statusMismatch.slice(0, cap),
+        notes: [
+          'porter_count = transactions where type=Order AND status NOT IN (Unpaid, Cancelled), bucketed by createdAt PT.',
+          'nb_count = /v2/orders excluding is_cancelled / is_deleted, bucketed by time_of_purchase PT.',
+          'Bucket meanings: only_in_nb = NB has it, Porter does not (likely a TZ-edge order placed just outside the window or an NB-only test). only_in_porter = Porter has it, NB does not (likely firePurchaseEvent failed for that order). revenue_mismatch = same order_id, totals differ by >$0.50. status_mismatch = same order_id but Porter shows Refunded/Lost — NB does not auto-flag those.',
+          'likelyCause classifications are heuristic. "tz_edge" means the order falls within ~8h of a window boundary; check the timestamp and confirm.',
+        ],
+      };
+    },
+  };
+}
+
+function classifyOnlyInNb(nbTime: string | null, startDate: string, endDate: string): string {
+  if (!nbTime) return 'unknown';
+  const ptDay = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles', year:'numeric', month:'2-digit', day:'2-digit' }).format(new Date(Date.parse(nbTime)));
+  if (ptDay < startDate || ptDay > endDate) return 'tz_edge';
+  return 'nb_only_record';
+}
+
+function classifyOnlyInPorter(_nb: unknown, _placedPt: string | null, _startDate: string, _endDate: string): string {
+  return 'porter_only_record';
+}
+
+function classifyRevenueMismatch(nbTotal: number, porterTotal: number, porterStatus: string): string {
+  if (porterStatus === 'Refunded' || porterStatus === 'Partially refunded') return 'porter_partial_refund_after';
+  if (Math.abs(nbTotal - porterTotal) < 5.0) return 'rounding';
+  return 'unknown';
+}

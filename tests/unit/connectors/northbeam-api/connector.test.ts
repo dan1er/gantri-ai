@@ -39,6 +39,38 @@ describe('buildExportPayload', () => {
     });
   });
 
+  it('resolves year_to_date to a FIXED range starting Jan 1 of the current year', () => {
+    const p = buildExportPayload({
+      dateRange: 'year_to_date' as any,
+      metrics: ['rev'],
+      attributionModel: 'northbeam_custom__va',
+      accountingMode: 'cash',
+      attributionWindow: '1',
+      granularity: 'DAILY',
+      aggregateData: true,
+    });
+    expect(p.period_type).toBe('FIXED');
+    const year = new Date().getUTCFullYear();
+    expect(p.period_options?.period_starting_at).toBe(`${year}-01-01T00:00:00.000Z`);
+    expect(p.period_options?.period_ending_at).toMatch(/^\d{4}-\d{2}-\d{2}T23:59:59\.\d{3}Z$/);
+  });
+
+  it('resolves month_to_date to a FIXED range starting the 1st of the current month', () => {
+    const p = buildExportPayload({
+      dateRange: 'month_to_date' as any,
+      metrics: ['rev'],
+      attributionModel: 'northbeam_custom__va',
+      accountingMode: 'cash',
+      attributionWindow: '1',
+      granularity: 'DAILY',
+      aggregateData: true,
+    });
+    expect(p.period_type).toBe('FIXED');
+    const now = new Date();
+    const expectedStart = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-01T00:00:00.000Z`;
+    expect(p.period_options?.period_starting_at).toBe(expectedStart);
+  });
+
   it('passes the breakdown through unchanged', () => {
     const p = buildExportPayload({
       dateRange: 'yesterday',

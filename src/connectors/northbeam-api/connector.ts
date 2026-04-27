@@ -54,8 +54,8 @@ export class NorthbeamApiConnector implements Connector {
 
 const DateRange = z.union([
   z
-    .enum(['yesterday', 'last_7_days', 'last_30_days', 'last_90_days', 'last_180_days', 'last_365_days'])
-    .describe('Preset relative window. Use this whenever the question is "last week", "last 30 days", etc.'),
+    .enum(['yesterday', 'last_7_days', 'last_14_days', 'last_30_days', 'last_90_days', 'last_180_days', 'last_365_days', 'this_month', 'last_month', 'month_to_date', 'quarter_to_date', 'year_to_date'])
+    .describe('Preset relative window. Use this whenever the question is "last week", "last 30 days", "year to date", etc. Calendar-relative presets (month_to_date, quarter_to_date, year_to_date, this_month, last_month) are resolved to exact start/end dates before the API call.'),
   z
     .object({
       start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD'),
@@ -293,15 +293,22 @@ function buildTools(client: NorthbeamApiClient): ToolDef[] {
 
 export function buildExportPayload(args: MetricsExplorerArgs): DataExportPayload {
   const breakdowns: DataExportBreakdown[] = args.breakdown ? [args.breakdown] : [];
-  const periodFields: Pick<DataExportPayload, 'period_type' | 'period_options'> =
+  // Resolve calendar-relative presets (month_to_date, quarter_to_date, etc.)
+  // that NB doesn't natively support into explicit {start, end} date ranges.
+  const resolvedDateRange: typeof args.dateRange =
     typeof args.dateRange === 'string'
-      ? { period_type: presetToPeriodType(args.dateRange) }
+      ? (resolveCalendarPreset(args.dateRange) ?? args.dateRange)
+      : args.dateRange;
+
+  const periodFields: Pick<DataExportPayload, 'period_type' | 'period_options'> =
+    typeof resolvedDateRange === 'string'
+      ? { period_type: presetToPeriodType(resolvedDateRange) }
       // The API rejects {from,to} (which the docs example suggests) and demands
       // {period_starting_at, period_ending_at} as ISO 8601 datetimes for FIXED
       // windows. Bare YYYY-MM-DD also gets rejected with "invalid datetime
       // format". We attach midnight UTC to the start and end-of-day to the end
       // so the FIXED window is inclusive of both calendar days.
-      : { period_type: 'FIXED', period_options: { period_starting_at: `${args.dateRange.start}T00:00:00.000Z`, period_ending_at: `${args.dateRange.end}T23:59:59.999Z` } };
+      : { period_type: 'FIXED', period_options: { period_starting_at: `${resolvedDateRange.start}T00:00:00.000Z`, period_ending_at: `${resolvedDateRange.end}T23:59:59.999Z` } };
   return {
     level: args.level,
     time_granularity: args.granularity,
@@ -334,6 +341,38 @@ function presetToPeriodType(preset: string): string {
     case 'last_180_days': return 'LAST_180_DAYS';
     case 'last_365_days': return 'LAST_365_DAYS';
     default: throw new Error(`unknown date preset: ${preset}`);
+  }
+}
+
+/**
+ * Resolve calendar-relative presets that NB doesn't natively support
+ * (last_14_days, month_to_date, quarter_to_date, year_to_date, this_month,
+ * last_month) into explicit {start, end} date objects. NB-native presets pass
+ * through unchanged so the NB API can use its own timezone-aware logic.
+ */
+function resolveCalendarPreset(preset: string): { start: string; end: string } | null {
+  const now = new Date();
+  const todayStr = now.toISOString().slice(0, 10);
+  const sub = (n: number): string => {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - n));
+    return d.toISOString().slice(0, 10);
+  };
+  switch (preset) {
+    case 'last_14_days': return { start: sub(13), end: todayStr };
+    case 'this_month':
+    case 'month_to_date': return { start: `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-01`, end: todayStr };
+    case 'last_month': {
+      const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+      const lastDay = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 0));
+      return { start: d.toISOString().slice(0, 10), end: lastDay.toISOString().slice(0, 10) };
+    }
+    case 'quarter_to_date': {
+      const qStart = Math.floor(now.getUTCMonth() / 3) * 3;
+      const d = new Date(Date.UTC(now.getUTCFullYear(), qStart, 1));
+      return { start: d.toISOString().slice(0, 10), end: todayStr };
+    }
+    case 'year_to_date': return { start: `${now.getUTCFullYear()}-01-01`, end: todayStr };
+    default: return null; // NB-native preset — pass through to API
   }
 }
 

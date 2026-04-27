@@ -67,6 +67,12 @@ const QUESTIONS = [
   { n: 28, cat: 'Campañas', q: '¿Qué campañas tienen el ROAS marginal más bajo? (para decidir cortes de presupuesto)' },
   { n: 29, cat: 'Campañas', q: '¿Cuál fue la campaña más eficiente en Q1 2026?' },
   { n: 30, cat: 'Campañas', q: 'Si tuviera que cortar 20% del presupuesto de Meta, ¿qué campañas cortarías primero?' },
+  // GA4 — only fire when user explicitly mentions it
+  { n: 31, cat: 'GA4', q: '¿Cuántas sesiones tuvimos en GA4 los últimos 7 días?' },
+  { n: 32, cat: 'GA4', q: 'Top 10 landing pages por sesiones la semana pasada en Google Analytics' },
+  { n: 33, cat: 'GA4', q: '¿Cuántos usuarios activos hay en el sitio ahora mismo?' },
+  // Routing-canary: this should still fire NB, NOT GA4 (no GA4 trigger words)
+  { n: 34, cat: 'Routing canary (must use NB)', q: '¿Qué canal generó más revenue atribuido la semana pasada?' },
 ];
 
 function parseArgs() {

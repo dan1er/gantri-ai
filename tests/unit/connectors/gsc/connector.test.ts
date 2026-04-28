@@ -47,7 +47,7 @@ describe('gsc.list_sites', () => {
 });
 
 describe('gsc.search_performance', () => {
-  it('passes the right siteUrl + dateRange + limit to the client and returns rows', async () => {
+  it('passes the right siteUrl + dateRange + limit to the client and returns rows with named dimension fields', async () => {
     const stub = makeStub({
       searchRows: [
         row({ keys: ['gantri'], clicks: 723, impressions: 1186, ctr: 0.61, position: 1.31 }),
@@ -66,12 +66,31 @@ describe('gsc.search_performance', () => {
     expect(r.ok).toBe(true);
     expect(r.data.siteUrl).toBe('sc-domain:gantri.com');
     expect(r.data.rowCount).toBe(2);
+    // Both `keys[0]` and the named `query` field must be populated — the
+    // Live Reports table renderer can only access top-level field names,
+    // not array indices, so a missing `query` field would render as `—`.
     expect(r.data.rows[0].keys[0]).toBe('gantri');
+    expect(r.data.rows[0].query).toBe('gantri');
+    expect(r.data.rows[1].query).toBe('gantri lamp');
     const callArgs = (stub.searchAnalyticsQuery as any).mock.calls[0];
     expect(callArgs[0]).toBe('sc-domain:gantri.com');
     expect(callArgs[1]).toMatchObject({ startDate: '2026-04-01', endDate: '2026-04-22', rowLimit: 100, dataState: 'final' });
     // No lag note for end date 5+ days back.
     expect(r.data.note).toBeUndefined();
+  });
+
+  it('flattens multi-dimension keys into named fields in dim order', async () => {
+    const c = new SearchConsoleConnector(makeStub({
+      searchRows: [row({ keys: ['gantri', 'https://gantri.com/'] })],
+    }));
+    const tool = c.tools.find((t) => t.name === 'gsc.search_performance')!;
+    const r = await tool.execute({
+      dateRange: { startDate: '2026-04-01', endDate: '2026-04-22' },
+      dimensions: ['query', 'page'],
+      sortBy: 'clicks', sortDirection: 'desc', limit: 50,
+    }) as any;
+    expect(r.data.rows[0].query).toBe('gantri');
+    expect(r.data.rows[0].page).toBe('https://gantri.com/');
   });
 
   it('honors siteUrl override (made.gantri.com)', async () => {

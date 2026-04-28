@@ -478,7 +478,7 @@ export const TOOL_OUTPUT_SHAPES: Record<string, ToolOutputSample> = {
     expectedArrayElementKeys: { sites: ['siteUrl', 'permissionLevel'] },
   },
   'gsc.search_performance': {
-    summary: 'Per-row search performance from Google Search Console. { siteUrl, dateRange, dimensions, rowCount, totals: { clicks, impressions, ctr, position }, rows: [{ keys: string[], clicks, impressions, ctr, position }], note? }. `keys` has one entry per requested dimension, in order. CTR is decimal (0.034 = 3.4%); position is the IMPRESSION-WEIGHTED average (already correct, do NOT recompute). `note` appears when range ends within last 3 days (GSC has a 2-3 day reporting lag).',
+    summary: 'Per-row search performance from Google Search Console. { siteUrl, dateRange, dimensions, rowCount, totals: { clicks, impressions, ctr, position }, rows: [{ keys: string[], <one named field per requested dimension>, clicks, impressions, ctr, position }], note? }. **Each row has the dimension values both in `keys[]` (positional) AND as named top-level fields** matching the requested `dimensions` array (e.g. when dimensions=["query"] each row has `query: "gantri"` alongside `keys: ["gantri"]`). Use the named fields for tables/charts (the renderer needs flat field names). CTR is decimal (0.034 = 3.4%); position is the IMPRESSION-WEIGHTED average (already correct, do NOT recompute). `note` appears when range ends within last 3 days (GSC has a 2-3 day reporting lag).',
     example: {
       siteUrl: 'sc-domain:gantri.com',
       dateRange: { startDate: '2026-03-29', endDate: '2026-04-25' },
@@ -486,9 +486,9 @@ export const TOOL_OUTPUT_SHAPES: Record<string, ToolOutputSample> = {
       rowCount: 3,
       totals: { clicks: 2104, impressions: 81350, ctr: 0.0259, position: 18.4 },
       rows: [
-        { keys: ['gantri'], clicks: 723, impressions: 1186, ctr: 0.6096, position: 1.31 },
-        { keys: ['gantri lamp'], clicks: 126, impressions: 201, ctr: 0.6269, position: 1.24 },
-        { keys: ['gantri lighting'], clicks: 95, impressions: 130, ctr: 0.7308, position: 1.18 },
+        { keys: ['gantri'], query: 'gantri', clicks: 723, impressions: 1186, ctr: 0.6096, position: 1.31 },
+        { keys: ['gantri lamp'], query: 'gantri lamp', clicks: 126, impressions: 201, ctr: 0.6269, position: 1.24 },
+        { keys: ['gantri lighting'], query: 'gantri lighting', clicks: 95, impressions: 130, ctr: 0.7308, position: 1.18 },
       ],
     },
     expectedTopLevelKeys: ['siteUrl', 'dateRange', 'dimensions', 'rowCount', 'totals', 'rows'],

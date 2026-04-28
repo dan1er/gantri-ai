@@ -148,7 +148,8 @@ export class SearchConsoleConnector implements Connector {
               dataState: 'final',
             });
             const rawRows = resp.rows ?? [];
-            const sorted = sortRows(rawRows, args.sortBy, args.sortDirection);
+            const flat = rawRows.map((r) => flattenRowByDimensions(r, args.dimensions as GscDimension[]));
+            const sorted = sortFlatRows(flat, args.sortBy, args.sortDirection);
             const totals = computeTotals(rawRows);
             const lagNote = makeLagNote(endDate);
             return {
@@ -205,7 +206,25 @@ function buildDimensionFilters(args: SearchPerformanceArgs): NonNullable<Paramet
   return [{ groupType: 'and', filters }];
 }
 
-function sortRows(rows: SearchAnalyticsRow[], sortBy: 'clicks'|'impressions'|'ctr'|'position', direction: 'asc'|'desc'): SearchAnalyticsRow[] {
+/** Pull each requested dimension's value out of `keys[i]` and surface it as a
+ *  named field alongside `keys`. Without this, a Live Report table that
+ *  references field `query` or `page` renders blank — the renderer can only
+ *  access top-level field names, not array indices. */
+function flattenRowByDimensions(row: SearchAnalyticsRow, dims: GscDimension[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {
+    keys: row.keys,
+    clicks: row.clicks,
+    impressions: row.impressions,
+    ctr: row.ctr,
+    position: row.position,
+  };
+  for (let i = 0; i < dims.length; i++) {
+    out[dims[i]] = row.keys[i] ?? null;
+  }
+  return out;
+}
+
+function sortFlatRows<T extends Record<string, unknown>>(rows: T[], sortBy: 'clicks'|'impressions'|'ctr'|'position', direction: 'asc'|'desc'): T[] {
   const sign = direction === 'desc' ? -1 : 1;
   return [...rows].sort((a, b) => sign * ((a[sortBy] as number) - (b[sortBy] as number)));
 }

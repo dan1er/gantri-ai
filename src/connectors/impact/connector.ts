@@ -151,8 +151,8 @@ export class ImpactConnector implements Connector {
             const campaignId = await this.getCampaignId();
             const all = await this.client.listActions({
               campaignId,
-              startDate: `${startDate}T00:00:00Z`,
-              endDate: `${endDate}T23:59:59Z`,
+              startDate,
+              endDate,
             });
             let filtered = args.partnerId ? all.filter((a) => a.MediaPartnerId === args.partnerId) : all;
             if (args.state !== 'ALL') filtered = filtered.filter((a) => a.State === args.state);
@@ -181,8 +181,8 @@ export class ImpactConnector implements Connector {
             const campaignId = await this.getCampaignId();
             const all = await this.client.listActions({
               campaignId,
-              startDate: `${startDate}T00:00:00Z`,
-              endDate: `${endDate}T23:59:59Z`,
+              startDate,
+              endDate,
             });
             let scoped = args.partnerId ? all.filter((a) => a.MediaPartnerId === args.partnerId) : all;
             if (args.state !== 'ALL') scoped = scoped.filter((a) => a.State === args.state);

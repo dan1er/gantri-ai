@@ -159,22 +159,22 @@ export class ImpactApiClient {
   }
 
   /** All actions in a date range for a given campaign. Impact's `/Actions`
-   *  endpoint caps the window at 45 days (returns 400 otherwise), so we chunk
-   *  longer ranges into ≤45-day slices and concatenate. Callers see one
-   *  flat array regardless of input range — chunking is an implementation
-   *  detail of this client. CampaignId is required by Impact; Gantri has
-   *  exactly one (#19816, "Gantri"). */
+   *  endpoint caps the window at 45 days (returns 400 otherwise) AND requires
+   *  full ISO datetime strings (rejects bare YYYY-MM-DD), so we (a) chunk
+   *  longer ranges into ≤45-day slices and (b) format each slice's bounds as
+   *  start-of-day / end-of-day UTC. Callers pass YYYY-MM-DD only.
+   *  CampaignId is required by Impact; Gantri has exactly one (#19816). */
   async listActions(opts: {
     campaignId: string;
-    startDate: string; // YYYY-MM-DD
-    endDate: string; // YYYY-MM-DD
+    startDate: string; // YYYY-MM-DD (inclusive)
+    endDate: string; // YYYY-MM-DD (inclusive)
   }): Promise<ImpactAction[]> {
     const slices = chunkDateRangeByDays(opts.startDate, opts.endDate, 45);
     const results = await Promise.all(slices.map((s) =>
       this.paginateAll<ImpactAction>('/Actions', 'Actions', {
         CampaignId: opts.campaignId,
-        ActionDateStart: s.startDate,
-        ActionDateEnd: s.endDate,
+        ActionDateStart: `${s.startDate}T00:00:00Z`,
+        ActionDateEnd: `${s.endDate}T23:59:59Z`,
       }),
     ));
     return results.flat();

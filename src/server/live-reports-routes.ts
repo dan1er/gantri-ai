@@ -4,6 +4,7 @@ import type { PublishedReportsRepo } from '../storage/repositories/published-rep
 import type { FeedbackRepo } from '../storage/repositories/feedback.js';
 import { runLiveSpec } from '../reports/live/runner.js';
 import { substituteDateMacros } from '../reports/live/date-macros.js';
+import { computeDataQuality } from '../reports/live/data-quality.js';
 import { logger } from '../logger.js';
 
 interface MinimalRegistry {
@@ -128,7 +129,13 @@ export function mountLiveReportsRoutes(app: Express, deps: LiveReportsRoutesDeps
         resolveSlackName(deps.slackClient, report.ownerSlackId),
       ]);
       void Promise.resolve(deps.repo.recordVisit(slug)).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'recordVisit failed'));
-      res.set('Cache-Control', refresh ? 'no-store' : `public, max-age=${report.spec.cacheTtlSec ?? 300}`);
+      // Cap HTTP-cache window at 5 minutes regardless of `spec.cacheTtlSec`.
+      // The spec value still governs the server-side `tool_result_cache` TTL
+      // (data freshness from upstream). Letting browsers hold a response for
+      // hours hides bug fixes and produces "stale empty report" UX when the
+      // viewer overrides ?range=. 5 min keeps things lively without hammering.
+      const httpMaxAge = Math.min(report.spec.cacheTtlSec ?? 300, 300);
+      res.set('Cache-Control', refresh ? 'no-store' : `public, max-age=${httpMaxAge}, must-revalidate`);
       // Resolve $DATE:… macros in the user-visible payload (title, description,
       // ui block markdown, etc.) — the runner already resolves them in step
       // args, but the LLM sometimes embeds them in prose too. Single `now`
@@ -137,6 +144,7 @@ export function mountLiveReportsRoutes(app: Express, deps: LiveReportsRoutesDeps
       const resolvedUi = substituteDateMacros(result.ui, macroNow);
       const resolvedTitle = typeof substituteDateMacros(report.title, macroNow) === 'string' ? substituteDateMacros(report.title, macroNow) as string : report.title;
       const resolvedDescription = report.description ? (substituteDateMacros(report.description, macroNow) as string) : report.description;
+      const dataQuality = computeDataQuality(result.dataResults, result.errors);
       return res.json({
         dataResults: result.dataResults,
         ui: resolvedUi,
@@ -154,6 +162,7 @@ export function mountLiveReportsRoutes(app: Express, deps: LiveReportsRoutesDeps
           lastRefreshedAt: result.meta.generatedAt,
           effectiveRange,
           parametric: JSON.stringify(report.spec.data ?? []).includes('$REPORT_RANGE'),
+          dataQuality,
         },
       });
     } catch (err) {

@@ -17,6 +17,12 @@ export interface ReportPayload {
     effectiveRange?: unknown;
     parametric?: boolean;
     effectivePeriod?: { startDate: string; endDate: string };
+    dataQuality?: {
+      warnings: Array<{
+        code: 'all_steps_empty' | 'step_errors' | 'partial_empty';
+        message: string;
+      }>;
+    };
   };
 }
 

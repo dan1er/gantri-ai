@@ -11,6 +11,7 @@ import { FeedbackModal } from './components/FeedbackModal.js';
 import { SpecDrawer } from './components/SpecDrawer.js';
 import { ErrorState } from './components/ErrorState.js';
 import { LoadingShimmer } from './components/LoadingShimmer.js';
+import { DataQualityBanner } from './components/DataQualityBanner.js';
 import { ReportsIndex } from './components/ReportsIndex.js';
 import { describeEffectiveRange, rangeKey } from './lib/format.js';
 
@@ -125,6 +126,9 @@ function ReportPage({ slug, token }: { slug: string; token: string }) {
         />
       )}
       {loading && !data && <LoadingShimmer />}
+      {data && data.meta.dataQuality && data.meta.dataQuality.warnings.length > 0 && (
+        <DataQualityBanner warnings={data.meta.dataQuality.warnings} />
+      )}
       {data && (
         <main className={`grid grid-cols-1 sm:grid-cols-4 gap-5 transition-opacity duration-200 ${(loading || refreshing) ? 'opacity-50 pointer-events-none' : ''}`}>
           {(loading || refreshing) && (

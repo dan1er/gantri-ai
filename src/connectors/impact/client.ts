@@ -158,23 +158,60 @@ export class ImpactApiClient {
     return this.paginateAll<ImpactPartner>('/MediaPartners', 'Partners');
   }
 
-  /** All actions in a date range for a given campaign. Impact requires
-   *  CampaignId — Gantri has exactly one (#19816, "Gantri"), so we let
-   *  callers omit it and default to that. */
+  /** All actions in a date range for a given campaign. Impact's `/Actions`
+   *  endpoint caps the window at 45 days (returns 400 otherwise), so we chunk
+   *  longer ranges into ≤45-day slices and concatenate. Callers see one
+   *  flat array regardless of input range — chunking is an implementation
+   *  detail of this client. CampaignId is required by Impact; Gantri has
+   *  exactly one (#19816, "Gantri"). */
   async listActions(opts: {
     campaignId: string;
-    startDate: string; // ISO datetime
-    endDate: string; // ISO datetime
+    startDate: string; // YYYY-MM-DD
+    endDate: string; // YYYY-MM-DD
   }): Promise<ImpactAction[]> {
-    return this.paginateAll<ImpactAction>('/Actions', 'Actions', {
-      CampaignId: opts.campaignId,
-      ActionDateStart: opts.startDate,
-      ActionDateEnd: opts.endDate,
-    });
+    const slices = chunkDateRangeByDays(opts.startDate, opts.endDate, 45);
+    const results = await Promise.all(slices.map((s) =>
+      this.paginateAll<ImpactAction>('/Actions', 'Actions', {
+        CampaignId: opts.campaignId,
+        ActionDateStart: s.startDate,
+        ActionDateEnd: s.endDate,
+      }),
+    ));
+    return results.flat();
   }
 
   /** Single campaign listing — useful for discovering CampaignId at boot. */
   async listCampaigns(): Promise<Array<{ Id: string; Name: string; Currency?: string }>> {
     return this.paginateAll('/Campaigns', 'Campaigns', {}, 5);
   }
+}
+
+/** Split [startDate, endDate] (YYYY-MM-DD, inclusive) into contiguous slices
+ *  whose span is at most `maxDays`. Returned slices reuse YYYY-MM-DD strings.
+ *  Exported for unit testing. */
+export function chunkDateRangeByDays(
+  startDate: string,
+  endDate: string,
+  maxDays: number,
+): Array<{ startDate: string; endDate: string }> {
+  const startMs = Date.UTC(...ymdParts(startDate));
+  const endMs = Date.UTC(...ymdParts(endDate));
+  if (endMs < startMs) return [{ startDate, endDate }];
+  const slices: Array<{ startDate: string; endDate: string }> = [];
+  const oneDayMs = 86_400_000;
+  let cursor = startMs;
+  while (cursor <= endMs) {
+    const sliceEnd = Math.min(cursor + (maxDays - 1) * oneDayMs, endMs);
+    slices.push({ startDate: msToYmd(cursor), endDate: msToYmd(sliceEnd) });
+    cursor = sliceEnd + oneDayMs;
+  }
+  return slices;
+}
+
+function ymdParts(ymd: string): [number, number, number] {
+  const [y, m, d] = ymd.split('-').map(Number);
+  return [y, m - 1, d];
+}
+function msToYmd(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10);
 }

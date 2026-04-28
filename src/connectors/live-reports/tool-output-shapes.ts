@@ -420,17 +420,17 @@ export const TOOL_OUTPUT_SHAPES: Record<string, ToolOutputSample> = {
     expectedArrayElementKeys: { campaigns: ['id', 'name', 'status', 'channel', 'archived', 'scheduled_at', 'send_time', 'created_at'] },
   },
   'klaviyo.list_segments': {
-    summary: 'Klaviyo segments with member counts, sorted by `profile_count` desc. { count, totalAcrossAccount, segments: [{ id, name, profile_count, is_active, is_processing, created, updated }] }. `profile_count` may be null for very-new or processing segments.',
+    summary: 'Klaviyo segments with current member counts + 30-day churn, sorted by `profile_count` desc. { count, totalAcrossAccount, segments: [{ id, name, profile_count, members_added_30d, members_removed_30d, is_active, is_processing, created, updated }] }. `profile_count` and the churn fields may be null if Klaviyo\'s segment-values-report endpoint was rate-limited at fetch time.',
     example: {
       totalAcrossAccount: 38,
       count: 2,
       segments: [
-        { id: 'XnQ8a4', name: 'All Subscribers', profile_count: 124530, is_active: true, is_processing: false, created: '2024-02-01T00:00:00+00:00', updated: '2026-04-27T00:00:00+00:00' },
-        { id: 'YdC9zR', name: 'Engaged 90d', profile_count: 41210, is_active: true, is_processing: false, created: '2024-08-12T00:00:00+00:00', updated: '2026-04-27T00:00:00+00:00' },
+        { id: 'XnQ8a4', name: 'All Subscribers', profile_count: 124530, members_added_30d: 4310, members_removed_30d: 1100, is_active: true, is_processing: false, created: '2024-02-01T00:00:00+00:00', updated: '2026-04-27T00:00:00+00:00' },
+        { id: 'YdC9zR', name: 'Engaged 90d', profile_count: 41210, members_added_30d: 1903, members_removed_30d: 2010, is_active: true, is_processing: false, created: '2024-08-12T00:00:00+00:00', updated: '2026-04-27T00:00:00+00:00' },
       ],
     },
     expectedTopLevelKeys: ['count', 'totalAcrossAccount', 'segments'],
-    expectedArrayElementKeys: { segments: ['id', 'name', 'profile_count', 'is_active', 'is_processing', 'created', 'updated'] },
+    expectedArrayElementKeys: { segments: ['id', 'name', 'profile_count', 'members_added_30d', 'members_removed_30d', 'is_active', 'is_processing', 'created', 'updated'] },
   },
   'klaviyo.campaign_performance': {
     summary: 'Per-campaign aggregated stats from Klaviyo\'s campaign-values-reports. { channel, dateRange, campaignCount, totals: {<summed-metrics>}, campaigns: [{ campaign_id, campaign_name, send_channel, ...requested-metrics }] }. Each campaign carries the metrics requested via `metrics` arg (open_rate, click_rate, conversion_uniques, conversion_value, etc.). `totals` sums only the summable metrics (counts + revenue) — rate metrics are NOT in totals.',

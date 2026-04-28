@@ -252,12 +252,37 @@ export class KlaviyoApiClient {
     return this.paginate<KlaviyoFlowAttrs>('/flows', query);
   }
 
-  /** Segments — Klaviyo charges/exposes `profile_count` on segments via
-   *  `additional-fields[segment]=profile_count`. */
+  /** Segments directory. NOTE: revision 2026-04-15 dropped the
+   *  `additional-fields[segment]=profile_count` parameter — segments no
+   *  longer expose member counts via this endpoint. To get counts, pair
+   *  this with `segmentValuesReport({statistics: ['total_members']})` and
+   *  join on segment id (the connector's `klaviyo.list_segments` tool
+   *  does this). */
   async listSegments(): Promise<KlaviyoResource<KlaviyoSegmentAttrs>[]> {
-    return this.paginate<KlaviyoSegmentAttrs>('/segments', {
-      'additional-fields[segment]': 'profile_count',
-    });
+    return this.paginate<KlaviyoSegmentAttrs>('/segments');
+  }
+
+  /** POST /segment-values-reports — per-segment aggregates over a window.
+   *  The only reliable way to get `total_members` (current size) and
+   *  `members_added`/`members_removed` (churn) on segments today.
+   *  No `conversion_metric_id` required — this report is membership-only. */
+  async segmentValuesReport(opts: {
+    statistics: string[];
+    timeframe: KlaviyoTimeframe;
+    filter?: string;
+  }): Promise<ValuesReportRow[]> {
+    const body = {
+      data: {
+        type: 'segment-values-report',
+        attributes: {
+          statistics: opts.statistics,
+          timeframe: opts.timeframe,
+          ...(opts.filter ? { filter: opts.filter } : {}),
+        },
+      },
+    };
+    const resp = await this.post<ValuesReportResponse>('/segment-values-reports', body);
+    return resp.data?.attributes?.results ?? [];
   }
 
   /** POST /campaign-values-reports — per-campaign aggregated stats over a

@@ -182,37 +182,62 @@ export class KlaviyoConnector implements Connector {
       {
         name: 'klaviyo.list_segments',
         description: [
-          'Klaviyo segments with member counts. One row per segment with id, name, profile_count, is_active, is_processing.',
-          'Use for "how many subscribers in segment X", "list our active segments", or to find segment ids before referencing them elsewhere.',
+          'Klaviyo segments with current member counts and 30-day churn. Each row: id, name, profile_count (current size), members_added_30d, members_removed_30d, is_active, is_processing, created, updated.',
+          'Use for "how many subscribers in segment X", "size of our segments", "which segments are growing", or to find segment ids before referencing them elsewhere.',
+          'profile_count comes from POST /segment-values-reports — if that aggregation is briefly unavailable, the field is null but the segment still appears.',
         ].join(' '),
         schema: ListSegmentsArgs as z.ZodType<z.infer<typeof ListSegmentsArgs>>,
         jsonSchema: zodToJsonSchema(ListSegmentsArgs),
         execute: async (rawArgs) => { const args = rawArgs as ListSegmentsArgs;
           try {
-            const all = await this.client.listSegments();
-            let filtered = args.search
-              ? all.filter((s) => s.attributes.name?.toLowerCase().includes(args.search!.toLowerCase()))
-              : all;
-            if (args.minProfileCount !== undefined) {
-              filtered = filtered.filter((s) => (s.attributes.profile_count ?? 0) >= args.minProfileCount!);
+            // Klaviyo's /segments endpoint stopped exposing member counts in
+            // current revisions. The only reliable source today is the
+            // segment-values-reports endpoint with `total_members`. Fetch
+            // both in parallel and join — the values-report doesn't return
+            // segment names, the directory doesn't return counts.
+            const [directory, valuesRows] = await Promise.all([
+              this.client.listSegments(),
+              this.client.segmentValuesReport({
+                statistics: ['total_members', 'members_added', 'members_removed'],
+                timeframe: { key: 'last_30_days' },
+              }).catch((err) => {
+                logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'klaviyo segment-values-report failed; counts will be null');
+                return [];
+              }),
+            ]);
+            const countsById = new Map<string, { total_members?: number; members_added?: number; members_removed?: number }>();
+            for (const row of valuesRows) {
+              const id = row.groupings.segment_id;
+              if (id) countsById.set(id, row.statistics);
             }
-            // Sort by profile_count desc so the largest segments surface first.
-            filtered.sort((a, b) => (b.attributes.profile_count ?? 0) - (a.attributes.profile_count ?? 0));
+            let filtered = args.search
+              ? directory.filter((s) => s.attributes.name?.toLowerCase().includes(args.search!.toLowerCase()))
+              : directory.slice();
+            if (args.minProfileCount !== undefined) {
+              filtered = filtered.filter((s) => (countsById.get(s.id)?.total_members ?? 0) >= args.minProfileCount!);
+            }
+            // Sort by total_members desc so the largest segments surface first.
+            filtered.sort((a, b) => (countsById.get(b.id)?.total_members ?? 0) - (countsById.get(a.id)?.total_members ?? 0));
             const trimmed = filtered.slice(0, args.limit);
             return {
               ok: true,
               data: {
-                totalAcrossAccount: all.length,
+                totalAcrossAccount: directory.length,
                 count: trimmed.length,
-                segments: trimmed.map((s) => ({
-                  id: s.id,
-                  name: s.attributes.name,
-                  profile_count: s.attributes.profile_count ?? null,
-                  is_active: s.attributes.is_active,
-                  is_processing: s.attributes.is_processing,
-                  created: s.attributes.created ?? null,
-                  updated: s.attributes.updated ?? null,
-                })),
+                segments: trimmed.map((s) => {
+                  const stats = countsById.get(s.id);
+                  return {
+                    id: s.id,
+                    name: s.attributes.name,
+                    profile_count: stats?.total_members ?? null,
+                    members_added_30d: stats?.members_added ?? null,
+                    members_removed_30d: stats?.members_removed ?? null,
+                    is_active: s.attributes.is_active,
+                    is_processing: s.attributes.is_processing,
+                    created: s.attributes.created ?? null,
+                    updated: s.attributes.updated ?? null,
+                  };
+                }),
               },
             };
           } catch (err) { return errorResult(err); }

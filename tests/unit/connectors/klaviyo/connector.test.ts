@@ -47,6 +47,7 @@ function makeStub(opts: {
   segments?: KlaviyoResource<KlaviyoSegmentAttrs>[];
   campaignReportRows?: ValuesReportRow[];
   flowReportRows?: ValuesReportRow[];
+  segmentReportRows?: ValuesReportRow[];
 } = {}) {
   return {
     listMetrics: vi.fn(async () => opts.metrics ?? [PLACED_ORDER]),
@@ -56,6 +57,7 @@ function makeStub(opts: {
     listSegments: vi.fn(async () => opts.segments ?? []),
     campaignValuesReport: vi.fn(async () => opts.campaignReportRows ?? []),
     flowValuesReport: vi.fn(async () => opts.flowReportRows ?? []),
+    segmentValuesReport: vi.fn(async () => opts.segmentReportRows ?? []),
   } as unknown as KlaviyoApiClient;
 }
 
@@ -74,15 +76,34 @@ describe('klaviyo.list_campaigns', () => {
 });
 
 describe('klaviyo.list_segments', () => {
-  it('sorts by profile_count desc and applies minProfileCount', async () => {
+  const segReport = (id: string, total: number, added = 0, removed = 0): ValuesReportRow => ({
+    groupings: { segment_id: id } as any,
+    statistics: { total_members: total, members_added: added, members_removed: removed },
+  });
+
+  it('joins directory + segment-values-report, sorts by total_members, applies minProfileCount', async () => {
     const c = new KlaviyoConnector(makeStub({
-      segments: [segment('s1', 'Tiny test', 5), segment('s2', 'Engaged 90d', 41210), segment('s3', 'All Subs', 124530)],
+      segments: [segment('s1', 'Tiny test', 0), segment('s2', 'Engaged 90d', 0), segment('s3', 'All Subs', 0)],
+      segmentReportRows: [segReport('s1', 5), segReport('s2', 41210, 100, 80), segReport('s3', 124530, 200, 50)],
     }));
     const tool = c.tools.find((t) => t.name === 'klaviyo.list_segments')!;
     const r = await tool.execute({ limit: 100, minProfileCount: 100 }) as any;
     expect(r.ok).toBe(true);
     expect(r.data.count).toBe(2);
     expect(r.data.segments.map((s: any) => s.name)).toEqual(['All Subs', 'Engaged 90d']);
+    expect(r.data.segments[0].profile_count).toBe(124530);
+    expect(r.data.segments[0].members_added_30d).toBe(200);
+  });
+
+  it('returns segments with null counts if segment-values-report fails (degrades gracefully)', async () => {
+    const stub = makeStub({ segments: [segment('s1', 'Foo', 0)] });
+    (stub.segmentValuesReport as any).mockRejectedValueOnce(new Error('rate limited'));
+    const c = new KlaviyoConnector(stub);
+    const tool = c.tools.find((t) => t.name === 'klaviyo.list_segments')!;
+    const r = await tool.execute({ limit: 100 }) as any;
+    expect(r.ok).toBe(true);
+    expect(r.data.count).toBe(1);
+    expect(r.data.segments[0].profile_count).toBeNull();
   });
 });
 

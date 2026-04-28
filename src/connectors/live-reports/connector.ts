@@ -232,6 +232,7 @@ export class LiveReportsConnector implements Connector {
       const HARD_REASONS = new Set([
         'ref_undefined',
         'column_field_missing_in_data',
+        'column_field_not_scalar',
         'unresolved_date_macro',
         'unresolved_report_range',
         'unresolved_dollar_brace',
@@ -248,6 +249,7 @@ export class LiveReportsConnector implements Connector {
           '- NB metrics_explorer with breakdown returns rows where the channel name lives under field "breakdown_value" (literally — not the breakdown KEY name). Daily breakdowns include a "date" field.',
           '- reason="text_block_uses_data_refs" → you wrote `path.to.field` or ${path.to.field} INSIDE a `text` block\'s markdown. Text blocks are rendered as plain markdown — they do NOT template data refs. Replace with a `kpi` block (single value) or a `table` block (rows × columns) that resolves the ref properly. Move the dynamic numbers OUT of the text and into proper data blocks.',
           '- reason="ref_undefined" → the data ref doesn\'t exist in tool output; double-check field names against the real shape.',
+          '- reason="column_field_not_scalar" → a `table` column references a field whose value is an array or object (not renderable as a cell — would render as `—` to the viewer). Pick a different field that is a string/number/boolean. Common fix: tools that return both `keys: ["x"]` (positional array) AND a named scalar (e.g. `query: "x"`) — use the named scalar.',
           '- reason="empty_array" → the tool returned no rows; either fix the args or remove the block.',
           '- reason="unresolved_date_macro" → a `$DATE:<base>[±Nd]` token reached the rendered output without being substituted. Either you used an unknown base name (allowed: today, yesterday, this_monday, last_monday, monday_2w_ago, last_sunday, sunday_2w_ago) OR you embedded the macro as a code-style backticked literal (e.g. `` `$DATE:today` ``) which the runner would still substitute — but the issue here is the regex didn\'t match. Use the macro plain (no backticks needed in prose, e.g. "Comparing $DATE:this_monday to $DATE:today") or replace the literal date altogether.',
           '- reason="unresolved_report_range" → the literal "$REPORT_RANGE" string ended up in user-visible text (title, description, KPI label). That token is only meaningful inside step args. Use the actual period name in human-readable text.',
@@ -432,7 +434,7 @@ export class LiveReportsConnector implements Connector {
     const verificationIssues = this.verifyResolvedRefs(compileOut.spec, smoke.dataResults);
     // Same hard-issue gate as publish — refuse to overwrite a working spec
     // with a broken one. The original report stays intact at its URL.
-    const HARD_REASONS = new Set(['ref_undefined', 'column_field_missing_in_data', 'unresolved_date_macro', 'unresolved_report_range', 'unresolved_dollar_brace']);
+    const HARD_REASONS = new Set(['ref_undefined', 'column_field_missing_in_data', 'column_field_not_scalar', 'unresolved_date_macro', 'unresolved_report_range', 'unresolved_dollar_brace']);
     const hardIssues = verificationIssues.filter((i) => HARD_REASONS.has(i.reason));
     if (hardIssues.length > 0) {
       return {
@@ -563,13 +565,26 @@ export class LiveReportsConnector implements Connector {
         if (v === undefined) issues.push({ blockIndex: idx, ref, reason: 'ref_undefined' });
         else if (Array.isArray(v) && v.length === 0 && (b.type === 'chart' || b.type === 'table')) issues.push({ blockIndex: idx, ref, reason: 'empty_array' });
       }
-      // Also check: for tables, do columns reference fields that exist in the first row?
+      // Also check: for tables, do columns reference fields that exist in the
+      // first row, AND are those values renderable as a cell (scalar) rather
+      // than a complex value (array/object) that would render as `—`?
       if (b.type === 'table') {
         const rows = tryResolve(b.data);
         if (Array.isArray(rows) && rows.length > 0) {
           const sample = rows[0] as Record<string, unknown>;
           for (const col of b.columns) {
-            if (!(col.field in sample)) issues.push({ blockIndex: idx, ref: `${b.data}[].${col.field}`, reason: 'column_field_missing_in_data' });
+            if (!(col.field in sample)) {
+              issues.push({ blockIndex: idx, ref: `${b.data}[].${col.field}`, reason: 'column_field_missing_in_data' });
+            } else {
+              const v = sample[col.field];
+              // Table cells render scalars only. Arrays / non-null objects come
+              // through as `—` and look like a bug to the viewer (this is the
+              // failure that bit gsc.search_performance: `keys: ['gantri']`).
+              const isScalar = v === null || v === undefined || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean';
+              if (!isScalar) {
+                issues.push({ blockIndex: idx, ref: `${b.data}[].${col.field}`, reason: 'column_field_not_scalar' });
+              }
+            }
           }
         }
       }

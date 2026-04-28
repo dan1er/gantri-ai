@@ -20,10 +20,29 @@ import { ImpactApiClient, ImpactApiError, type ImpactAction, type ImpactApiConfi
  * queries without translating between vocabularies.
  */
 
-const DateRange = z.object({
-  startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD').describe('Inclusive start, PT calendar day.'),
-  endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD').describe('Inclusive end, PT calendar day.'),
-});
+/** Live-reports-compatible date range. Accepts the canonical
+ *  `{ startDate, endDate }` AND the runner-substituted shapes
+ *  (`{ start, end }` from a custom range, or a preset string from the
+ *  date picker). The connector normalizes every shape to `{ startDate,
+ *  endDate }` before any logic runs, so specs can pass `dateRange:
+ *  '$REPORT_RANGE'` directly. */
+const PT_PRESETS = [
+  'yesterday', 'last_7_days', 'last_14_days', 'last_30_days', 'last_90_days',
+  'last_180_days', 'last_365_days', 'this_month', 'last_month',
+  'month_to_date', 'quarter_to_date', 'year_to_date',
+] as const;
+const DateRange = z.union([
+  z.object({
+    startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD').describe('Inclusive start, PT calendar day.'),
+    endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD').describe('Inclusive end, PT calendar day.'),
+  }),
+  z.object({
+    start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD'),
+    end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD'),
+  }),
+  z.enum(PT_PRESETS).describe('Live-reports preset string (resolved to a concrete PT range internally).'),
+]);
+type DateRangeArg = z.infer<typeof DateRange>;
 
 const ListPartnersArgs = z.object({
   search: z.string().optional().describe('Optional case-insensitive substring filter on Name or Description (e.g. "Wirecutter", "Skimlinks").'),
@@ -128,7 +147,7 @@ export class ImpactConnector implements Connector {
         jsonSchema: zodToJsonSchema(ListActionsArgs),
         execute: async (rawArgs) => { const args = rawArgs as ListActionsArgs;
           try {
-            const { startDate, endDate } = args.dateRange;
+            const { startDate, endDate } = normalizeDateRange(args.dateRange);
             const campaignId = await this.getCampaignId();
             const all = await this.client.listActions({
               campaignId,
@@ -139,7 +158,7 @@ export class ImpactConnector implements Connector {
             if (args.state !== 'ALL') filtered = filtered.filter((a) => a.State === args.state);
             const trimmed = filtered.slice(0, args.limit);
             return {
-              dateRange: args.dateRange,
+              dateRange: normalizeDateRange(args.dateRange),
               totalMatching: filtered.length,
               returnedCount: trimmed.length,
               actions: trimmed.map(projectAction),
@@ -158,7 +177,7 @@ export class ImpactConnector implements Connector {
         jsonSchema: zodToJsonSchema(PartnerPerformanceArgs),
         execute: async (rawArgs) => { const args = rawArgs as PartnerPerformanceArgs;
           try {
-            const { startDate, endDate } = args.dateRange;
+            const { startDate, endDate } = normalizeDateRange(args.dateRange);
             const campaignId = await this.getCampaignId();
             const all = await this.client.listActions({
               campaignId,
@@ -216,7 +235,7 @@ export class ImpactConnector implements Connector {
               { actions: 0, revenue: 0, payout: 0 },
             );
             return {
-              dateRange: args.dateRange,
+              dateRange: normalizeDateRange(args.dateRange),
               partnerCount: rows.length,
               totals: {
                 actions: totals.actions,
@@ -269,6 +288,63 @@ function errorResult(err: unknown) {
 }
 
 function round2(n: number): number { return Math.round(n * 100) / 100; }
+
+function ptToday(now: Date = new Date()): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+}
+function addDaysIso(ymd: string, n: number): string {
+  const [y, m, d] = ymd.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + n);
+  return dt.toISOString().slice(0, 10);
+}
+function presetToRange(preset: string): { startDate: string; endDate: string } {
+  const today = ptToday();
+  switch (preset) {
+    case 'yesterday': { const y = addDaysIso(today, -1); return { startDate: y, endDate: y }; }
+    case 'last_7_days': return { startDate: addDaysIso(today, -6), endDate: today };
+    case 'last_14_days': return { startDate: addDaysIso(today, -13), endDate: today };
+    case 'last_30_days': return { startDate: addDaysIso(today, -29), endDate: today };
+    case 'last_90_days': return { startDate: addDaysIso(today, -89), endDate: today };
+    case 'last_180_days': return { startDate: addDaysIso(today, -179), endDate: today };
+    case 'last_365_days': return { startDate: addDaysIso(today, -364), endDate: today };
+    case 'this_month':
+    case 'month_to_date': {
+      const [y, m] = today.split('-');
+      return { startDate: `${y}-${m}-01`, endDate: today };
+    }
+    case 'last_month': {
+      const [yStr, mStr] = today.split('-');
+      const y = Number(yStr); const m = Number(mStr);
+      const lmY = m === 1 ? y - 1 : y;
+      const lmM = m === 1 ? 12 : m - 1;
+      const startDate = `${lmY}-${String(lmM).padStart(2, '0')}-01`;
+      const lastDay = new Date(Date.UTC(y, m - 1, 0)).getUTCDate();
+      const endDate = `${lmY}-${String(lmM).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+      return { startDate, endDate };
+    }
+    case 'quarter_to_date': {
+      const [yStr, mStr] = today.split('-');
+      const m = Number(mStr);
+      const qStartMonth = Math.floor((m - 1) / 3) * 3 + 1;
+      return { startDate: `${yStr}-${String(qStartMonth).padStart(2, '0')}-01`, endDate: today };
+    }
+    case 'year_to_date': {
+      const [y] = today.split('-');
+      return { startDate: `${y}-01-01`, endDate: today };
+    }
+    default: throw new Error(`Unknown PT preset: ${preset}`);
+  }
+}
+
+/** Collapse the union DateRangeArg shape into the canonical `{ startDate,
+ *  endDate }` the connector uses internally. Accepts preset string,
+ *  `{ start, end }`, or `{ startDate, endDate }`. */
+function normalizeDateRange(input: DateRangeArg): { startDate: string; endDate: string } {
+  if (typeof input === 'string') return presetToRange(input);
+  if ('startDate' in input && 'endDate' in input) return { startDate: input.startDate, endDate: input.endDate };
+  return { startDate: input.start, endDate: input.end };
+}
 
 /** Factory used by index.ts so the wiring stays consistent with other connectors. */
 export function buildImpactConnector(cfg: ImpactApiConfig): ImpactConnector {

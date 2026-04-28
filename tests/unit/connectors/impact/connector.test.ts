@@ -86,9 +86,49 @@ describe('impact.list_actions', () => {
     }) as any;
     expect(r.actions[0].porter_order_id).toBe('53904');
   });
+
+  it('accepts preset-string dateRange (live-reports $REPORT_RANGE path)', async () => {
+    // Regression: live-reports runner resolves $REPORT_RANGE to a preset string
+    // (e.g. "last_30_days"); the tool must accept that shape, not only {startDate,endDate}.
+    const c = new ImpactConnector(makeStub({ actions: [action({ Id: '99' })] }));
+    const tool = c.tools.find((t) => t.name === 'impact.list_actions')!;
+    const r = await tool.execute({
+      dateRange: 'last_30_days',
+      state: 'ALL', limit: 10,
+    }) as any;
+    expect(r.totalMatching).toBe(1);
+    expect(r.actions[0].id).toBe('99');
+    // dateRange in the response is normalized to {startDate,endDate}
+    expect(r.dateRange.startDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(r.dateRange.endDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  it('accepts {start,end} dateRange (alternate live-reports shape)', async () => {
+    const c = new ImpactConnector(makeStub({ actions: [action({ Id: '7' })] }));
+    const tool = c.tools.find((t) => t.name === 'impact.list_actions')!;
+    const r = await tool.execute({
+      dateRange: { start: '2026-04-01', end: '2026-04-30' },
+      state: 'ALL', limit: 10,
+    }) as any;
+    expect(r.totalMatching).toBe(1);
+    expect(r.dateRange).toEqual({ startDate: '2026-04-01', endDate: '2026-04-30' });
+  });
 });
 
 describe('impact.partner_performance', () => {
+  it('accepts preset-string dateRange (live-reports $REPORT_RANGE path)', async () => {
+    const c = new ImpactConnector(makeStub({
+      actions: [action({ MediaPartnerId: 'P1', MediaPartnerName: 'A', Amount: '100', Payout: '5' })],
+    }));
+    const tool = c.tools.find((t) => t.name === 'impact.partner_performance')!;
+    const r = await tool.execute({
+      dateRange: 'this_month',
+      sortBy: 'revenue', state: 'ALL', limit: 50,
+    }) as any;
+    expect(r.partnerCount).toBe(1);
+    expect(r.dateRange.startDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
   it('aggregates revenue+payout per partner with state breakdown', async () => {
     const c = new ImpactConnector(makeStub({
       actions: [

@@ -172,6 +172,7 @@ export class ImpactConnector implements Connector {
           'Aggregate conversion metrics by partner over a date range. Returns one row per partner with: id, name, actions (count), revenue (sum of Amount), payout (sum of commissions), roas (revenue/payout), avg_order_value, and a state breakdown { PENDING, APPROVED, LOCKED, CLEARED, REVERSED } so you can spot pending-heavy or reversal-heavy partners.',
           'Use for "top 10 Impact partners by revenue this quarter", "which partners have the highest ROAS / lowest CAC?", "rank partners by payout last month". For raw per-conversion data, use `impact.list_actions`.',
           'IMPORTANT: revenue here is Impact-attributed gross sale amount. To compare with NB or Porter, use the same date range and remember Impact only sees orders that came through a tracked partner link.',
+          'When filtering by state=REVERSED (or any state representing canceled / non-revenue actions), expect revenue=0 and payout=0 in the response — the count of reversed actions lives in `totals.actions` and per-partner `actions` / `state_breakdown.REVERSED`. A response with `partnerCount > 0` and `totals.actions > 0` means there ARE matching actions, even when revenue is 0. For "which partners have the most reversed actions", call with state=REVERSED, sortBy=actions.',
         ].join(' '),
         schema: PartnerPerformanceArgs as z.ZodType<z.infer<typeof PartnerPerformanceArgs>>,
         jsonSchema: zodToJsonSchema(PartnerPerformanceArgs),

@@ -404,6 +404,66 @@ export const TOOL_OUTPUT_SHAPES: Record<string, ToolOutputSample> = {
     expectedArrayElementKeys: { partners: ['partner_id', 'partner_name', 'actions', 'revenue', 'payout', 'roas', 'avg_order_value', 'state_breakdown'] },
   },
 
+  // ---------- Klaviyo email/SMS ----------
+  'klaviyo.list_campaigns': {
+    summary: 'Klaviyo campaign directory for a given channel (email|sms|mobile_push). { channel, count, totalAcrossAccount, campaigns: [{ id, name, status, channel, archived, scheduled_at, send_time, created_at }] }. Use to resolve a campaign name → id, or enumerate everything sent recently. For metrics use `klaviyo.campaign_performance`.',
+    example: {
+      channel: 'email',
+      totalAcrossAccount: 142,
+      count: 2,
+      campaigns: [
+        { id: '01KMJV10DFFA44PRQ2DM6706K5', name: 'Spring Collection Launch', status: 'Sent', channel: 'email', archived: false, scheduled_at: '2026-04-15T17:00:00+00:00', send_time: '2026-04-15T17:00:14+00:00', created_at: '2026-04-14T11:23:00+00:00' },
+        { id: '01KM3PKSYQH2N3PYRN6NDS1QJ5', name: 'Friends-and-Family Discount', status: 'Sent', channel: 'email', archived: false, scheduled_at: '2026-04-08T17:00:00+00:00', send_time: '2026-04-08T17:00:11+00:00', created_at: '2026-04-07T09:11:00+00:00' },
+      ],
+    },
+    expectedTopLevelKeys: ['channel', 'count', 'totalAcrossAccount', 'campaigns'],
+    expectedArrayElementKeys: { campaigns: ['id', 'name', 'status', 'channel', 'archived', 'scheduled_at', 'send_time', 'created_at'] },
+  },
+  'klaviyo.list_segments': {
+    summary: 'Klaviyo segments with member counts, sorted by `profile_count` desc. { count, totalAcrossAccount, segments: [{ id, name, profile_count, is_active, is_processing, created, updated }] }. `profile_count` may be null for very-new or processing segments.',
+    example: {
+      totalAcrossAccount: 38,
+      count: 2,
+      segments: [
+        { id: 'XnQ8a4', name: 'All Subscribers', profile_count: 124530, is_active: true, is_processing: false, created: '2024-02-01T00:00:00+00:00', updated: '2026-04-27T00:00:00+00:00' },
+        { id: 'YdC9zR', name: 'Engaged 90d', profile_count: 41210, is_active: true, is_processing: false, created: '2024-08-12T00:00:00+00:00', updated: '2026-04-27T00:00:00+00:00' },
+      ],
+    },
+    expectedTopLevelKeys: ['count', 'totalAcrossAccount', 'segments'],
+    expectedArrayElementKeys: { segments: ['id', 'name', 'profile_count', 'is_active', 'is_processing', 'created', 'updated'] },
+  },
+  'klaviyo.campaign_performance': {
+    summary: 'Per-campaign aggregated stats from Klaviyo\'s campaign-values-reports. { channel, dateRange, campaignCount, totals: {<summed-metrics>}, campaigns: [{ campaign_id, campaign_name, send_channel, ...requested-metrics }] }. Each campaign carries the metrics requested via `metrics` arg (open_rate, click_rate, conversion_uniques, conversion_value, etc.). `totals` sums only the summable metrics (counts + revenue) — rate metrics are NOT in totals.',
+    example: {
+      channel: 'email',
+      dateRange: { startDate: '2026-03-29', endDate: '2026-04-27' },
+      campaignCount: 3,
+      totals: { recipients: 42715, conversion_uniques: 6, conversion_value: 1567.44, unsubscribes: 113 },
+      campaigns: [
+        { campaign_id: '01KMJV10DFFA44PRQ2DM6706K5', campaign_name: 'Spring Collection Launch', send_channel: 'email', recipients: 15449, open_rate: 0.62814, click_rate: 0.01049, conversion_uniques: 4, conversion_value: 871.44, unsubscribes: 40 },
+        { campaign_id: '01KM2R2ZJ6FKSQV4X5WG59E19D', campaign_name: 'Made-to-Order Reminder', send_channel: 'email', recipients: 15399, open_rate: 0.64869, click_rate: 0.00962, conversion_uniques: 1, conversion_value: 220, unsubscribes: 31 },
+        { campaign_id: '01KM3PKSYQH2N3PYRN6NDS1QJ5', campaign_name: 'Friends-and-Family Discount', send_channel: 'email', recipients: 11867, open_rate: 0.5997, click_rate: 0.0055, conversion_uniques: 1, conversion_value: 476, unsubscribes: 42 },
+      ],
+    },
+    expectedTopLevelKeys: ['channel', 'dateRange', 'campaignCount', 'totals', 'campaigns'],
+    expectedArrayElementKeys: { campaigns: ['campaign_id', 'campaign_name', 'send_channel'] },
+  },
+  'klaviyo.flow_performance': {
+    summary: 'Per-flow aggregated stats from Klaviyo\'s flow-values-reports. { channel, dateRange, flowCount, totals, flows: [{ flow_id, flow_message_id, flow_name, send_channel, ...requested-metrics }] }. Same metric surface as campaign_performance. Pass `channel: "all"` to include every send_channel a flow uses.',
+    example: {
+      channel: 'email',
+      dateRange: { startDate: '2026-03-29', endDate: '2026-04-27' },
+      flowCount: 2,
+      totals: { recipients: 12340, conversion_uniques: 88, conversion_value: 14210.55 },
+      flows: [
+        { flow_id: 'PJh0a4', flow_message_id: 'PJh0a4-msg-1', flow_name: 'Welcome Series', send_channel: 'email', recipients: 8210, open_rate: 0.71, click_rate: 0.085, conversion_uniques: 67, conversion_value: 11200.45 },
+        { flow_id: 'AbW2cD', flow_message_id: 'AbW2cD-msg-1', flow_name: 'Abandoned Checkout', send_channel: 'email', recipients: 4130, open_rate: 0.58, click_rate: 0.12, conversion_uniques: 21, conversion_value: 3010.10 },
+      ],
+    },
+    expectedTopLevelKeys: ['channel', 'dateRange', 'flowCount', 'totals', 'flows'],
+    expectedArrayElementKeys: { flows: ['flow_id', 'flow_name', 'send_channel'] },
+  },
+
   'grafana.sql': {
     summary: 'Run an ad-hoc SQL query against the Porter read-replica. { fields, rows }. Each `rows[]` entry is a flat object with column names as keys. Amounts on Transactions.amount are JSON in cents — divide by 100 for dollars in the SQL itself.',
     example: {

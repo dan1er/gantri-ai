@@ -33,6 +33,7 @@ import { GrafanaConnector } from './connectors/grafana/grafana-connector.js';
 import { Ga4Client } from './connectors/ga4/client.js';
 import { Ga4Connector } from './connectors/ga4/connector.js';
 import { buildImpactConnector } from './connectors/impact/connector.js';
+import { buildKlaviyoConnector } from './connectors/klaviyo/connector.js';
 import { Orchestrator, getActiveActor, getActiveThread, runWithContext } from './orchestrator/orchestrator.js';
 import { buildSlackApp } from './slack/app.js';
 import { ReportSubscriptionsRepo } from './reports/reports-repo.js';
@@ -53,6 +54,7 @@ async function main() {
     grafanaUrl, grafanaToken, grafanaPostgresDsUid,
     ga4PropertyId, ga4ServiceAccountKey,
     impactAccountSid, impactAuthToken,
+    klaviyoApiKey,
   ] = await Promise.all([
     readVaultSecret(supabase, 'NORTHBEAM_EMAIL'),
     readVaultSecret(supabase, 'NORTHBEAM_PASSWORD'),
@@ -69,6 +71,7 @@ async function main() {
     readVaultSecret(supabase, 'GA4_SERVICE_ACCOUNT_KEY').catch(() => null),
     readVaultSecret(supabase, 'IMPACT_ACCOUNT_SID').catch(() => null),
     readVaultSecret(supabase, 'IMPACT_AUTH_TOKEN').catch(() => null),
+    readVaultSecret(supabase, 'KLAVIYO_API_KEY').catch(() => null),
   ]);
 
   const registry = new ConnectorRegistry();
@@ -145,6 +148,13 @@ async function main() {
     logger.info('impact connector registered');
   } else {
     logger.warn('impact not configured (IMPACT_ACCOUNT_SID and/or IMPACT_AUTH_TOKEN missing) — skipping registration');
+  }
+
+  if (klaviyoApiKey) {
+    registry.register(buildKlaviyoConnector({ apiKey: klaviyoApiKey }));
+    logger.info('klaviyo connector registered');
+  } else {
+    logger.warn('klaviyo not configured (KLAVIYO_API_KEY missing) — skipping registration');
   }
 
   const claude = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });

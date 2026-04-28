@@ -47,4 +47,14 @@ export const DEFAULT_CACHE_POLICIES: Record<string, CachePolicy> = {
   'impact.list_partners': { version: 1, settleDays: 0, openTtlSec: 600, dateRangePath: '_none' },
   'impact.list_actions': { version: 1, settleDays: 45, openTtlSec: 300, dateRangePath: 'dateRange' },
   'impact.partner_performance': { version: 1, settleDays: 45, openTtlSec: 300, dateRangePath: 'dateRange' },
+
+  // Klaviyo — *-values-reports endpoints have brutal limits (1/s burst,
+  // 2/min steady, 225/day). Past-period data is settled (Klaviyo doesn't
+  // backfill opens/clicks beyond a few days), so we settle aggressively.
+  // Open windows refresh every 10 min — clicks/opens trickle in for
+  // ~24-48h after a send.
+  'klaviyo.list_campaigns': { version: 1, settleDays: 0, openTtlSec: 600, dateRangePath: '_none' },
+  'klaviyo.list_segments': { version: 1, settleDays: 0, openTtlSec: 600, dateRangePath: '_none' },
+  'klaviyo.campaign_performance': { version: 1, settleDays: 7, openTtlSec: 600, dateRangePath: 'dateRange' },
+  'klaviyo.flow_performance': { version: 1, settleDays: 7, openTtlSec: 600, dateRangePath: 'dateRange' },
 };

@@ -40,4 +40,11 @@ export const DEFAULT_CACHE_POLICIES: Record<string, CachePolicy> = {
   // mutating — never cache.
   'reports.find_similar_reports': { version: 1, settleDays: 0, openTtlSec: 60, dateRangePath: '_none' },
   'reports.list_my_reports': { version: 1, settleDays: 0, openTtlSec: 30, dateRangePath: '_none' },
+
+  // Impact.com — actions go PENDING → APPROVED at Locking Date (~30d after
+  // event), then CLEARED. Anything ~45+ days old has settled. Live data
+  // (PENDING) changes throughout the day as new conversions land.
+  'impact.list_partners': { version: 1, settleDays: 0, openTtlSec: 600, dateRangePath: '_none' },
+  'impact.list_actions': { version: 1, settleDays: 45, openTtlSec: 300, dateRangePath: 'dateRange' },
+  'impact.partner_performance': { version: 1, settleDays: 45, openTtlSec: 300, dateRangePath: 'dateRange' },
 };

@@ -32,6 +32,7 @@ import { GantriPorterConnector } from './connectors/gantri-porter/gantri-porter-
 import { GrafanaConnector } from './connectors/grafana/grafana-connector.js';
 import { Ga4Client } from './connectors/ga4/client.js';
 import { Ga4Connector } from './connectors/ga4/connector.js';
+import { buildImpactConnector } from './connectors/impact/connector.js';
 import { Orchestrator, getActiveActor, getActiveThread, runWithContext } from './orchestrator/orchestrator.js';
 import { buildSlackApp } from './slack/app.js';
 import { ReportSubscriptionsRepo } from './reports/reports-repo.js';
@@ -51,6 +52,7 @@ async function main() {
     porterApiBaseUrl, porterBotEmail, porterBotPassword,
     grafanaUrl, grafanaToken, grafanaPostgresDsUid,
     ga4PropertyId, ga4ServiceAccountKey,
+    impactAccountSid, impactAuthToken,
   ] = await Promise.all([
     readVaultSecret(supabase, 'NORTHBEAM_EMAIL'),
     readVaultSecret(supabase, 'NORTHBEAM_PASSWORD'),
@@ -65,6 +67,8 @@ async function main() {
     readVaultSecret(supabase, 'GRAFANA_POSTGRES_DS_UID'),
     readVaultSecret(supabase, 'GA4_PROPERTY_ID').catch(() => null),
     readVaultSecret(supabase, 'GA4_SERVICE_ACCOUNT_KEY').catch(() => null),
+    readVaultSecret(supabase, 'IMPACT_ACCOUNT_SID').catch(() => null),
+    readVaultSecret(supabase, 'IMPACT_AUTH_TOKEN').catch(() => null),
   ]);
 
   const registry = new ConnectorRegistry();
@@ -134,6 +138,13 @@ async function main() {
     logger.info({ propertyId: ga4PropertyId }, 'ga4 connector registered');
   } else {
     logger.warn('ga4 not configured (GA4_PROPERTY_ID and/or GA4_SERVICE_ACCOUNT_KEY missing) — skipping registration');
+  }
+
+  if (impactAccountSid && impactAuthToken) {
+    registry.register(buildImpactConnector({ accountSid: impactAccountSid, authToken: impactAuthToken }));
+    logger.info('impact connector registered');
+  } else {
+    logger.warn('impact not configured (IMPACT_ACCOUNT_SID and/or IMPACT_AUTH_TOKEN missing) — skipping registration');
   }
 
   const claude = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });

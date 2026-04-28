@@ -362,6 +362,48 @@ export const TOOL_OUTPUT_SHAPES: Record<string, ToolOutputSample> = {
     expectedTopLevelKeys: ['dashboard', 'period', 'panels'],
     expectedArrayElementKeys: { panels: ['panelId', 'title', 'fields', 'rows'] },
   },
+  // ---------- Impact.com partnerships ----------
+  'impact.list_partners': {
+    summary: 'Media partner directory for the Impact.com brand account. { count, totalAcrossAccount, partners: [{ id, name, description, mediatype, country, status }] }. `count` = filtered (after `search`); `totalAcrossAccount` = full directory. Use this to resolve a human-readable partner name (e.g. "Wirecutter") to the `id` you need for `impact.partner_performance` / `impact.list_actions`.',
+    example: {
+      count: 2,
+      totalAcrossAccount: 130,
+      partners: [
+        { id: '10078', name: 'Skimbit Ltd.', description: 'Skimlinks is the leader in commerce content...', mediatype: 'Content', country: 'GB', status: 'Active' },
+        { id: '3121345', name: 'Benable', description: '', mediatype: 'Content', country: 'US', status: 'Active' },
+      ],
+    },
+    expectedTopLevelKeys: ['count', 'totalAcrossAccount', 'partners'],
+    expectedArrayElementKeys: { partners: ['id', 'name', 'description', 'mediatype', 'country', 'status'] },
+  },
+  'impact.list_actions': {
+    summary: 'Per-conversion drilldown — one row per action (sale or signup) attributed to a partner. { dateRange, totalMatching, returnedCount, actions[] }. Each action has partner_id+name, state (PENDING/APPROVED/LOCKED/CLEARED/REVERSED), amount (gross sale), payout (commission), currency, dates, and `porter_order_id` which JOINS DIRECTLY to `gantri.orders_query`/Porter Transactions.id. Numeric fields are real numbers (already coerced from Impact CSV strings).',
+    example: {
+      dateRange: { startDate: '2026-04-20', endDate: '2026-04-27' },
+      totalMatching: 11,
+      returnedCount: 2,
+      actions: [
+        { id: '19816.6684.1552541', partner_id: '390418', partner_name: 'Wildfire Systems', state: 'PENDING', amount: 248, payout: 9.92, currency: 'USD', event_date: '2026-04-20T17:54:31-07:00', locking_date: '2026-05-28T00:00:00-07:00', cleared_date: '', referring_type: 'CLICK_COOKIE', referring_domain: '', promo_code: null, porter_order_id: '53904', customer_status: 'New', customer_country: 'US', customer_region: 'District of Columbia', customer_city: 'Washington' },
+      ],
+    },
+    expectedTopLevelKeys: ['dateRange', 'totalMatching', 'returnedCount', 'actions'],
+    expectedArrayElementKeys: { actions: ['id', 'partner_id', 'partner_name', 'state', 'amount', 'payout', 'currency', 'event_date', 'porter_order_id', 'customer_status'] },
+  },
+  'impact.partner_performance': {
+    summary: 'Aggregates over /Actions, one row per partner. { dateRange, partnerCount, totals: { actions, revenue, payout, roas }, partners: [{ partner_id, partner_name, actions, revenue, payout, roas, avg_order_value, state_breakdown }] }. `state_breakdown` is an object keyed by Impact state (PENDING/APPROVED/LOCKED/CLEARED/REVERSED) with per-state counts — useful to spot pending-heavy or reversal-heavy partners.',
+    example: {
+      dateRange: { startDate: '2026-04-01', endDate: '2026-04-26' },
+      partnerCount: 3,
+      totals: { actions: 24, revenue: 5420.18, payout: 271.01, roas: 20 },
+      partners: [
+        { partner_id: '390418', partner_name: 'Wildfire Systems', actions: 9, revenue: 2230.5, payout: 89.22, roas: 25, avg_order_value: 247.83, state_breakdown: { PENDING: 7, APPROVED: 2 } },
+        { partner_id: '10078', partner_name: 'Skimbit Ltd.', actions: 8, revenue: 1980, payout: 99, roas: 20, avg_order_value: 247.5, state_breakdown: { PENDING: 5, APPROVED: 3 } },
+      ],
+    },
+    expectedTopLevelKeys: ['dateRange', 'partnerCount', 'totals', 'partners'],
+    expectedArrayElementKeys: { partners: ['partner_id', 'partner_name', 'actions', 'revenue', 'payout', 'roas', 'avg_order_value', 'state_breakdown'] },
+  },
+
   'grafana.sql': {
     summary: 'Run an ad-hoc SQL query against the Porter read-replica. { fields, rows }. Each `rows[]` entry is a flat object with column names as keys. Amounts on Transactions.amount are JSON in cents — divide by 100 for dollars in the SQL itself.',
     example: {

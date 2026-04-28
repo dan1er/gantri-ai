@@ -49,6 +49,10 @@ export const WHITELISTED_TOOLS = new Set<string>([
   'grafana.sql',
   'grafana.run_dashboard',
   'grafana.list_dashboards',
+  // Impact.com partnerships
+  'impact.list_partners',
+  'impact.list_actions',
+  'impact.partner_performance',
 ]);
 
 const ToolName = z.string().refine((t) => WHITELISTED_TOOLS.has(t), {

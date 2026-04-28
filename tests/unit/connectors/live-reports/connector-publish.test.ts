@@ -42,7 +42,16 @@ function fakeSlackClient() {
   return { conversations: { open }, chat: { postMessage }, _postMessage: postMessage, _open: open };
 }
 
-function makeConnector(opts: { intentJson: string; runOk?: boolean; isAdmin?: boolean; existing?: any[] }) {
+function makeConnector(opts: {
+  intentJson: string;
+  runOk?: boolean;
+  isAdmin?: boolean;
+  existing?: any[];
+  /** Override the visual verifier. Default null (disabled, since unit
+   *  tests can't launch real Chromium). Pass a function to assert the
+   *  visual-verification hook is wired correctly. */
+  visualVerifier?: ((url: string) => Promise<import('../../../../src/connectors/live-reports/visual-verifier.js').VisualVerificationResult>) | null;
+}) {
   const repo = fakeRepo();
   if (opts.existing) (repo.listAll as any).mockResolvedValue(opts.existing);
   const claude = fakeClaude(opts.intentJson);
@@ -61,6 +70,11 @@ function makeConnector(opts: { intentJson: string; runOk?: boolean; isAdmin?: bo
       getActor: () => ({ slackUserId: 'UDANNY' }),
       getRoleForActor: async () => (opts.isAdmin ? 'admin' : 'user'),
       slackClient: slackClient as never,
+      // Default: disable visual verification in unit tests — it would
+      // try to launch a real Chromium against a URL that doesn't exist
+      // locally. Tests that exercise the visual-verifier hook pass an
+      // explicit stub.
+      visualVerifier: opts.visualVerifier === undefined ? null : opts.visualVerifier,
     }),
   };
 }
@@ -167,5 +181,42 @@ describe('reports.publish_live_report', () => {
     const dmText = (slackClient._postMessage as any).mock.calls[0][0].text as string;
     expect(dmText).toContain('text_block_uses_data_refs');
     expect(dmText).toContain('this_week.totalOrders');
+  });
+
+  it('archives the report and DMs failure when visual verification fails', async () => {
+    const intentJson = JSON.stringify(validSpec);
+    const verifierFailure = vi.fn(async () => ({
+      ok: false,
+      issues: [{ severity: 'error' as const, code: 'table_cell_empty' as const, message: 'Table #0: every first-column cell is "—"' }],
+      metrics: { durationMs: 100, finalUrl: 'x', httpStatus: 200, consoleErrorCount: 0, networkFailureCount: 0 },
+    }));
+    const { conn, repo, slackClient } = makeConnector({ intentJson, visualVerifier: verifierFailure });
+    const tool = conn.tools.find((t) => t.name === 'reports.publish_live_report')!;
+    await tool.execute({ intent: 'Weekly sales', forceCreate: true });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(verifierFailure).toHaveBeenCalledTimes(1);
+    expect(repo.archive).toHaveBeenCalledTimes(1);
+    expect(repo.archive).toHaveBeenCalledWith(expect.any(String), 'UDANNY');
+    const dmText = (slackClient._postMessage as any).mock.calls.at(-1)?.[0]?.text ?? '';
+    expect(dmText).toContain('visual_verification_failed');
+    expect(dmText).toContain('table_cell_empty');
+  });
+
+  it('publishes successfully when visual verification passes', async () => {
+    const intentJson = JSON.stringify(validSpec);
+    const verifierOk = vi.fn(async () => ({
+      ok: true,
+      issues: [],
+      metrics: { durationMs: 100, finalUrl: 'x', httpStatus: 200, consoleErrorCount: 0, networkFailureCount: 0 },
+    }));
+    const { conn, repo, slackClient } = makeConnector({ intentJson, visualVerifier: verifierOk });
+    const tool = conn.tools.find((t) => t.name === 'reports.publish_live_report')!;
+    await tool.execute({ intent: 'Weekly sales', forceCreate: true });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(verifierOk).toHaveBeenCalledTimes(1);
+    expect(repo.archive).not.toHaveBeenCalled();
+    expect(repo.create).toHaveBeenCalledTimes(1);
+    const dmText = (slackClient._postMessage as any).mock.calls.at(-1)?.[0]?.text ?? '';
+    expect(dmText).toContain('listo');
   });
 });

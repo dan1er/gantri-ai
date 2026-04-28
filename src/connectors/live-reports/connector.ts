@@ -27,6 +27,12 @@ export interface LiveReportsConnectorDeps {
   /** Cached enum catalogs (NB metrics/breakdowns/attribution models) injected
    *  into the compiler prompt so the LLM never invents an invalid arg value. */
   liveCatalogs?: LiveCatalogs;
+  /** Override the visual verifier for tests / disable it explicitly by
+   *  passing `null`. Defaults to the real headless-Chromium verifier when
+   *  unset. The verifier loads the published URL in headless Chromium and
+   *  refuses to publish when the page renders broken (SPA crash, /data.json
+   *  4xx/5xx, blank root, all-dash table cells, etc.). */
+  visualVerifier?: ((url: string) => Promise<import('./visual-verifier.js').VisualVerificationResult>) | null;
 }
 
 const FindArgs = z.object({
@@ -342,8 +348,45 @@ export class LiveReportsConnector implements Connector {
       });
 
       const url = `${this.deps.publicBaseUrl}/r/${created.slug}?t=${accessToken}`;
+
+      // Visual verification — load the report in headless Chromium and
+      // confirm it actually renders. Catches what data-shape verification
+      // can't: SPA crashes, /data.json 4xx/5xx, blank pages, "couldn't
+      // load" error states, and tables where every first-column cell is
+      // a dash (the GSC `keys` failure mode). One attempt; failure
+      // unpublishes the report and DMs the user. `visualVerifier: null`
+      // disables it explicitly (tests).
+      let visualResult: import('./visual-verifier.js').VisualVerificationResult | null = null;
+      if (this.deps.visualVerifier !== null) {
+        try {
+          const verify = this.deps.visualVerifier
+            ?? (async (u: string) => {
+              const mod = await import('./visual-verifier.js');
+              return mod.verifyReportVisually({ url: u });
+            });
+          visualResult = await verify(url);
+        } catch (err) {
+          logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'visual verification crashed — falling through');
+        }
+      }
+      if (visualResult && !visualResult.ok) {
+        // Unpublish: archive the row so the URL stops resolving and the
+        // report never appears in listings. Spec history is preserved.
+        try { await this.deps.repo.archive(created.slug, actor.slackUserId); } catch (delErr) { logger.warn({ delErr }, 'archive after visual verification failed'); }
+        const errorIssues = visualResult.issues.filter((i) => i.severity === 'error');
+        const issueList = errorIssues.slice(0, 6).map((i) => `• ${i.code}: ${i.message}`).join('\n');
+        const more = errorIssues.length > 6 ? `\n…and ${errorIssues.length - 6} more` : '';
+        await this.notifyFailure(
+          actor.slackUserId,
+          'visual_verification_failed',
+          `The compiled report didn\'t render correctly when I loaded it in a headless browser, so I unpublished it instead of giving you a broken link.\n\nIssues:\n${issueList}${more}\n\nFix: rephrase the request with more specific details (exact metric names, dimensions, field names) and try again.`,
+        );
+        logger.warn({ slug, owner: actor.slackUserId, errors: errorIssues.length, durationMs: visualResult.metrics.durationMs }, 'live-report unpublished after visual verification failure');
+        return;
+      }
+
       const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
-      logger.info({ slug, owner: actor.slackUserId, attempts: finalCompileAttempts, ms: finalSmoke.meta.durationMs, elapsedSec }, 'live-report published (async)');
+      logger.info({ slug, owner: actor.slackUserId, attempts: finalCompileAttempts, ms: finalSmoke.meta.durationMs, elapsedSec, visualOk: visualResult?.ok ?? null, visualMs: visualResult?.metrics.durationMs ?? null }, 'live-report published (async)');
       await this.notifySuccess(actor.slackUserId, {
         title: created.title,
         url,

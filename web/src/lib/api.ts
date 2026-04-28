@@ -41,7 +41,13 @@ export async function fetchReport(
     params.set('to', range.end);
   }
   const url = `/r/${slug}/data.json?${params.toString()}`;
-  const res = await fetch(url);
+  // `cache: 'no-cache'` forces the browser to revalidate via If-None-Match,
+  // even when its HTTP cache thinks the response is fresh. This protects
+  // viewers whose cache holds a stale response from an earlier server bug:
+  // without it, a broken cached payload (e.g. partnerCount=0) keeps loading
+  // until cacheTtlSec expires. Network impact is small — server returns 304
+  // when ETag matches.
+  const res = await fetch(url, { cache: 'no-cache' });
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`HTTP ${res.status}: ${body}`);

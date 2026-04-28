@@ -58,6 +58,10 @@ export const WHITELISTED_TOOLS = new Set<string>([
   'klaviyo.list_segments',
   'klaviyo.campaign_performance',
   'klaviyo.flow_performance',
+  // Google Search Console (SEO)
+  'gsc.list_sites',
+  'gsc.search_performance',
+  'gsc.inspect_url',
 ]);
 
 const ToolName = z.string().refine((t) => WHITELISTED_TOOLS.has(t), {

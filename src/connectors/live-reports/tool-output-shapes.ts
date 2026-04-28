@@ -464,6 +464,61 @@ export const TOOL_OUTPUT_SHAPES: Record<string, ToolOutputSample> = {
     expectedArrayElementKeys: { flows: ['flow_id', 'flow_name', 'send_channel'] },
   },
 
+  // ---------- Google Search Console (SEO) ----------
+  'gsc.list_sites': {
+    summary: 'Verified GSC properties this OAuth identity has access to. { count, sites: [{ siteUrl, permissionLevel }] }. For Gantri the canonical properties are `sc-domain:gantri.com` and `sc-domain:made.gantri.com`.',
+    example: {
+      count: 2,
+      sites: [
+        { siteUrl: 'sc-domain:gantri.com', permissionLevel: 'siteOwner' },
+        { siteUrl: 'sc-domain:made.gantri.com', permissionLevel: 'siteOwner' },
+      ],
+    },
+    expectedTopLevelKeys: ['count', 'sites'],
+    expectedArrayElementKeys: { sites: ['siteUrl', 'permissionLevel'] },
+  },
+  'gsc.search_performance': {
+    summary: 'Per-row search performance from Google Search Console. { siteUrl, dateRange, dimensions, rowCount, totals: { clicks, impressions, ctr, position }, rows: [{ keys: string[], clicks, impressions, ctr, position }], note? }. `keys` has one entry per requested dimension, in order. CTR is decimal (0.034 = 3.4%); position is the IMPRESSION-WEIGHTED average (already correct, do NOT recompute). `note` appears when range ends within last 3 days (GSC has a 2-3 day reporting lag).',
+    example: {
+      siteUrl: 'sc-domain:gantri.com',
+      dateRange: { startDate: '2026-03-29', endDate: '2026-04-25' },
+      dimensions: ['query'],
+      rowCount: 3,
+      totals: { clicks: 2104, impressions: 81350, ctr: 0.0259, position: 18.4 },
+      rows: [
+        { keys: ['gantri'], clicks: 723, impressions: 1186, ctr: 0.6096, position: 1.31 },
+        { keys: ['gantri lamp'], clicks: 126, impressions: 201, ctr: 0.6269, position: 1.24 },
+        { keys: ['gantri lighting'], clicks: 95, impressions: 130, ctr: 0.7308, position: 1.18 },
+      ],
+    },
+    expectedTopLevelKeys: ['siteUrl', 'dateRange', 'dimensions', 'rowCount', 'totals', 'rows'],
+    expectedArrayElementKeys: { rows: ['keys', 'clicks', 'impressions', 'ctr', 'position'] },
+  },
+  'gsc.inspect_url': {
+    summary: 'Single-URL deep dive via the URL Inspection API. Flat object: { url, indexStatusVerdict, coverageState, robotsTxtState, indexingState, pageFetchState, lastCrawlTime, googleCanonical, userCanonical, crawledAs, sitemap[], referringUrls[], mobileUsabilityVerdict, mobileUsabilityIssues[], ampVerdict, ampIssues[], richResultsVerdict, richResultsItems[] }. Verdicts are usually "PASS" / "FAIL" / "PARTIAL" / "NEUTRAL".',
+    example: {
+      url: 'https://gantri.com/products/atto-table-light',
+      indexStatusVerdict: 'PASS',
+      coverageState: 'Indexed, not submitted in sitemap',
+      robotsTxtState: 'ALLOWED',
+      indexingState: 'INDEXING_ALLOWED',
+      pageFetchState: 'SUCCESSFUL',
+      lastCrawlTime: '2026-04-22T14:32:11Z',
+      googleCanonical: 'https://gantri.com/products/atto-table-light',
+      userCanonical: 'https://gantri.com/products/atto-table-light',
+      crawledAs: 'MOBILE',
+      sitemap: ['https://gantri.com/sitemap.xml'],
+      referringUrls: ['https://gantri.com/products', 'https://gantri.com/'],
+      mobileUsabilityVerdict: 'PASS',
+      mobileUsabilityIssues: [],
+      ampVerdict: 'PASS',
+      ampIssues: [],
+      richResultsVerdict: 'PASS',
+      richResultsItems: [{ richResultType: 'Products', name: 'Atto Table Light', issues: [] }],
+    },
+    expectedTopLevelKeys: ['url', 'indexStatusVerdict', 'coverageState', 'robotsTxtState', 'indexingState', 'pageFetchState', 'lastCrawlTime', 'googleCanonical', 'userCanonical', 'crawledAs', 'sitemap', 'referringUrls', 'mobileUsabilityVerdict', 'mobileUsabilityIssues', 'ampVerdict', 'ampIssues', 'richResultsVerdict', 'richResultsItems'],
+  },
+
   'grafana.sql': {
     summary: 'Run an ad-hoc SQL query against the Porter read-replica. { fields, rows }. Each `rows[]` entry is a flat object with column names as keys. Amounts on Transactions.amount are JSON in cents — divide by 100 for dollars in the SQL itself.',
     example: {

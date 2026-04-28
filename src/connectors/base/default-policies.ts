@@ -57,4 +57,11 @@ export const DEFAULT_CACHE_POLICIES: Record<string, CachePolicy> = {
   'klaviyo.list_segments': { version: 1, settleDays: 0, openTtlSec: 600, dateRangePath: '_none' },
   'klaviyo.campaign_performance': { version: 1, settleDays: 7, openTtlSec: 600, dateRangePath: 'dateRange' },
   'klaviyo.flow_performance': { version: 1, settleDays: 7, openTtlSec: 600, dateRangePath: 'dateRange' },
+
+  // Google Search Console — data has a 2-3 day lag plus a small day-N+1
+  // settle. After 5 days it's final. Open windows refresh every 10 min.
+  // URL Inspection state changes slowly; cap at 30 min.
+  'gsc.list_sites': { version: 1, settleDays: 0, openTtlSec: 3600, dateRangePath: '_none' },
+  'gsc.search_performance': { version: 1, settleDays: 5, openTtlSec: 600, dateRangePath: 'dateRange' },
+  'gsc.inspect_url': { version: 1, settleDays: 0, openTtlSec: 1800, dateRangePath: '_none' },
 };

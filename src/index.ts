@@ -34,6 +34,7 @@ import { Ga4Client } from './connectors/ga4/client.js';
 import { Ga4Connector } from './connectors/ga4/connector.js';
 import { buildImpactConnector } from './connectors/impact/connector.js';
 import { buildKlaviyoConnector } from './connectors/klaviyo/connector.js';
+import { buildSearchConsoleConnector } from './connectors/gsc/connector.js';
 import { Orchestrator, getActiveActor, getActiveThread, runWithContext } from './orchestrator/orchestrator.js';
 import { buildSlackApp } from './slack/app.js';
 import { ReportSubscriptionsRepo } from './reports/reports-repo.js';
@@ -55,6 +56,7 @@ async function main() {
     ga4PropertyId, ga4ServiceAccountKey,
     impactAccountSid, impactAuthToken,
     klaviyoApiKey,
+    gscOauthClientId, gscOauthClientSecret, gscOauthRefreshToken,
   ] = await Promise.all([
     readVaultSecret(supabase, 'NORTHBEAM_EMAIL'),
     readVaultSecret(supabase, 'NORTHBEAM_PASSWORD'),
@@ -72,6 +74,9 @@ async function main() {
     readVaultSecret(supabase, 'IMPACT_ACCOUNT_SID').catch(() => null),
     readVaultSecret(supabase, 'IMPACT_AUTH_TOKEN').catch(() => null),
     readVaultSecret(supabase, 'KLAVIYO_API_KEY').catch(() => null),
+    readVaultSecret(supabase, 'GSC_OAUTH_CLIENT_ID').catch(() => null),
+    readVaultSecret(supabase, 'GSC_OAUTH_CLIENT_SECRET').catch(() => null),
+    readVaultSecret(supabase, 'GSC_OAUTH_REFRESH_TOKEN').catch(() => null),
   ]);
 
   const registry = new ConnectorRegistry();
@@ -155,6 +160,17 @@ async function main() {
     logger.info('klaviyo connector registered');
   } else {
     logger.warn('klaviyo not configured (KLAVIYO_API_KEY missing) — skipping registration');
+  }
+
+  if (gscOauthClientId && gscOauthClientSecret && gscOauthRefreshToken) {
+    registry.register(buildSearchConsoleConnector({
+      clientId: gscOauthClientId,
+      clientSecret: gscOauthClientSecret,
+      refreshToken: gscOauthRefreshToken,
+    }));
+    logger.info('gsc connector registered');
+  } else {
+    logger.warn('gsc not configured (GSC_OAUTH_CLIENT_ID / GSC_OAUTH_CLIENT_SECRET / GSC_OAUTH_REFRESH_TOKEN missing) — skipping registration');
   }
 
   const claude = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });

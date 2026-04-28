@@ -31,7 +31,7 @@ The trigger: in production today, the bot answered "any 404 page?" with a clean 
 
 - **No writes.** No submitting sitemaps, requesting reindex, or removing URLs. Read-only.
 - **No keyword research replacement.** GSC tells us what Google *already* sends us — not what we *could* rank for. That's a separate tool (Ahrefs, Semrush) and out of scope.
-- **No multi-property aggregation in v1.** Gantri is one verified property (`https://gantri.com`); the connector resolves it lazily and proceeds. If a future workspace adds subdomains, revisit.
+- **No multi-property aggregation in v1.** Gantri uses two GSC properties — `https://gantri.com/` (storefront, default) and `https://made.gantri.com/` (made-to-order subdomain). The connector exposes both via the optional `siteUrl` arg; defaults to `gantri.com` and the LLM passes `siteUrl: 'https://made.gantri.com/'` when the user names the made-side. No automatic cross-property roll-up.
 - **No real-time data.** Search Console data has a 2-3 day delay. The connector is honest about that — never serves "today" or "yesterday" results.
 - **No crawl-error or coverage-report endpoints.** Google deprecated those in favor of URL Inspection (per-URL, on-demand). We use Inspection for the same purpose at the questions where it matters.
 - **Not in MVP:** sitemaps API (low LLM utility for daily questions). Defer to v2 if the team starts auditing sitemap freshness.
@@ -334,6 +334,7 @@ New section in `src/orchestrator/prompts.ts`, routed via the existing "*5x. <con
   • **`gsc.search_performance`** — workhorse. Per-row clicks/impressions/ctr/position over a date range, broken by date|query|page|country|device|searchAppearance. Sort + filter (page/query/country/device). Use for "top queries", "low-CTR pages", "ranking trend", "GSC clicks for /products/*", "404s in Google (filter page contains '/404')".
   • **`gsc.inspect_url`** — single-URL deep dive. Indexing verdict, last crawl, canonical, mobile usability, rich-results verdicts. Use for "is X indexed", "why isn't X indexed", "what does Google see as the canonical for X".
   • **`gsc.list_sites`** — list verified properties. Mostly internal/discovery.
+  • **Properties in scope**: `https://gantri.com/` (default — storefront, all the marketing pages and product detail pages live here) and `https://made.gantri.com/` (made-to-order subdomain — the configurator and order-status flows live here). For any storefront/SEO question default to `gantri.com`; pass `siteUrl: 'https://made.gantri.com/'` only when the user explicitly names the made-side ("indexing on made.gantri.com", "search traffic to the configurator").
   • **GSC vs GA4**: GSC is PRE-click (Google's view: SERP impressions, clicks, rank). GA4 is POST-click (real visits, behavior). Don't conflate them. For "how many people came from Google", GA4 organic. For "how many times did Google show us in search", GSC impressions. For "are our SEO efforts working", GSC position trend + GSC clicks trend.
   • **Data lag**: Search Console data is 2-3 days behind. NEVER claim "today's" or "yesterday's" GSC data — note the lag in any answer that ends within the last 3 days.
 ```
@@ -428,7 +429,7 @@ A pass means: bot picked the right tool, response is well-formed, latency under 
 ## Open questions (resolve before implementation)
 
 1. **Reuse the GA4 service account or mint a new one?** Lean **reuse** — fewer secrets, fewer setup steps, and the blast radius of a key rotation is the same either way (the bot has multiple critical secrets that all need rotation handling). Decision: reuse unless GCP IAM forbids it.
-2. **Is `https://gantri.com/` the only verified property?** Need to confirm via the GSC UI before coding. If there are multiple (HTTP/HTTPS, www/non-www, subdomains), pick the canonical one and document in the README. Mitigation: do this check on Day 1 before any code.
+2. ✅ **RESOLVED — two properties in scope**: `https://gantri.com/` (default) and `https://made.gantri.com/` (made-to-order subdomain). Connector accepts `siteUrl` arg with `gantri.com` default. Prompt gives the LLM both URLs and tells it to pass `made.gantri.com` when the user names the made-side.
 3. **Do we want the `searchAppearance` dimension exposed?** It surfaces things like "Web Light", "AMP", "Rich Result". Probably yes — surface it but don't promote it in the tool description; it's niche.
 4. **Should `search_performance` accept multiple page filters (e.g. "/products/*" OR "/blog/*")?** GSC's API supports group filters (`groupType: 'and'`). v1: single filter only — the LLM can compose two calls if needed. Revisit if patterns emerge.
 

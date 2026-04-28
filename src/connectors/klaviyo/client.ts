@@ -123,11 +123,28 @@ export class KlaviyoApiClient {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
   private readonly revision: string;
+  /** In-memory TTL cache for directory lookups (campaigns/flows/segments/
+   *  metrics). These don't depend on dateRange so they're shared across
+   *  every tool call — without this, every campaign_performance/
+   *  flow_performance invocation re-paginates a slow directory before
+   *  doing any actual work. 10-minute TTL is a reasonable compromise:
+   *  long enough to amortize across a Live Report's parallel steps,
+   *  short enough that newly-created campaigns appear within minutes. */
+  private readonly directoryCache = new Map<string, { value: unknown; expiresAt: number }>();
+  private readonly directoryTtlMs = 10 * 60 * 1000;
 
   constructor(private readonly cfg: KlaviyoApiConfig) {
     this.baseUrl = cfg.baseUrl ?? 'https://a.klaviyo.com/api';
     this.fetchImpl = cfg.fetchImpl ?? fetch;
     this.revision = cfg.revision ?? DEFAULT_REVISION;
+  }
+
+  private async memoize<T>(key: string, factory: () => Promise<T>): Promise<T> {
+    const hit = this.directoryCache.get(key);
+    if (hit && hit.expiresAt > Date.now()) return hit.value as T;
+    const value = await factory();
+    this.directoryCache.set(key, { value, expiresAt: Date.now() + this.directoryTtlMs });
+    return value;
   }
 
   private headers(): Record<string, string> {
@@ -219,9 +236,10 @@ export class KlaviyoApiClient {
   }
 
   /** All metrics in the account. Used at boot to discover the "Placed Order"
-   *  metric id, which the *-values-reports require as `conversion_metric_id`. */
+   *  metric id, which the *-values-reports require as `conversion_metric_id`.
+   *  Memoized — the metrics list is stable across a process lifetime. */
   async listMetrics(): Promise<KlaviyoResource<KlaviyoMetricAttrs>[]> {
-    return this.paginate<KlaviyoMetricAttrs>('/metrics');
+    return this.memoize('metrics', () => this.paginate<KlaviyoMetricAttrs>('/metrics'));
   }
 
   /** Resolve the canonical revenue/conversions metric id by name. Klaviyo
@@ -235,21 +253,28 @@ export class KlaviyoApiClient {
 
   /** Campaigns directory. `channel` filter is required by Klaviyo (the
    *  campaigns endpoint won't list email + sms in one call) — caller chooses
-   *  which channel they want. */
+   *  which channel they want. Memoized for 10 min — the directory doesn't
+   *  shift between adjacent tool calls and re-paginating it costs ~5-10s. */
   async listCampaigns(opts: { channel: 'email' | 'sms' | 'mobile_push'; archived?: boolean } = { channel: 'email' }): Promise<KlaviyoResource<KlaviyoCampaignAttrs>[]> {
-    const filterParts = [`equals(messages.channel,"${opts.channel}")`];
-    if (opts.archived !== undefined) filterParts.push(`equals(archived,${opts.archived})`);
-    return this.paginate<KlaviyoCampaignAttrs>('/campaigns', {
-      filter: filterParts.join(','),
+    const cacheKey = `campaigns:${opts.channel}:${opts.archived ?? 'any'}`;
+    return this.memoize(cacheKey, () => {
+      const filterParts = [`equals(messages.channel,"${opts.channel}")`];
+      if (opts.archived !== undefined) filterParts.push(`equals(archived,${opts.archived})`);
+      return this.paginate<KlaviyoCampaignAttrs>('/campaigns', {
+        filter: filterParts.join(','),
+      });
     });
   }
 
   /** Flows directory — no channel filter, every account-wide flow regardless
-   *  of trigger. */
+   *  of trigger. Memoized for 10 min (same rationale as listCampaigns). */
   async listFlows(opts: { archived?: boolean } = {}): Promise<KlaviyoResource<KlaviyoFlowAttrs>[]> {
-    const query: Record<string, string | undefined> = {};
-    if (opts.archived !== undefined) query.filter = `equals(archived,${opts.archived})`;
-    return this.paginate<KlaviyoFlowAttrs>('/flows', query);
+    const cacheKey = `flows:${opts.archived ?? 'any'}`;
+    return this.memoize(cacheKey, () => {
+      const query: Record<string, string | undefined> = {};
+      if (opts.archived !== undefined) query.filter = `equals(archived,${opts.archived})`;
+      return this.paginate<KlaviyoFlowAttrs>('/flows', query);
+    });
   }
 
   /** Segments directory. NOTE: revision 2026-04-15 dropped the
@@ -257,9 +282,9 @@ export class KlaviyoApiClient {
    *  longer expose member counts via this endpoint. To get counts, pair
    *  this with `segmentValuesReport({statistics: ['total_members']})` and
    *  join on segment id (the connector's `klaviyo.list_segments` tool
-   *  does this). */
+   *  does this). Memoized for 10 min. */
   async listSegments(): Promise<KlaviyoResource<KlaviyoSegmentAttrs>[]> {
-    return this.paginate<KlaviyoSegmentAttrs>('/segments');
+    return this.memoize('segments', () => this.paginate<KlaviyoSegmentAttrs>('/segments'));
   }
 
   /** POST /segment-values-reports — per-segment aggregates over a window.

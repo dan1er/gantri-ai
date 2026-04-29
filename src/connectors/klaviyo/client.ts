@@ -251,20 +251,24 @@ export class KlaviyoApiClient {
   }
 
   /** Walk every page of a JSON:API collection without the 50-page cap that
-   *  `paginate` enforces. ONLY for jobs where we actually need to read every
-   *  matching resource (e.g. the consented-signups rollup walking all
-   *  profiles created in a day). A 10000-page sanity cap still fires if the
-   *  cursor loops, so we don't run forever silently. Sibling of `paginate`,
-   *  not a replacement — pick the right tool. */
-  private async paginateUnbounded<TAttrs>(initialPath: string): Promise<KlaviyoResource<TAttrs>[]> {
+   *  `paginate` enforces. STREAMING: invokes `onItem` for each item as pages
+   *  arrive — never accumulates the full set in memory. Required for batch
+   *  jobs against tenants with hundreds of thousands of resources (Gantri has
+   *  358k+ profiles in Klaviyo; accumulating crashed the 1GB Fly machine).
+   *  A 10000-page sanity cap still fires if the cursor loops, so we don't
+   *  run forever silently. Returns `{ pages, items }` counts for observability. */
+  private async paginateUnboundedStream<TAttrs>(
+    initialPath: string,
+    onItem: (item: KlaviyoResource<TAttrs>) => void,
+  ): Promise<{ pages: number; items: number }> {
     const SANITY_CAP = 10000;
-    const out: KlaviyoResource<TAttrs>[] = [];
     let url: string = `${this.baseUrl}${initialPath}`;
     let pageNum = 0;
+    let itemCount = 0;
     while (url) {
       if (pageNum >= SANITY_CAP) {
         throw new KlaviyoApiError(
-          `paginateUnbounded exceeded ${SANITY_CAP}-page sanity cap; aborting`,
+          `paginateUnboundedStream exceeded ${SANITY_CAP}-page sanity cap; aborting`,
           0,
           null,
         );
@@ -275,20 +279,23 @@ export class KlaviyoApiClient {
       if (!res.ok) {
         let body: unknown = null;
         try { body = await res.json(); } catch { body = await res.text().catch(() => null); }
-        logger.warn({ path: '<paginateUnbounded>', status: res.status, elapsed, body }, 'klaviyo api error');
-        throw new KlaviyoApiError(`GET <paginateUnbounded> -> ${res.status}`, res.status, body);
+        logger.warn({ path: '<paginateUnboundedStream>', status: res.status, elapsed, body }, 'klaviyo api error');
+        throw new KlaviyoApiError(`GET <paginateUnboundedStream> -> ${res.status}`, res.status, body);
       }
       const json = (await res.json()) as CollectionResponse<TAttrs>;
-      logger.info({ path: '<paginateUnbounded>', status: res.status, elapsed, page: pageNum }, 'klaviyo api ok');
-      out.push(...(json.data ?? []));
+      logger.info({ path: '<paginateUnboundedStream>', status: res.status, elapsed, page: pageNum }, 'klaviyo api ok');
+      const items = json.data ?? [];
+      for (const item of items) {
+        onItem(item);
+        itemCount++;
+      }
       url = json.links?.next ?? '';
       pageNum++;
       // Yield to the event loop every page so the HTTP server / Slack handler
-      // stay responsive during multi-thousand-page batch jobs (358k+ profiles
-      // on Gantri's tenant). Without this, the loop starves all I/O on the box.
+      // stay responsive during multi-thousand-page batch jobs.
       await new Promise((resolve) => setImmediate(resolve));
     }
-    return out;
+    return { pages: pageNum, items: itemCount };
   }
 
   /** All metrics in the account. Used at boot to discover the "Placed Order"
@@ -424,7 +431,10 @@ export class KlaviyoApiClient {
    *  `endDate` is inclusive at the YMD level; we translate it to a
    *  `less-than` (exclusive) on next-day midnight UTC, since Klaviyo's
    *  filter operators are open-interval on the high end. */
-  async searchProfilesByCreatedRange(opts: { startDate: string; endDate: string }): Promise<KlaviyoResource<KlaviyoProfileAttrs>[]> {
+  async streamProfilesByCreatedRange(
+    opts: { startDate: string; endDate: string },
+    onItem: (item: KlaviyoResource<KlaviyoProfileAttrs>) => void,
+  ): Promise<{ pages: number; items: number }> {
     // Klaviyo's `created` field only supports greater-than / less-than (not -or-equal).
     // To keep startDate inclusive, subtract 1ms: greater-than(prevInstant) == greater-or-equal(startInstant).
     const startInclusiveMs = Date.UTC(
@@ -440,7 +450,7 @@ export class KlaviyoApiClient {
     const params = new URLSearchParams();
     params.set('filter', filter);
     params.set('additional-fields[profile]', 'subscriptions');
-    return this.paginateUnbounded<KlaviyoProfileAttrs>(`/profiles?${params.toString()}`);
+    return this.paginateUnboundedStream<KlaviyoProfileAttrs>(`/profiles?${params.toString()}`, onItem);
   }
 }
 

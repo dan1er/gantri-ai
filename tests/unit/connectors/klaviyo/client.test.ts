@@ -1,15 +1,14 @@
 import { describe, it, expect, vi } from 'vitest';
 import { KlaviyoApiClient } from '../../../../src/connectors/klaviyo/client.js';
 
-describe('KlaviyoApiClient.searchProfilesByCreatedRange', () => {
-  it('builds the filter and additional-fields query string correctly and walks pagination unbounded', async () => {
+describe('KlaviyoApiClient.streamProfilesByCreatedRange', () => {
+  it('builds the filter + additional-fields query string and streams items page-by-page', async () => {
     const fetchImpl = vi.fn();
     let call = 0;
     fetchImpl.mockImplementation(async (url: string) => {
       call++;
       const u = new URL(url);
       if (call === 1) {
-        // First call: verify filter + additional-fields
         const filter = u.searchParams.get('filter');
         expect(filter).toBe('and(greater-than(created,2025-12-31T23:59:59.999Z),less-than(created,2026-02-01T00:00:00.000Z))');
         expect(u.searchParams.get('additional-fields[profile]')).toBe('subscriptions');
@@ -28,9 +27,13 @@ describe('KlaviyoApiClient.searchProfilesByCreatedRange', () => {
     });
 
     const client = new KlaviyoApiClient({ apiKey: 'pk_test', fetchImpl });
-    const profiles = await client.searchProfilesByCreatedRange({ startDate: '2026-01-01', endDate: '2026-01-31' });
-    expect(profiles).toHaveLength(3);
-    expect(profiles.map((p) => p.id)).toEqual(['1', '2', '3']);
+    const seen: string[] = [];
+    const result = await client.streamProfilesByCreatedRange(
+      { startDate: '2026-01-01', endDate: '2026-01-31' },
+      (p) => { seen.push(p.id); },
+    );
+    expect(result).toEqual({ pages: 3, items: 3 });
+    expect(seen).toEqual(['1', '2', '3']);
     expect(call).toBe(3);
   });
 
@@ -40,7 +43,9 @@ describe('KlaviyoApiClient.searchProfilesByCreatedRange', () => {
       { status: 200 },
     ));
     const client = new KlaviyoApiClient({ apiKey: 'pk_test', fetchImpl });
-    await expect(client.searchProfilesByCreatedRange({ startDate: '2026-01-01', endDate: '2026-01-31' }))
-      .rejects.toThrow(/sanity cap/);
+    await expect(client.streamProfilesByCreatedRange(
+      { startDate: '2026-01-01', endDate: '2026-01-31' },
+      () => {},
+    )).rejects.toThrow(/sanity cap/);
   });
 });

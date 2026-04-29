@@ -14,6 +14,17 @@ function makeProfile(id: string, createdISO: string, consent?: string) {
   };
 }
 
+function makeStreamingClient(profiles: ReturnType<typeof makeProfile>[]) {
+  return {
+    streamProfilesByCreatedRange: vi.fn().mockImplementation(
+      async (_opts: { startDate: string; endDate: string }, onItem: (p: unknown) => void) => {
+        for (const p of profiles) onItem(p);
+        return { pages: 1, items: profiles.length };
+      },
+    ),
+  };
+}
+
 function makeRepo() {
   const upserts: Array<Array<{ day: string; signupsTotal: number; signupsConsentedEmail: number }>> = [];
   return {
@@ -27,13 +38,11 @@ function makeRepo() {
 
 describe('KlaviyoSignupRollupJob', () => {
   it('counts SUBSCRIBED profiles as consented and others as total-only', async () => {
-    const client = {
-      searchProfilesByCreatedRange: vi.fn().mockResolvedValue([
-        makeProfile('1', '2026-01-15T20:00:00.000Z', 'SUBSCRIBED'),  // PT day = 2026-01-15
-        makeProfile('2', '2026-01-15T21:00:00.000Z', 'UNSUBSCRIBED'), // PT day = 2026-01-15
-        makeProfile('3', '2026-01-15T22:00:00.000Z'),                  // no subscriptions
-      ]),
-    } as any;
+    const client = makeStreamingClient([
+      makeProfile('1', '2026-01-15T20:00:00.000Z', 'SUBSCRIBED'),
+      makeProfile('2', '2026-01-15T21:00:00.000Z', 'UNSUBSCRIBED'),
+      makeProfile('3', '2026-01-15T22:00:00.000Z'),
+    ]) as any;
     const repo = makeRepo();
     const job = new KlaviyoSignupRollupJob({ client, repo: repo as any });
     const result = await job.run();
@@ -45,12 +54,10 @@ describe('KlaviyoSignupRollupJob', () => {
   });
 
   it('buckets by Pacific Time, not UTC', async () => {
-    const client = {
+    const client = makeStreamingClient([
       // 2026-01-01T05:00:00Z = 2025-12-31 21:00 PT (Dec 31 PT bucket)
-      searchProfilesByCreatedRange: vi.fn().mockResolvedValue([
-        makeProfile('1', '2026-01-01T05:00:00.000Z', 'SUBSCRIBED'),
-      ]),
-    } as any;
+      makeProfile('1', '2026-01-01T05:00:00.000Z', 'SUBSCRIBED'),
+    ]) as any;
     const repo = makeRepo();
     const job = new KlaviyoSignupRollupJob({ client, repo: repo as any });
     await job.run();
@@ -60,10 +67,13 @@ describe('KlaviyoSignupRollupJob', () => {
 
   it('skips profiles with malformed `created`', async () => {
     const client = {
-      searchProfilesByCreatedRange: vi.fn().mockResolvedValue([
-        { id: '1', type: 'profile', attributes: { created: 'not-a-date' } },
-        makeProfile('2', '2026-01-15T20:00:00.000Z', 'SUBSCRIBED'),
-      ]),
+      streamProfilesByCreatedRange: vi.fn().mockImplementation(
+        async (_opts: any, onItem: (p: unknown) => void) => {
+          onItem({ id: '1', type: 'profile', attributes: { created: 'not-a-date' } });
+          onItem(makeProfile('2', '2026-01-15T20:00:00.000Z', 'SUBSCRIBED'));
+          return { pages: 1, items: 2 };
+        },
+      ),
     } as any;
     const repo = makeRepo();
     const job = new KlaviyoSignupRollupJob({ client, repo: repo as any });
@@ -75,19 +85,14 @@ describe('KlaviyoSignupRollupJob', () => {
   });
 
   it('absorbs unsubscribe drift on re-run', async () => {
-    // Run 1: profile is SUBSCRIBED → consented = 1
-    const client1 = {
-      searchProfilesByCreatedRange: vi.fn().mockResolvedValue([makeProfile('1', '2026-01-15T20:00:00.000Z', 'SUBSCRIBED')]),
-    } as any;
     const repo = makeRepo();
+
+    const client1 = makeStreamingClient([makeProfile('1', '2026-01-15T20:00:00.000Z', 'SUBSCRIBED')]) as any;
     const job1 = new KlaviyoSignupRollupJob({ client: client1, repo: repo as any });
     await job1.run();
     expect(repo.upserts[0][0].signupsConsentedEmail).toBe(1);
 
-    // Run 2: same profile is now UNSUBSCRIBED → consented = 0
-    const client2 = {
-      searchProfilesByCreatedRange: vi.fn().mockResolvedValue([makeProfile('1', '2026-01-15T20:00:00.000Z', 'UNSUBSCRIBED')]),
-    } as any;
+    const client2 = makeStreamingClient([makeProfile('1', '2026-01-15T20:00:00.000Z', 'UNSUBSCRIBED')]) as any;
     const job2 = new KlaviyoSignupRollupJob({ client: client2, repo: repo as any });
     await job2.run();
     expect(repo.upserts[1][0].signupsConsentedEmail).toBe(0);
@@ -95,7 +100,7 @@ describe('KlaviyoSignupRollupJob', () => {
 
   it('returns zeros and logs error when client throws (does not crash)', async () => {
     const client = {
-      searchProfilesByCreatedRange: vi.fn().mockRejectedValue(new Error('rate limited')),
+      streamProfilesByCreatedRange: vi.fn().mockRejectedValue(new Error('rate limited')),
     } as any;
     const repo = makeRepo();
     const job = new KlaviyoSignupRollupJob({ client, repo: repo as any });
@@ -107,9 +112,14 @@ describe('KlaviyoSignupRollupJob', () => {
   it('serializes overlapping run() calls (second returns 0)', async () => {
     let resolveFirst: () => void = () => {};
     const client = {
-      searchProfilesByCreatedRange: vi.fn().mockImplementation(() => new Promise((resolve) => {
-        resolveFirst = () => resolve([makeProfile('1', '2026-01-15T20:00:00.000Z', 'SUBSCRIBED')]);
-      })),
+      streamProfilesByCreatedRange: vi.fn().mockImplementation(
+        (_opts: any, onItem: (p: unknown) => void) => new Promise((resolve) => {
+          resolveFirst = () => {
+            onItem(makeProfile('1', '2026-01-15T20:00:00.000Z', 'SUBSCRIBED'));
+            resolve({ pages: 1, items: 1 });
+          };
+        }),
+      ),
     } as any;
     const repo = makeRepo();
     const job = new KlaviyoSignupRollupJob({ client, repo: repo as any });

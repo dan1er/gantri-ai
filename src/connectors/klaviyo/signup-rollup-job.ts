@@ -50,21 +50,24 @@ export class KlaviyoSignupRollupJob {
       const endDate = ptDayOf(new Date(Date.now() - 24 * 3600 * 1000));
       logger.info({ startDate, endDate }, 'klaviyo_signup_rollup_started');
 
-      const profiles = await this.deps.client.searchProfilesByCreatedRange({ startDate, endDate });
-
+      // Stream-bucket profiles as pages arrive — never accumulate the full set
+      // in memory (358k+ profiles on Gantri's tenant blew past 1GB).
       const counts = new Map<string, { total: number; consented: number }>();
-      for (const p of profiles) {
-        const created = p.attributes?.created;
-        if (typeof created !== 'string') continue;
-        const t = Date.parse(created);
-        if (!Number.isFinite(t)) continue;
-        const day = ptDayOf(new Date(t));
-        const consent = p.attributes?.subscriptions?.email?.marketing?.consent === 'SUBSCRIBED';
-        const cur = counts.get(day) ?? { total: 0, consented: 0 };
-        cur.total++;
-        if (consent) cur.consented++;
-        counts.set(day, cur);
-      }
+      const { items: profilesSeen } = await this.deps.client.streamProfilesByCreatedRange(
+        { startDate, endDate },
+        (p) => {
+          const created = p.attributes?.created;
+          if (typeof created !== 'string') return;
+          const t = Date.parse(created);
+          if (!Number.isFinite(t)) return;
+          const day = ptDayOf(new Date(t));
+          const consent = p.attributes?.subscriptions?.email?.marketing?.consent === 'SUBSCRIBED';
+          const cur = counts.get(day) ?? { total: 0, consented: 0 };
+          cur.total++;
+          if (consent) cur.consented++;
+          counts.set(day, cur);
+        },
+      );
 
       const upserts: KlaviyoSignupRollupUpsert[] = [];
       for (const [day, c] of counts) {
@@ -73,8 +76,8 @@ export class KlaviyoSignupRollupJob {
       await this.deps.repo.upsertManyDays(upserts);
 
       const durationMs = Date.now() - started;
-      logger.info({ profilesSeen: profiles.length, daysUpserted: upserts.length, durationMs }, 'klaviyo_signup_rollup_completed');
-      return { daysWritten: upserts.length, profilesSeen: profiles.length };
+      logger.info({ profilesSeen, daysUpserted: upserts.length, durationMs }, 'klaviyo_signup_rollup_completed');
+      return { daysWritten: upserts.length, profilesSeen };
     } catch (err) {
       logger.error({ err: err instanceof Error ? err.stack : String(err) }, 'klaviyo_signup_rollup_failed');
       return { daysWritten: 0, profilesSeen: 0 };

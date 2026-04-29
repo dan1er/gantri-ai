@@ -4,6 +4,7 @@ import { zodToJsonSchema } from '../base/zod-to-json-schema.js';
 import type { GrafanaConnector } from '../grafana/grafana-connector.js';
 import type { NorthbeamApiClient } from '../northbeam-api/client.js';
 import { buildCompareNbTool, buildDiffNbTool } from './compare-nb-tool.js';
+import { DateRangeArg, normalizeDateRange } from '../base/date-range.js';
 
 /**
  * Wraps Grafana's Sales-dashboard "Full Total" panel SQL as a single tool. The
@@ -26,10 +27,7 @@ export interface SalesReportConnectorDeps {
 }
 
 const Args = z.object({
-  dateRange: z.object({
-    startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD'),
-    endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD'),
-  }),
+  dateRange: DateRangeArg,
 });
 type Args = z.infer<typeof Args>;
 
@@ -84,8 +82,9 @@ export class SalesReportConnector implements Connector {
   }
 
   private async run(args: Args) {
-    const fromMs = wallClockToUtc(`${args.dateRange.startDate}T00:00:00.000`, PT_TZ);
-    const toMs = wallClockToUtc(`${addDays(args.dateRange.endDate, 1)}T00:00:00.000`, PT_TZ);
+    const { startDate, endDate } = normalizeDateRange(args.dateRange);
+    const fromMs = wallClockToUtc(`${startDate}T00:00:00.000`, PT_TZ);
+    const toMs = wallClockToUtc(`${addDays(endDate, 1)}T00:00:00.000`, PT_TZ);
     const result = await this.deps.grafana.runSql({ sql: SALES_REPORT_SQL, fromMs, toMs, maxRows: 50 });
     const idx = (name: string) => result.fields.indexOf(name);
     // Field names: include BOTH camelCase and snake_case variants so the LLM
@@ -159,7 +158,7 @@ export class SalesReportConnector implements Connector {
       full_total: totals.fullTotal, totalRevenue: totals.fullTotal,
     };
     return {
-      period: args.dateRange,
+      period: { startDate, endDate },
       source: 'grafana_sales_panel' as const,
       rows,
       totals: summary,

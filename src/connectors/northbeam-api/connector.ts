@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { zodToJsonSchema } from '../base/zod-to-json-schema.js';
 import type { Connector, ToolDef } from '../base/connector.js';
 import { logger } from '../../logger.js';
+import { DateRangeArg, normalizeDateRange } from '../base/date-range.js';
 import {
   NorthbeamApiClient,
   type NorthbeamApiConfig,
@@ -106,10 +107,8 @@ type MetricsExplorerArgs = z.infer<typeof MetricsExplorerArgs>;
 const NoArgs = z.object({}).strict();
 
 const ListOrdersArgs = z.object({
-  dateRange: z.object({
-    startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD'),
-    endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD'),
-  }),
+  // Use the shared union schema so $REPORT_RANGE preset strings resolve too.
+  dateRange: DateRangeArg,
   includeCancelled: z.boolean().default(false).describe('Include cancelled/deleted orders. Default false — most callers want clean orders only.'),
 });
 type ListOrdersArgs = z.infer<typeof ListOrdersArgs>;
@@ -238,7 +237,8 @@ function buildTools(client: NorthbeamApiClient): ToolDef[] {
       jsonSchema: zodToJsonSchema(ListOrdersArgs),
       async execute(args: ListOrdersArgs) {
         try {
-          const all = await client.listOrders({ startDate: args.dateRange.startDate, endDate: args.dateRange.endDate });
+          const { startDate, endDate } = normalizeDateRange(args.dateRange);
+          const all = await client.listOrders({ startDate, endDate });
           const filtered = args.includeCancelled
             ? all
             : all.filter((o) => !o.is_cancelled && !o.is_deleted);
@@ -270,7 +270,7 @@ function buildTools(client: NorthbeamApiClient): ToolDef[] {
             .sort((a, b) => a.date.localeCompare(b.date))
             .map((e) => ({ ...e, revenue: Math.round(e.revenue * 100) / 100 }));
           return {
-            period: args.dateRange,
+            period: { startDate, endDate },
             source: 'northbeam_v2_orders' as const,
             count: filtered.length,
             totalReturned: all.length,

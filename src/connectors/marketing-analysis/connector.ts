@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { Connector, ToolDef } from '../base/connector.js';
 import { zodToJsonSchema } from '../base/zod-to-json-schema.js';
 import type { NorthbeamApiClient, DataExportPayload } from '../northbeam-api/client.js';
+import { DateRangeArg, normalizeDateRange } from '../base/date-range.js';
 
 /**
  * Higher-level Northbeam analysis tools. Each one wraps a specific multi-call
@@ -69,10 +70,10 @@ function mergeRowsByChannel(
   return map;
 }
 
-const DateRange = z.object({
-  startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD PT'),
-  endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD PT'),
-});
+// Use the shared DateRangeArg union — accepts {startDate,endDate}, {start,end},
+// or a preset string ('last_30_days' etc.). All four tools below normalize
+// to {startDate,endDate} via normalizeDateRange() inside their executes.
+const DateRange = DateRangeArg;
 
 // ---- M1: attribution_compare_models ----
 
@@ -224,7 +225,7 @@ export class MarketingAnalysisConnector implements Connector {
       try {
         const csv = await this.deps.nb.runExport(
           this.buildExport({
-            dateRange: args.dateRange,
+            dateRange: normalizeDateRange(args.dateRange),
             attributionModel: m.id,
             metrics: args.metrics,
             breakdown,
@@ -257,7 +258,7 @@ export class MarketingAnalysisConnector implements Connector {
       return out;
     });
     return {
-      period: args.dateRange,
+      period: normalizeDateRange(args.dateRange),
       platformFilter: args.platformFilter ?? null,
       metrics: args.metrics,
       models: perModel,
@@ -282,7 +283,7 @@ export class MarketingAnalysisConnector implements Connector {
     const breakdownValues = await this.expandBreakdownValues(args.breakdownKey);
     const csv = await this.deps.nb.runExport(
       this.buildExport({
-        dateRange: args.dateRange,
+        dateRange: normalizeDateRange(args.dateRange),
         attributionModel: 'northbeam_custom__va',
         metrics: [...LTV_METRICS],
         breakdown: { key: args.breakdownKey, values: breakdownValues },
@@ -322,7 +323,7 @@ export class MarketingAnalysisConnector implements Connector {
       };
     });
     rows.sort((a, b) => (b.ltv_cac_ratio ?? -Infinity) - (a.ltv_cac_ratio ?? -Infinity));
-    return { period: args.dateRange, breakdown: args.breakdownKey, rows, headers: csv.headers };
+    return { period: normalizeDateRange(args.dateRange), breakdown: args.breakdownKey, rows, headers: csv.headers };
   }
 
   private newVsReturningSplit(): ToolDef<NewVsReturningArgs> {
@@ -343,7 +344,7 @@ export class MarketingAnalysisConnector implements Connector {
     const breakdownValues = await this.expandBreakdownValues(args.breakdownKey);
     const csv = await this.deps.nb.runExport(
       this.buildExport({
-        dateRange: args.dateRange,
+        dateRange: normalizeDateRange(args.dateRange),
         attributionModel: 'northbeam_custom__va',
         metrics: NVR_METRICS,
         breakdown: { key: args.breakdownKey, values: breakdownValues },
@@ -382,7 +383,7 @@ export class MarketingAnalysisConnector implements Connector {
       };
     });
     rows.sort((a, b) => b.revenue_total - a.revenue_total);
-    return { period: args.dateRange, breakdown: args.breakdownKey, level: args.level, rows };
+    return { period: normalizeDateRange(args.dateRange), breakdown: args.breakdownKey, level: args.level, rows };
   }
 
   private budgetOptimizationReport(): ToolDef<BudgetOptimizationArgs> {
@@ -422,8 +423,8 @@ export class MarketingAnalysisConnector implements Connector {
       );
     };
     // Sequential, not parallel — see attribution_compare_models for rationale.
-    const current = await fetchPeriod(args.currentPeriod);
-    const prior = await fetchPeriod(args.priorPeriod);
+    const current = await fetchPeriod(normalizeDateRange(args.currentPeriod));
+    const prior = await fetchPeriod(normalizeDateRange(args.priorPeriod));
     const indexBy = (csv: { headers: string[]; rows: Array<Record<string, string>> }) => {
       // aggregate_data:false → one row per (campaign × day [× mode × window]).
       // Empirically NB returns only the Cash-snapshot/lifetime combo at campaign
@@ -469,7 +470,7 @@ export class MarketingAnalysisConnector implements Connector {
     }
     // Sort: lowest current_roas first when no marginal info; lowest marginal_roas first otherwise
     rows.sort((a, b) => (a.marginal_roas ?? a.current_roas ?? 999) - (b.marginal_roas ?? b.current_roas ?? 999));
-    return { currentPeriod: args.currentPeriod, priorPeriod: args.priorPeriod, minSpendDollars: args.minSpendDollars, rows };
+    return { currentPeriod: normalizeDateRange(args.currentPeriod), priorPeriod: normalizeDateRange(args.priorPeriod), minSpendDollars: args.minSpendDollars, rows };
   }
 
   private async expandBreakdownValues(key: string): Promise<string[]> {

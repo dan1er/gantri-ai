@@ -273,10 +273,8 @@ function normalizeDateRange(input: unknown, todayStr: string): { startDate: stri
  * user wants to know exactly which orders cause the mismatch (and why).
  */
 const DiffArgs = z.object({
-  dateRange: z.object({
-    startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD PT'),
-    endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD PT'),
-  }),
+  // Use the shared union schema so $REPORT_RANGE preset strings resolve too.
+  dateRange: DateRangeArg,
   maxExamples: z.number().int().min(1).max(200).default(50).describe('Max sample rows of each diff bucket to include in the response.'),
 });
 type DiffArgs = z.infer<typeof DiffArgs>;
@@ -297,7 +295,8 @@ export function buildDiffNbTool(deps: CompareNbToolDeps): ToolDef<DiffArgs> {
     schema: DiffArgs as z.ZodType<DiffArgs>,
     jsonSchema: zodToJsonSchema(DiffArgs),
     async execute(args: DiffArgs) {
-      const { startDate, endDate } = args.dateRange;
+      const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles', year:'numeric', month:'2-digit', day:'2-digit' }).format(new Date());
+      const { startDate, endDate } = normalizeDateRange(args.dateRange, today);
       // ---- Porter: full per-order rows (id, status, placedAt PT, total, type) ----
       const porterSql = `
         SELECT
@@ -422,7 +421,7 @@ export function buildDiffNbTool(deps: CompareNbToolDeps): ToolDef<DiffArgs> {
       }
 
       const summary = {
-        period: args.dateRange,
+        period: { startDate, endDate },
         porter_count: porterById.size,
         nb_count: nbActiveCount,
         only_in_nb_count: onlyInNb.length,

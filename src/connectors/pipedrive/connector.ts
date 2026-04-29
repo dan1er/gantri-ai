@@ -81,8 +81,92 @@ export class PipedriveConnector implements Connector {
   }
 
   private buildTools(): readonly ToolDef[] {
-    // Tool definitions added in Tasks 8-12.
-    return [];
+    return [
+      this.toolListDirectory(),
+      this.toolSearch(),
+    ];
+  }
+
+  // ============================================================
+  // Group A — Discovery / lookup
+  // ============================================================
+
+  private toolListDirectory(): ToolDef {
+    const Args = z.object({
+      kind: z.enum(['pipelines', 'stages', 'users', 'deal_fields', 'source_options']).describe(
+        'Which directory to fetch. The LLM should call this BEFORE any tool that filters by id/name.',
+      ),
+    });
+    type A = z.infer<typeof Args>;
+    return {
+      name: 'pipedrive.list_directory',
+      description: [
+        'Returns the small static directories the LLM needs to map names → ids before calling other Pipedrive tools (pipelines/stages/users/deal_fields/source_options). Cached 10 min server-side.',
+        'For "stages": each row carries `pipeline_id` AND `pipeline_name` so you can disambiguate cross-pipeline stages with the same label (Pipeline 1 and Pipeline 2 both have a stage called "Opportunity").',
+        'For "deal_fields": only user-visible CUSTOM fields are returned (Specifier, Purchaser, Source). Standard fields (value/title/etc) are excluded.',
+        'For "source_options": the dereferenced Source enum (ICFF, Design Miami, Neocon, …) so you can pass `sourceOptionId` to other tools.',
+      ].join(' '),
+      schema: Args as z.ZodType<A>,
+      jsonSchema: zodToJsonSchema(Args),
+      execute: async (rawArgs) => {
+        const args = rawArgs as A;
+        try {
+          if (args.kind === 'pipelines') {
+            const items = await this.client.listPipelines();
+            return { ok: true, data: { kind: 'pipelines', rows: items.map((p) => ({ id: p.id, name: p.name, active: !!p.active })) } };
+          }
+          if (args.kind === 'stages') {
+            const [stages, pipelines] = await Promise.all([this.client.listStages(), this.client.listPipelines()]);
+            const nameById = new Map(pipelines.map((p) => [p.id, p.name] as const));
+            return { ok: true, data: { kind: 'stages', rows: stages.map((s) => ({ id: s.id, pipeline_id: s.pipeline_id, pipeline_name: nameById.get(s.pipeline_id) ?? null, name: s.name, order_nr: s.order_nr })) } };
+          }
+          if (args.kind === 'users') {
+            const users = await this.client.listUsers();
+            return { ok: true, data: { kind: 'users', rows: users.filter((u) => u.active_flag).map((u) => ({ id: u.id, name: u.name, email: u.email, active: u.active_flag, is_admin: !!u.is_admin })) } };
+          }
+          if (args.kind === 'deal_fields') {
+            const fields = await this.client.listDealFields();
+            const customs = fields.filter((f) => /^[a-f0-9]{40}$/.test(f.key));
+            return { ok: true, data: { kind: 'deal_fields', rows: customs.map((f) => ({ key: f.key, name: f.name, type: f.field_type, options: f.options ?? null })) } };
+          }
+          // source_options
+          const fields = await this.client.listDealFields();
+          const source = fields.find((f) => f.name === 'Source');
+          return { ok: true, data: { kind: 'source_options', rows: source?.options ?? [] } };
+        } catch (err) { return pipedriveErrorResult(err); }
+      },
+    };
+  }
+
+  private toolSearch(): ToolDef {
+    const Args = z.object({
+      query: z.string().min(1).describe('Substring or fuzzy search term — Pipedrive\'s native /v1/itemSearch.'),
+      entity: z.enum(['all', 'deals', 'persons', 'organizations']).default('all').describe(
+        'Restrict results to one entity type. "all" searches across deals + persons + orgs.',
+      ),
+      limit: z.number().int().min(1).max(100).default(10),
+    });
+    type A = z.infer<typeof Args>;
+    return {
+      name: 'pipedrive.search',
+      description: [
+        'Fuzzy substring search across Pipedrive deals, persons, and organizations via /v1/itemSearch. Returns minimal records with id, type, name, and a short summary.',
+        'Use this to RESOLVE a name a user mentioned ("KBM-Hogue", "Bilotti", "Wirecutter") into the numeric id you need for `deal_detail`, `organization_detail`, etc. Optional `entity` to restrict the search.',
+      ].join(' '),
+      schema: Args as z.ZodType<A>,
+      jsonSchema: zodToJsonSchema(Args),
+      execute: async (rawArgs) => {
+        const args = rawArgs as A;
+        try {
+          const itemTypes = args.entity === 'all' ? undefined :
+            args.entity === 'deals' ? ['deal'] as const :
+            args.entity === 'organizations' ? ['organization'] as const :
+            ['person'] as const;
+          const hits = await this.client.itemSearch({ term: args.query, itemTypes: itemTypes ? [...itemTypes] : undefined, limit: args.limit });
+          return { ok: true, data: { query: args.query, count: hits.length, rows: hits.map((h) => ({ type: h.type, id: h.id, name: h.title, summary: h.summary, score: h.score })) } };
+        } catch (err) { return pipedriveErrorResult(err); }
+      },
+    };
   }
 }
 

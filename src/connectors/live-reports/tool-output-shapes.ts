@@ -535,6 +535,151 @@ export const TOOL_OUTPUT_SHAPES: Record<string, ToolOutputSample> = {
     expectedTopLevelKeys: ['url', 'indexStatusVerdict', 'coverageState', 'robotsTxtState', 'indexingState', 'pageFetchState', 'lastCrawlTime', 'googleCanonical', 'userCanonical', 'crawledAs', 'sitemap', 'referringUrls', 'mobileUsabilityVerdict', 'mobileUsabilityIssues', 'ampVerdict', 'ampIssues', 'richResultsVerdict', 'richResultsItems'],
   },
 
+  // ---------- Pipedrive CRM ----------
+  'pipedrive.list_directory': {
+    summary: 'Static directory lookup for Pipedrive (pipelines/stages/users/deal_fields/source_options). { kind, rows: [...] }. Stages rows include `pipeline_name` so you can disambiguate cross-pipeline collisions. Cached server-side for 10 min.',
+    example: {
+      kind: 'pipelines',
+      rows: [
+        { id: 1, name: 'Collection Pipeline-Trade & Wholesale', active: true },
+        { id: 3, name: 'Wholesale (physical/inventory)', active: true },
+      ],
+    },
+    expectedTopLevelKeys: ['kind', 'rows'],
+  },
+  'pipedrive.search': {
+    summary: 'Fuzzy search across deals/persons/orgs via /v1/itemSearch. { query, count, rows: [{ type, id, name, summary, score }] }. Use to resolve a name → id before calling other tools.',
+    example: {
+      query: 'KBM',
+      count: 1,
+      rows: [{ type: 'deal', id: 816, name: 'KBM-Hogue', summary: 'value=24500', score: 0.92 }],
+    },
+    expectedTopLevelKeys: ['query', 'count', 'rows'],
+    expectedArrayElementKeys: { rows: ['type', 'id', 'name', 'summary', 'score'] },
+  },
+  'pipedrive.deal_timeseries': {
+    summary: 'Per-bucket counts and total/won/open value, server-aggregated by /v1/deals/timeline. { period, granularity, rows: [{ key, count, totalValueUsd, wonCount, wonValueUsd, openCount, openValueUsd, weightedValueUsd }], note? }. `key` is the bucket period_start (YYYY-MM-DD). All amounts USD.',
+    example: {
+      period: { startDate: '2026-01-01', endDate: '2026-03-31' },
+      granularity: 'month',
+      rows: [
+        { key: '2026-01-01', count: 12, totalValueUsd: 60000, wonCount: 7, wonValueUsd: 35000, openCount: 4, openValueUsd: 20000, weightedValueUsd: 30000 },
+        { key: '2026-02-01', count: 9, totalValueUsd: 45000, wonCount: 5, wonValueUsd: 25000, openCount: 3, openValueUsd: 15000, weightedValueUsd: 22000 },
+      ],
+    },
+    expectedTopLevelKeys: ['period', 'granularity', 'rows'],
+    expectedArrayElementKeys: { rows: ['key', 'count', 'totalValueUsd', 'wonCount', 'wonValueUsd', 'openCount', 'openValueUsd', 'weightedValueUsd'] },
+  },
+  'pipedrive.pipeline_snapshot': {
+    summary: 'Point-in-time stage funnel — counts + total value per stage. Top-level: { status, pipelineId, ownerId, dealCount, truncated, rows, note? }. Each row: { stageId, stageName, pipelineId, pipelineName, count, totalValueUsd } sorted by pipelineId then stage order.',
+    example: {
+      status: 'open',
+      pipelineId: 3,
+      ownerId: null,
+      dealCount: 47,
+      truncated: false,
+      rows: [
+        { stageId: 11, stageName: 'Discovery', pipelineId: 3, pipelineName: 'Wholesale (physical)', count: 12, totalValueUsd: 30000 },
+        { stageId: 12, stageName: 'Sample', pipelineId: 3, pipelineName: 'Wholesale (physical)', count: 8, totalValueUsd: 41000 },
+      ],
+    },
+    expectedTopLevelKeys: ['status', 'pipelineId', 'ownerId', 'dealCount', 'truncated', 'rows'],
+    expectedArrayElementKeys: { rows: ['stageId', 'stageName', 'pipelineId', 'pipelineName', 'count', 'totalValueUsd'] },
+  },
+  'pipedrive.list_deals': {
+    summary: 'Cursor-paginated list of deals. { dateRange, count, truncated, rows: [{ id, title, status, valueUsd, pipelineId, stageId, ownerId, ownerName, orgId, orgName, personId, personName, addTime, wonTime, lostTime, lostReason, sourceLabel, specifierOrgName, purchaserOrgName, expectedCloseDate }], note? }. Custom fields are pre-resolved (sourceLabel from the Source enum, specifier/purchaser from text fields).',
+    example: {
+      dateRange: { startDate: '2026-04-01', endDate: '2026-04-27' },
+      count: 1,
+      truncated: false,
+      rows: [
+        { id: 816, title: 'KBM-Hogue restaurant', status: 'open', valueUsd: 24500, pipelineId: 3, stageId: 11, ownerId: 7, ownerName: 'Lana', orgId: 5, orgName: 'KBM-Hogue', personId: 12, personName: 'Tasha Bilotti', addTime: '2026-04-01', wonTime: null, lostTime: null, lostReason: null, sourceLabel: 'ICFF', specifierOrgName: 'AcmeArch', purchaserOrgName: null, expectedCloseDate: '2026-05-15' },
+      ],
+    },
+    expectedTopLevelKeys: ['dateRange', 'count', 'truncated', 'rows'],
+    expectedArrayElementKeys: { rows: ['id', 'title', 'status', 'valueUsd', 'pipelineId', 'stageId', 'ownerId', 'ownerName', 'orgId', 'orgName', 'personId', 'personName', 'addTime', 'wonTime', 'lostTime', 'lostReason', 'sourceLabel', 'specifierOrgName', 'purchaserOrgName', 'expectedCloseDate'] },
+  },
+  'pipedrive.deal_detail': {
+    summary: 'Single deal with everything joined. Top-level: scalar deal fields PLUS orgDetail, lastActivity, activitiesCount, doneActivitiesCount, customFields. customFields keys are the human field names (Source/Specifier/Purchaser).',
+    example: {
+      id: 816, title: 'KBM-Hogue restaurant', status: 'open', valueUsd: 24500,
+      pipelineId: 3, stageId: 11, ownerId: 7, ownerName: 'Lana',
+      orgId: 5, orgName: 'KBM-Hogue', personId: 12, personName: 'Tasha Bilotti',
+      addTime: '2026-04-01', wonTime: null, lostTime: null, lostReason: null, expectedCloseDate: '2026-05-15',
+      orgDetail: { id: 5, name: 'KBM-Hogue', address: '1 Main St, NYC', web: 'kbm.com' },
+      lastActivity: { type: 'call', subject: 'Discovery', dueDate: '2026-04-15', done: true },
+      activitiesCount: 4, doneActivitiesCount: 3,
+      customFields: { Source: 'ICFF', Specifier: 'AcmeArch' },
+    },
+    expectedTopLevelKeys: ['id', 'title', 'status', 'valueUsd', 'pipelineId', 'stageId', 'ownerId', 'ownerName', 'orgId', 'orgName', 'personId', 'personName', 'addTime', 'wonTime', 'lostTime', 'lostReason', 'expectedCloseDate', 'orgDetail', 'lastActivity', 'activitiesCount', 'doneActivitiesCount', 'customFields'],
+  },
+  'pipedrive.organization_performance': {
+    summary: 'Top organizations by contribution over a window. { dateRange, metric, orgCount, truncated, rows: [{ orgId, orgName, dealCount, totalValueUsd, wonCount, wonValueUsd, openCount, openValueUsd, lastDealTime }], note? }. Sorted desc by the requested metric.',
+    example: {
+      dateRange: { startDate: '2026-01-01', endDate: '2026-04-27' },
+      metric: 'won_value',
+      orgCount: 1,
+      truncated: false,
+      rows: [
+        { orgId: 5, orgName: 'KBM-Hogue', dealCount: 3, totalValueUsd: 75000, wonCount: 2, wonValueUsd: 50000, openCount: 1, openValueUsd: 25000, lastDealTime: '2026-04-22' },
+      ],
+    },
+    expectedTopLevelKeys: ['dateRange', 'metric', 'orgCount', 'truncated', 'rows'],
+    expectedArrayElementKeys: { rows: ['orgId', 'orgName', 'dealCount', 'totalValueUsd', 'wonCount', 'wonValueUsd', 'openCount', 'openValueUsd', 'lastDealTime'] },
+  },
+  'pipedrive.organization_detail': {
+    summary: 'Single org with deals, contacts, optionally activities. { org, deals?, persons?, activities? }. Deal/person/activity arrays cap at 50. `deals` and `persons` appear by default; `activities` only when requested via `includeActivities: true`.',
+    example: {
+      org: { id: 5, name: 'KBM-Hogue', address: '1 Main St', web: 'kbm.com' },
+      deals: [{ id: 816, title: 'KBM-Hogue restaurant', status: 'open', valueUsd: 24500, stageId: 11, pipelineId: 3 }],
+      persons: [{ id: 12, name: 'Tasha Bilotti', emails: [{ value: 'tasha@kbm.com', primary: true }], phones: [] }],
+    },
+    expectedTopLevelKeys: ['org', 'deals', 'persons'],
+  },
+  'pipedrive.lost_reasons_breakdown': {
+    summary: 'Group lost deals by `lost_reason` (and optionally last stage). { dateRange, groupBy, totalLostDeals, truncated, rows: [{ reason, count, totalValueUsd, percentOfTotal, stageBreakdown? }], note? }. percentOfTotal sums to ~100.',
+    example: {
+      dateRange: { startDate: '2026-01-01', endDate: '2026-03-31' },
+      groupBy: 'reason',
+      totalLostDeals: 18,
+      truncated: false,
+      rows: [
+        { reason: 'Budget', count: 8, totalValueUsd: 24000, percentOfTotal: 44.44 },
+        { reason: 'Timing', count: 5, totalValueUsd: 18000, percentOfTotal: 27.78 },
+        { reason: '(unspecified)', count: 5, totalValueUsd: 9000, percentOfTotal: 27.78 },
+      ],
+    },
+    expectedTopLevelKeys: ['dateRange', 'groupBy', 'totalLostDeals', 'truncated', 'rows'],
+    expectedArrayElementKeys: { rows: ['reason', 'count', 'totalValueUsd', 'percentOfTotal'] },
+  },
+  'pipedrive.activity_summary': {
+    summary: 'Activity volume by user/type/status, bucketed daily/weekly/monthly. { period, granularity, totalActivities, truncated, rows: [{ key, count, byType: {call, meeting, email, task}, byUser: [{ userId, userName, count }] }], note? }. `key` follows the granularity (YYYY-MM for monthly, YYYY-MM-DD for daily/weekly).',
+    example: {
+      period: { startDate: '2026-04-01', endDate: '2026-04-30' },
+      granularity: 'month',
+      totalActivities: 3,
+      truncated: false,
+      rows: [
+        { key: '2026-04', count: 3, byType: { call: 2, meeting: 1 }, byUser: [{ userId: 7, userName: 'Lana', count: 2 }, { userId: 8, userName: 'Max', count: 1 }] },
+      ],
+    },
+    expectedTopLevelKeys: ['period', 'granularity', 'totalActivities', 'truncated', 'rows'],
+    expectedArrayElementKeys: { rows: ['key', 'count', 'byType', 'byUser'] },
+  },
+  'pipedrive.user_performance': {
+    summary: 'Sales-rep leaderboard. { dateRange, metric, rows: [{ userId, userName, value, rank }] }. `value` is the metric requested (won_value | won_count | activities_done | avg_deal_value). Sorted desc by value.',
+    example: {
+      dateRange: { startDate: '2026-01-01', endDate: '2026-03-31' },
+      metric: 'won_value',
+      rows: [
+        { userId: 7, userName: 'Lana', value: 90000, rank: 1 },
+        { userId: 8, userName: 'Max', value: 45000, rank: 2 },
+      ],
+    },
+    expectedTopLevelKeys: ['dateRange', 'metric', 'rows'],
+    expectedArrayElementKeys: { rows: ['userId', 'userName', 'value', 'rank'] },
+  },
+
   'grafana.sql': {
     summary: 'Run an ad-hoc SQL query against the Porter read-replica. { fields, rows }. Each `rows[]` entry is a flat object with column names as keys. Amounts on Transactions.amount are JSON in cents — divide by 100 for dollars in the SQL itself.',
     example: {

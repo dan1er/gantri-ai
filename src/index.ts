@@ -35,6 +35,8 @@ import { Ga4Connector } from './connectors/ga4/connector.js';
 import { buildImpactConnector } from './connectors/impact/connector.js';
 import { KlaviyoConnector } from './connectors/klaviyo/connector.js';
 import { KlaviyoApiClient } from './connectors/klaviyo/client.js';
+import { PipedriveConnector } from './connectors/pipedrive/connector.js';
+import { PipedriveApiClient } from './connectors/pipedrive/client.js';
 import { buildSearchConsoleConnector } from './connectors/gsc/connector.js';
 import { Orchestrator, getActiveActor, getActiveThread, runWithContext } from './orchestrator/orchestrator.js';
 import { buildSlackApp } from './slack/app.js';
@@ -177,9 +179,13 @@ async function main() {
     logger.warn('gsc not configured (GSC_OAUTH_CLIENT_ID / GSC_OAUTH_CLIENT_SECRET / GSC_OAUTH_REFRESH_TOKEN missing) — skipping registration');
   }
 
-  // Pipedrive connector wired in Task 13 — for now just touch the var so the
-  // declaration above passes noUnusedLocals.
-  void pipedriveApiToken;
+  if (pipedriveApiToken) {
+    const pipedriveClient = new PipedriveApiClient({ apiToken: pipedriveApiToken });
+    registry.register(new PipedriveConnector({ client: pipedriveClient }));
+    logger.info('pipedrive connector registered');
+  } else {
+    logger.warn('pipedrive not configured (PIPEDRIVE_API_TOKEN missing) — skipping registration');
+  }
 
   const claude = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
   const orchestrator = new Orchestrator({

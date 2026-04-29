@@ -32,6 +32,7 @@ import { unstringifyJsonObjects } from '../../../../src/connectors/base/registry
 
 import * as impact from '../../../../src/connectors/impact/connector.js';
 import * as klaviyo from '../../../../src/connectors/klaviyo/connector.js';
+import * as pipedrive from '../../../../src/connectors/pipedrive/connector.js';
 import * as gsc from '../../../../src/connectors/gsc/connector.js';
 import * as ga4 from '../../../../src/connectors/ga4/connector.js';
 import * as nbApi from '../../../../src/connectors/northbeam-api/connector.js';
@@ -70,6 +71,9 @@ const inspectionEntries: Array<{ moduleName: string; mod: Record<string, unknown
   ]},
   { moduleName: 'klaviyo', mod: klaviyo, instances: [
     new klaviyo.KlaviyoConnector({} as never),
+  ]},
+  { moduleName: 'pipedrive', mod: pipedrive, instances: [
+    new pipedrive.PipedriveConnector({} as never),
   ]},
   { moduleName: 'gsc', mod: gsc, instances: [
     new gsc.SearchConsoleConnector({} as never),

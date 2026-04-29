@@ -63,6 +63,18 @@ export const WHITELISTED_TOOLS = new Set<string>([
   'gsc.list_sites',
   'gsc.search_performance',
   'gsc.inspect_url',
+  // Pipedrive CRM (B2B trade / wholesale)
+  'pipedrive.activity_summary',
+  'pipedrive.deal_detail',
+  'pipedrive.deal_timeseries',
+  'pipedrive.list_deals',
+  'pipedrive.list_directory',
+  'pipedrive.lost_reasons_breakdown',
+  'pipedrive.organization_detail',
+  'pipedrive.organization_performance',
+  'pipedrive.pipeline_snapshot',
+  'pipedrive.search',
+  'pipedrive.user_performance',
 ]);
 
 const ToolName = z.string().refine((t) => WHITELISTED_TOOLS.has(t), {

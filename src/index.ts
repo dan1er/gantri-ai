@@ -33,7 +33,9 @@ import { GrafanaConnector } from './connectors/grafana/grafana-connector.js';
 import { Ga4Client } from './connectors/ga4/client.js';
 import { Ga4Connector } from './connectors/ga4/connector.js';
 import { buildImpactConnector } from './connectors/impact/connector.js';
-import { buildKlaviyoConnector } from './connectors/klaviyo/connector.js';
+import { KlaviyoConnector } from './connectors/klaviyo/connector.js';
+import { KlaviyoApiClient } from './connectors/klaviyo/client.js';
+import { KlaviyoSignupRollupJob } from './connectors/klaviyo/signup-rollup-job.js';
 import { KlaviyoSignupRollupRepo } from './storage/repositories/klaviyo-signup-rollup.js';
 import { buildSearchConsoleConnector } from './connectors/gsc/connector.js';
 import { Orchestrator, getActiveActor, getActiveThread, runWithContext } from './orchestrator/orchestrator.js';
@@ -157,10 +159,11 @@ async function main() {
   }
 
   if (klaviyoApiKey) {
-    registry.register(buildKlaviyoConnector(
-      { apiKey: klaviyoApiKey },
-      new KlaviyoSignupRollupRepo(supabase),
-    ));
+    const klaviyoClient = new KlaviyoApiClient({ apiKey: klaviyoApiKey });
+    const klaviyoSignupRepo = new KlaviyoSignupRollupRepo(supabase);
+    registry.register(new KlaviyoConnector({ client: klaviyoClient, signupRepo: klaviyoSignupRepo }));
+    const klaviyoSignupRollupJob = new KlaviyoSignupRollupJob({ client: klaviyoClient, repo: klaviyoSignupRepo });
+    klaviyoSignupRollupJob.start();
     logger.info('klaviyo connector registered');
   } else {
     logger.warn('klaviyo not configured (KLAVIYO_API_KEY missing) — skipping registration');

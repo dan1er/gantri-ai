@@ -54,10 +54,11 @@ export const WHITELISTED_TOOLS = new Set<string>([
   'impact.list_actions',
   'impact.partner_performance',
   // Klaviyo email/SMS
+  'klaviyo.campaign_performance',
+  'klaviyo.consented_signups',
+  'klaviyo.flow_performance',
   'klaviyo.list_campaigns',
   'klaviyo.list_segments',
-  'klaviyo.campaign_performance',
-  'klaviyo.flow_performance',
   // Google Search Console (SEO)
   'gsc.list_sites',
   'gsc.search_performance',

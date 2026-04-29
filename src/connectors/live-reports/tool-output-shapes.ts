@@ -463,6 +463,23 @@ export const TOOL_OUTPUT_SHAPES: Record<string, ToolOutputSample> = {
     expectedTopLevelKeys: ['channel', 'dateRange', 'flowCount', 'totals', 'flows'],
     expectedArrayElementKeys: { flows: ['flow_id', 'flow_name', 'send_channel'] },
   },
+  'klaviyo.consented_signups': {
+    summary: 'Counts of profiles created in the window AND currently subscribed to email marketing in Klaviyo. { period: { startDate, endDate }, granularity: "daily"|"weekly"|"monthly", rows: [{ key, signupsTotal, signupsConsentedEmail }], rollupFreshness: { latestComputedDay, computedAt }, note }. `key` is `YYYY-MM-DD` for daily, the ISO-week Monday `YYYY-MM-DD` for weekly, and `YYYY-MM` for monthly. `signupsConsentedEmail` is the metric most callers want; `signupsTotal` is every profile created (including ones that never opted in to email). Backed by the nightly rollup table — counts for past months can drift down as profiles unsubscribe (consent reflects current state).',
+    example: {
+      period: { startDate: '2026-01-01', endDate: '2026-04-27' },
+      granularity: 'monthly',
+      rows: [
+        { key: '2026-01', signupsTotal: 4210, signupsConsentedEmail: 1842 },
+        { key: '2026-02', signupsTotal: 3877, signupsConsentedEmail: 1701 },
+        { key: '2026-03', signupsTotal: 5104, signupsConsentedEmail: 2231 },
+        { key: '2026-04', signupsTotal: 4655, signupsConsentedEmail: 2018 },
+      ],
+      rollupFreshness: { latestComputedDay: '2026-04-26', computedAt: '2026-04-27T10:02:13Z' },
+      note: 'Consent reflects current state. Counts may decrease over time as profiles unsubscribe.',
+    },
+    expectedTopLevelKeys: ['period', 'granularity', 'rows', 'rollupFreshness', 'note'],
+    expectedArrayElementKeys: { rows: ['key', 'signupsTotal', 'signupsConsentedEmail'] },
+  },
 
   // ---------- Google Search Console (SEO) ----------
   'gsc.list_sites': {

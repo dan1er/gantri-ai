@@ -84,6 +84,8 @@ export class PipedriveConnector implements Connector {
     return [
       this.toolListDirectory(),
       this.toolSearch(),
+      this.toolDealTimeseries(),
+      this.toolPipelineSnapshot(),
     ];
   }
 
@@ -168,6 +170,151 @@ export class PipedriveConnector implements Connector {
       },
     };
   }
+
+  // ============================================================
+  // Group B — Server-aggregated time-series
+  // ============================================================
+
+  private toolDealTimeseries(): ToolDef {
+    const Args = z.object({
+      dateRange: DateRangeArg,
+      granularity: z.enum(['day', 'week', 'month', 'quarter']).default('month').describe('Bucket size — passed straight to /v1/deals/timeline `interval`.'),
+      dateField: z.enum(['add_time', 'won_time', 'close_time', 'expected_close_date']).default('won_time').describe('Which timestamp anchors each deal to a bucket. Default `won_time` (revenue recognition view).'),
+      pipelineId: z.number().int().optional(),
+      ownerId: z.number().int().optional(),
+      stageId: z.number().int().optional(),
+      sourceOptionId: z.number().int().optional().describe('Filter by Source enum option id (use `pipedrive.list_directory` kind="source_options" to discover).'),
+    });
+    type A = z.infer<typeof Args>;
+    return {
+      name: 'pipedrive.deal_timeseries',
+      description: [
+        'Per-bucket counts and total/won/open value over a date range, server-aggregated by Pipedrive\'s /v1/deals/timeline. Filterable by pipeline, owner, stage, and Source enum option.',
+        'Output rows: { key, count, totalValueUsd, wonCount, wonValueUsd, openCount, openValueUsd, weightedValueUsd }. `key` = period_start (YYYY-MM-DD). All amounts USD.',
+        'Use for "monthly won-deal value YTD", "deals created per week in Q1", "ICFF leads converted by month".',
+      ].join(' '),
+      schema: Args as z.ZodType<A>,
+      jsonSchema: zodToJsonSchema(Args),
+      execute: async (rawArgs) => {
+        const args = rawArgs as A;
+        try {
+          const { startDate, endDate } = normalizeDateRange(args.dateRange);
+          // Compute # of buckets between start and end for the chosen granularity.
+          const amount = bucketsBetween(startDate, endDate, args.granularity);
+          const buckets = await this.client.dealsTimeline({
+            startDate, amount, interval: args.granularity, fieldKey: args.dateField,
+            pipelineId: args.pipelineId, userId: args.ownerId, stageId: args.stageId,
+          });
+          // sourceOptionId is not natively supported by /v1/deals/timeline as
+          // a query param — so we surface it as a known limitation in the
+          // note rather than silently ignore it.
+          const sourceNote = args.sourceOptionId !== undefined
+            ? `sourceOptionId filter not honored by /v1/deals/timeline; use pipedrive.list_deals + group client-side instead.`
+            : null;
+          return {
+            period: { startDate, endDate },
+            granularity: args.granularity,
+            rows: buckets.map((b) => ({
+              key: b.period_start,
+              count: b.count,
+              totalValueUsd: b.total_value_usd,
+              wonCount: b.won_count,
+              wonValueUsd: b.won_value_usd,
+              openCount: b.open_count,
+              openValueUsd: b.open_value_usd,
+              weightedValueUsd: b.weighted_value_usd,
+            })),
+            note: sourceNote ?? undefined,
+          };
+        } catch (err) { return pipedriveErrorResult(err); }
+      },
+    };
+  }
+
+  private toolPipelineSnapshot(): ToolDef {
+    const Args = z.object({
+      pipelineId: z.number().int().optional().describe('Restrict to one pipeline. Omit to aggregate all pipelines.'),
+      ownerId: z.number().int().optional(),
+      status: z.enum(['open', 'won', 'lost', 'all']).default('open'),
+    });
+    type A = z.infer<typeof Args>;
+    return {
+      name: 'pipedrive.pipeline_snapshot',
+      description: [
+        'Point-in-time stage funnel: count + total value per stage in a pipeline (or all 4 pipelines). Hits /v2/deals filtered by status, then groups client-side by stage_id.',
+        'Output rows: { stageId, stageName, pipelineId, pipelineName, count, totalValueUsd } — sorted by pipelineId then stage order_nr (so the funnel reads top-to-bottom).',
+        'Returns `truncated: true` if the underlying scan hit the 10-page (~5000 deal) cap. Use for "open deals by stage now", "Made pipeline funnel", "stuck deals — biggest count by stage".',
+      ].join(' '),
+      schema: Args as z.ZodType<A>,
+      jsonSchema: zodToJsonSchema(Args),
+      execute: async (rawArgs) => {
+        const args = rawArgs as A;
+        try {
+          const [stages, pipelines, dealsRes] = await Promise.all([
+            this.client.listStages(),
+            this.client.listPipelines(),
+            this.client.listDeals({
+              status: args.status === 'all' ? 'all_not_deleted' : args.status,
+              pipelineId: args.pipelineId,
+              ownerId: args.ownerId,
+              limit: 500,
+            }),
+          ]);
+          const pipelineNameById = new Map(pipelines.map((p) => [p.id, p.name] as const));
+          const stageById = new Map(stages.map((s) => [s.id, s] as const));
+          const counts = new Map<number, { count: number; total: number }>();
+          for (const d of dealsRes.items) {
+            const e = counts.get(d.stage_id) ?? { count: 0, total: 0 };
+            e.count += 1;
+            e.total += Number(d.value) || 0;
+            counts.set(d.stage_id, e);
+          }
+          const rows = [...counts.entries()].map(([stageId, agg]) => {
+            const s = stageById.get(stageId);
+            return {
+              stageId,
+              stageName: s?.name ?? `stage_${stageId}`,
+              pipelineId: s?.pipeline_id ?? 0,
+              pipelineName: s ? (pipelineNameById.get(s.pipeline_id) ?? null) : null,
+              count: agg.count,
+              totalValueUsd: round2(agg.total),
+            };
+          }).sort((a, b) => (a.pipelineId - b.pipelineId) || ((stageById.get(a.stageId)?.order_nr ?? 0) - (stageById.get(b.stageId)?.order_nr ?? 0)));
+          return {
+            ok: true,
+            data: {
+              status: args.status,
+              pipelineId: args.pipelineId ?? null,
+              ownerId: args.ownerId ?? null,
+              dealCount: dealsRes.items.length,
+              truncated: dealsRes.hasMore,
+              note: dealsRes.hasMore ? 'Result truncated at 10-page (~5000-deal) scan cap. Re-call with `pipelineId` to narrow.' : undefined,
+              rows,
+            },
+          };
+        } catch (err) { return pipedriveErrorResult(err); }
+      },
+    };
+  }
+}
+
+function round2(n: number): number { return Math.round(n * 100) / 100; }
+
+/** Number of buckets of size `interval` between two YYYY-MM-DD dates,
+ *  inclusive on both ends. Used to compute the `amount` arg /v1/deals/timeline
+ *  expects (it counts intervals from `start_date`). */
+function bucketsBetween(start: string, end: string, interval: 'day' | 'week' | 'month' | 'quarter'): number {
+  const [sy, sm, sd] = start.split('-').map(Number);
+  const [ey, em, ed] = end.split('-').map(Number);
+  const s = new Date(Date.UTC(sy, sm - 1, sd));
+  const e = new Date(Date.UTC(ey, em - 1, ed));
+  const days = Math.round((e.getTime() - s.getTime()) / 86400000) + 1;
+  if (interval === 'day') return Math.max(1, days);
+  if (interval === 'week') return Math.max(1, Math.ceil(days / 7));
+  if (interval === 'month') return Math.max(1, (ey - sy) * 12 + (em - sm) + 1);
+  // quarter
+  const sq = Math.floor((sm - 1) / 3); const eq = Math.floor((em - 1) / 3);
+  return Math.max(1, (ey - sy) * 4 + (eq - sq) + 1);
 }
 
 // Helper: registry-shaped error wrapper used by every tool.

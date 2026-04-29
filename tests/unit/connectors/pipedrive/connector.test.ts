@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { PipedriveConnector } from '../../../../src/connectors/pipedrive/connector.js';
 import type { PipedriveApiClient, DealField } from '../../../../src/connectors/pipedrive/client.js';
+import { unstringifyJsonObjects } from '../../../../src/connectors/base/registry.js';
 
 function makeStub(over: Partial<Record<keyof PipedriveApiClient, unknown>> = {}): PipedriveApiClient {
   return {
@@ -136,5 +137,92 @@ describe('pipedrive.search', () => {
     await tool.execute({ query: 'foo', entity: 'all', limit: 10 });
     const callArgs = (stub.itemSearch as any).mock.calls[0][0];
     expect(callArgs.itemTypes).toBeUndefined();
+  });
+});
+
+describe('pipedrive.deal_timeseries', () => {
+  it('returns rows with key/count/totalValueUsd/wonValueUsd/openValueUsd/weighted', async () => {
+    const stub = makeStub({
+      dealsTimeline: vi.fn().mockResolvedValue([
+        { period_start: '2026-01-01', period_end: '2026-01-31', count: 12, total_value_usd: 60000, weighted_value_usd: 30000, open_count: 4, open_value_usd: 20000, won_count: 7, won_value_usd: 35000 },
+        { period_start: '2026-02-01', period_end: '2026-02-28', count: 9, total_value_usd: 45000, weighted_value_usd: 22000, open_count: 3, open_value_usd: 15000, won_count: 5, won_value_usd: 25000 },
+      ]),
+    });
+    const conn = new PipedriveConnector({ client: stub });
+    const tool = conn.tools.find((t) => t.name === 'pipedrive.deal_timeseries')!;
+    const r = await tool.execute({ dateRange: { startDate: '2026-01-01', endDate: '2026-02-28' }, granularity: 'month', dateField: 'won_time' }) as any;
+    expect(r.period).toEqual({ startDate: '2026-01-01', endDate: '2026-02-28' });
+    expect(r.granularity).toBe('month');
+    expect(r.rows).toHaveLength(2);
+    expect(r.rows[0]).toMatchObject({ key: '2026-01-01', count: 12, totalValueUsd: 60000, wonCount: 7, wonValueUsd: 35000, openCount: 4, openValueUsd: 20000, weightedValueUsd: 30000 });
+  });
+
+  it('accepts dateRange as a preset string', async () => {
+    const stub = makeStub({ dealsTimeline: vi.fn().mockResolvedValue([]) });
+    const conn = new PipedriveConnector({ client: stub });
+    const tool = conn.tools.find((t) => t.name === 'pipedrive.deal_timeseries')!;
+    const out = await tool.execute({ dateRange: 'last_30_days', granularity: 'month', dateField: 'won_time' }) as any;
+    expect(out.rows).toEqual([]);
+    expect(out.period.startDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  it('accepts JSON-stringified-object dateRange (defense-in-depth — registry preprocess)', async () => {
+    const stub = makeStub({ dealsTimeline: vi.fn().mockResolvedValue([]) });
+    const conn = new PipedriveConnector({ client: stub });
+    const tool = conn.tools.find((t) => t.name === 'pipedrive.deal_timeseries')!;
+    // The registry's preprocess handles this for execute() in real code; the
+    // tool itself should at least accept the post-parse object form. Mimic
+    // the real pipeline by running the args through unstringifyJsonObjects
+    // first, exactly as ConnectorRegistry.execute() does before Zod parse.
+    const rawArgs = { dateRange: JSON.stringify({ startDate: '2026-01-01', endDate: '2026-01-31' }), granularity: 'month', dateField: 'won_time' };
+    const preprocessed = unstringifyJsonObjects(rawArgs) as Record<string, unknown>;
+    await expect(tool.execute(preprocessed)).resolves.toBeDefined();
+  });
+
+  it('emits a note when sourceOptionId is set (server-side filter not honored)', async () => {
+    const stub = makeStub({ dealsTimeline: vi.fn().mockResolvedValue([]) });
+    const conn = new PipedriveConnector({ client: stub });
+    const tool = conn.tools.find((t) => t.name === 'pipedrive.deal_timeseries')!;
+    const r = await tool.execute({ dateRange: 'last_30_days', granularity: 'month', dateField: 'won_time', sourceOptionId: 161 }) as any;
+    expect(r.note).toMatch(/sourceOptionId|list_deals/i);
+  });
+});
+
+describe('pipedrive.pipeline_snapshot', () => {
+  it('groups paginated /v2/deals client-side by stage_id with names from listStages', async () => {
+    const stub = makeStub({
+      listStages: vi.fn().mockResolvedValue([
+        { id: 11, name: 'Discovery', pipeline_id: 3, order_nr: 1 },
+        { id: 12, name: 'Sample', pipeline_id: 3, order_nr: 2 },
+      ]),
+      listPipelines: vi.fn().mockResolvedValue([{ id: 3, name: 'Wholesale (physical)', active: true }]),
+      listDeals: vi.fn().mockResolvedValue({ items: [
+        { id: 1, title: 'A', value: 1000, currency: 'USD', status: 'open', stage_id: 11, pipeline_id: 3, owner_id: 7, person_id: null, org_id: null },
+        { id: 2, title: 'B', value: 2500, currency: 'USD', status: 'open', stage_id: 11, pipeline_id: 3, owner_id: 7, person_id: null, org_id: null },
+        { id: 3, title: 'C', value: 5000, currency: 'USD', status: 'open', stage_id: 12, pipeline_id: 3, owner_id: 7, person_id: null, org_id: null },
+      ], hasMore: false }),
+    });
+    const conn = new PipedriveConnector({ client: stub });
+    const tool = conn.tools.find((t) => t.name === 'pipedrive.pipeline_snapshot')!;
+    const r = await tool.execute({ pipelineId: 3, status: 'open' }) as any;
+    expect(r.ok).toBe(true);
+    expect(r.data.rows).toEqual([
+      { stageId: 11, stageName: 'Discovery', pipelineId: 3, pipelineName: 'Wholesale (physical)', count: 2, totalValueUsd: 3500 },
+      { stageId: 12, stageName: 'Sample', pipelineId: 3, pipelineName: 'Wholesale (physical)', count: 1, totalValueUsd: 5000 },
+    ]);
+    expect(r.data.truncated).toBe(false);
+  });
+
+  it('flags truncated:true when listDeals.hasMore=true', async () => {
+    const stub = makeStub({
+      listStages: vi.fn().mockResolvedValue([{ id: 11, name: 'Discovery', pipeline_id: 3, order_nr: 1 }]),
+      listPipelines: vi.fn().mockResolvedValue([{ id: 3, name: 'X', active: true }]),
+      listDeals: vi.fn().mockResolvedValue({ items: [{ id: 1, title: 'A', value: 100, currency: 'USD', status: 'open', stage_id: 11, pipeline_id: 3, owner_id: 7, person_id: null, org_id: null }], hasMore: true }),
+    });
+    const conn = new PipedriveConnector({ client: stub });
+    const tool = conn.tools.find((t) => t.name === 'pipedrive.pipeline_snapshot')!;
+    const r = await tool.execute({ pipelineId: 3, status: 'open' }) as any;
+    expect(r.data.truncated).toBe(true);
+    expect(r.data.note).toMatch(/truncated|partial|cap/i);
   });
 });

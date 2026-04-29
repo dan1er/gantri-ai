@@ -225,7 +225,7 @@ Other complete reference connectors:
 
 ## Anti-patterns to avoid
 
-- **Local `DateRange` schemas.** Use the shared `DateRangeArg`. Local schemas drift from the canonical and silently break Live Reports' `$REPORT_RANGE`.
+- **Local `DateRange`/preset schemas.** They drift from the canonical shared schema. The registry's `unstringifyJsonObjects` preprocess works for any union, but local schemas may not get preset additions or other improvements. ALWAYS use the shared `DateRangeArg`.
 - **Bumping the global pagination cap** (50 pages) for one connector that needs more. Add `paginateUnbounded` instead — explicit opt-in keeps batch jobs intentional.
 - **Factory functions that hide client construction.** They make rate-limit-bucket sharing impossible. Direct `new` is the codebase preference.
 - **`.single()` + `PGRST116` sniffing** for "0 or 1 row" reads. Use `.maybeSingle()`.

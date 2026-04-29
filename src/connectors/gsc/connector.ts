@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { Connector, ToolDef } from '../base/connector.js';
 import { zodToJsonSchema } from '../base/zod-to-json-schema.js';
+import { DateRangeArg, normalizeDateRange } from '../base/date-range.js';
 import { logger } from '../../logger.js';
 import {
   SearchConsoleApiClient,
@@ -19,26 +20,10 @@ import {
  * GSC reporting data has a 2-3 day lag; the connector emits a `note` field
  * whenever the requested range ends inside the last 3 days so the LLM can
  * pass that to the user.
+ *
+ * Date ranges use the shared `DateRangeArg` schema — normalize via
+ * `normalizeDateRange` before any logic runs.
  */
-
-const PT_PRESETS = [
-  'yesterday', 'last_7_days', 'last_14_days', 'last_30_days', 'last_90_days',
-  'last_180_days', 'last_365_days', 'this_month', 'last_month',
-  'month_to_date', 'quarter_to_date', 'year_to_date',
-] as const;
-
-const DateRange = z.union([
-  z.object({
-    startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD'),
-    endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD'),
-  }),
-  z.object({
-    start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD'),
-    end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD'),
-  }),
-  z.enum(PT_PRESETS),
-]);
-type DateRangeArg = z.infer<typeof DateRange>;
 
 /** Default property — gantri.com (Domain property: `sc-domain:gantri.com`). The
  *  LLM passes `siteUrl` to switch to `sc-domain:made.gantri.com` when needed. */
@@ -53,7 +38,7 @@ const ListSitesArgs = z.object({});
 type ListSitesArgs = z.infer<typeof ListSitesArgs>;
 
 const SearchPerformanceArgs = z.object({
-  dateRange: DateRange,
+  dateRange: DateRangeArg,
   dimensions: z.array(z.enum(['date', 'query', 'page', 'country', 'device', 'searchAppearance']))
     .min(1).max(3)
     .describe('1-3 dimensions to group results by. Common: ["query"], ["page"], ["query","page"], ["date"].'),
@@ -252,61 +237,8 @@ function computeTotals(rows: SearchAnalyticsRow[]): { clicks: number; impression
   };
 }
 
-const PT_PRESET_LIST = PT_PRESETS as readonly string[];
-
-function normalizeDateRange(input: DateRangeArg): { startDate: string; endDate: string } {
-  if (typeof input === 'string') return presetToRange(input);
-  if ('startDate' in input && 'endDate' in input) return { startDate: input.startDate, endDate: input.endDate };
-  return { startDate: input.start, endDate: input.end };
-}
-
 function ptToday(now: Date = new Date()): string {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
-}
-function addDaysIso(ymd: string, n: number): string {
-  const [y, m, d] = ymd.split('-').map(Number);
-  const dt = new Date(Date.UTC(y, m - 1, d));
-  dt.setUTCDate(dt.getUTCDate() + n);
-  return dt.toISOString().slice(0, 10);
-}
-function presetToRange(preset: string): { startDate: string; endDate: string } {
-  if (!PT_PRESET_LIST.includes(preset)) throw new Error(`Unknown PT preset: ${preset}`);
-  const today = ptToday();
-  switch (preset) {
-    case 'yesterday': { const y = addDaysIso(today, -1); return { startDate: y, endDate: y }; }
-    case 'last_7_days': return { startDate: addDaysIso(today, -6), endDate: today };
-    case 'last_14_days': return { startDate: addDaysIso(today, -13), endDate: today };
-    case 'last_30_days': return { startDate: addDaysIso(today, -29), endDate: today };
-    case 'last_90_days': return { startDate: addDaysIso(today, -89), endDate: today };
-    case 'last_180_days': return { startDate: addDaysIso(today, -179), endDate: today };
-    case 'last_365_days': return { startDate: addDaysIso(today, -364), endDate: today };
-    case 'this_month':
-    case 'month_to_date': {
-      const [y, m] = today.split('-');
-      return { startDate: `${y}-${m}-01`, endDate: today };
-    }
-    case 'last_month': {
-      const [yStr, mStr] = today.split('-');
-      const y = Number(yStr); const m = Number(mStr);
-      const lmY = m === 1 ? y - 1 : y;
-      const lmM = m === 1 ? 12 : m - 1;
-      const startDate = `${lmY}-${String(lmM).padStart(2, '0')}-01`;
-      const lastDay = new Date(Date.UTC(y, m - 1, 0)).getUTCDate();
-      const endDate = `${lmY}-${String(lmM).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
-      return { startDate, endDate };
-    }
-    case 'quarter_to_date': {
-      const [yStr, mStr] = today.split('-');
-      const m = Number(mStr);
-      const qStartMonth = Math.floor((m - 1) / 3) * 3 + 1;
-      return { startDate: `${yStr}-${String(qStartMonth).padStart(2, '0')}-01`, endDate: today };
-    }
-    case 'year_to_date': {
-      const [y] = today.split('-');
-      return { startDate: `${y}-01-01`, endDate: today };
-    }
-    default: throw new Error(`Unknown PT preset: ${preset}`);
-  }
 }
 
 /** GSC data has a 2-3 day lag. If the requested range ends within that

@@ -21,6 +21,7 @@ It is the canonical checklist of every touchpoint required for a connector to be
 - **Migrations**: numbered SQL files in `migrations/`. Apply via `mcp__supabase__apply_migration` (project_id `ykjjwszoxazzlcovhlgd`). Verify with `information_schema.columns`.
 - **Secrets**: stored in Supabase vault, read via `readVaultSecret(supabase, 'NAME')`. Never use `.env` for secrets in this project. Document new vault keys in the `reference_gantri_ai_bot_deploy.md` memory.
 - **Date ranges**: ALWAYS import `DateRangeArg` and `normalizeDateRange` from `src/connectors/base/date-range.ts`. The invariant test at `tests/unit/connectors/base/date-range-invariant.test.ts` enforces this for whitelisted tools.
+- **Tool args**: the registry auto-JSON-parses string args that look like objects/arrays before passing to the Zod schema (handles LLM stringification edge cases). You don't need to defend against this in your tool's schema. Just use the shared schemas.
 - **Pagination**: existing helper `paginate<T>()` has a 50-page cap. For batch jobs that need full history, write a sibling `paginateUnbounded<T>()` with a 10K-page sanity cap — explicit opt-in.
 - **Repo reads**: use `.maybeSingle()` (not `.single()` + `PGRST116` sniffing) for "0 or 1 row" patterns.
 - **Live Reports tools**: must be in `WHITELISTED_TOOLS` (`src/reports/live/spec.ts`) AND have an output sample in `src/connectors/live-reports/tool-output-shapes.ts`, otherwise the compiler refuses to load.

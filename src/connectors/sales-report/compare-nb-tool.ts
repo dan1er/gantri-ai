@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { ToolDef } from '../base/connector.js';
 import { zodToJsonSchema } from '../base/zod-to-json-schema.js';
+import { DateRangeArg as SharedDateRangeArg } from '../base/date-range.js';
 import type { GrafanaConnector } from '../grafana/grafana-connector.js';
 import type { NorthbeamApiClient } from '../northbeam-api/client.js';
 
@@ -14,28 +15,12 @@ import type { NorthbeamApiClient } from '../northbeam-api/client.js';
  * Porter to type=Order, or summing the wrong column) or arithmetic (revenue
  * totals across days). This tool eliminates that drift.
  */
-/** Accept any of the date-range shapes the live-reports runner may substitute:
- *  - `{ startDate, endDate }` (the connector's canonical form)
- *  - `{ start, end }` (the runner's substituted shape from custom range)
- *  - A preset string (e.g. `last_7_days`) — resolved via the same PT calendar
- *    helper the connector uses for the rest of the system. This lets specs
- *    pass `dateRange: '$REPORT_RANGE'` and have the picker drive the window. */
-const PT_PRESETS = new Set([
-  'yesterday', 'last_7_days', 'last_14_days', 'last_30_days', 'last_90_days',
-  'last_180_days', 'last_365_days', 'this_month', 'last_month',
-  'month_to_date', 'quarter_to_date', 'year_to_date',
-]);
-const DateRangeArg = z.union([
-  z.object({
-    startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD PT'),
-    endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD PT'),
-  }),
-  z.object({
-    start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD PT'),
-    end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD PT'),
-  }),
-  z.string().refine((s) => PT_PRESETS.has(s), { message: 'Unknown date-range preset' }),
-]);
+/** Use the shared `DateRangeArg` schema (preset string | { start, end } |
+ *  { startDate, endDate }). Lets specs pass `dateRange: '$REPORT_RANGE'` and
+ *  have the picker drive the window. The local `normalizeDateRange` below
+ *  collapses every shape into the canonical { startDate, endDate } using a
+ *  caller-supplied `today` for deterministic test output. */
+const DateRangeArg = SharedDateRangeArg;
 const Args = z.object({
   dateRange: DateRangeArg,
   excludeToday: z.boolean().default(false).describe('Drop the current PT day from the result (avoids the NB ingestion-lag noise on the in-progress day).'),
@@ -210,13 +195,29 @@ function subDays(ymd: string, n: number): string {
 function presetToRange(preset: string, todayStr: string): { startDate: string; endDate: string } | null {
   const today = todayStr;
   switch (preset) {
+    case 'today': return { startDate: today, endDate: today };
     case 'yesterday': { const y = subDays(today, 1); return { startDate: y, endDate: y }; }
     case 'last_7_days': return { startDate: subDays(today, 6), endDate: today };
     case 'last_14_days': return { startDate: subDays(today, 13), endDate: today };
     case 'last_30_days': return { startDate: subDays(today, 29), endDate: today };
+    case 'last_60_days': return { startDate: subDays(today, 59), endDate: today };
     case 'last_90_days': return { startDate: subDays(today, 89), endDate: today };
     case 'last_180_days': return { startDate: subDays(today, 179), endDate: today };
     case 'last_365_days': return { startDate: subDays(today, 364), endDate: today };
+    case 'this_week': {
+      const [y, m, d] = today.split('-').map(Number);
+      const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+      const daysSinceMonday = (dow + 6) % 7;
+      return { startDate: subDays(today, daysSinceMonday), endDate: today };
+    }
+    case 'last_week': {
+      const [y, m, d] = today.split('-').map(Number);
+      const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+      const daysSinceMonday = (dow + 6) % 7;
+      const lastMonday = subDays(today, daysSinceMonday + 7);
+      const lastSunday = addDays(lastMonday, 6);
+      return { startDate: lastMonday, endDate: lastSunday };
+    }
     case 'this_month':
     case 'month_to_date': {
       const [y, m] = today.split('-');

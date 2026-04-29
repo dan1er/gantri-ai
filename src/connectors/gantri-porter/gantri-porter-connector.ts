@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { Connector, ToolDef } from '../base/connector.js';
+import { DateRangeArg, normalizeDateRange } from '../base/date-range.js';
 import { logger } from '../../logger.js';
 import type { RollupRepo, RollupRow } from '../../storage/rollup-repo.js';
 
@@ -115,11 +116,6 @@ const ORDER_STATUSES = [
   'Partially refunded', 'Lost',
 ] as const;
 
-const DateRange = z.object({
-  startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-});
-
 /** Convert a YYYY-MM-DD date (Pacific Time) to MM/DD/YYYY — the format Porter's
  *  controllers expect for startDate/endDate body params. They internally convert
  *  to PT unix-ms via moment + convertToPacificTZ. */
@@ -133,7 +129,7 @@ const OrdersQueryArgs = z.object({
   statuses: z.array(z.enum(ORDER_STATUSES)).optional(),
   search: z.string().min(1).max(200).optional()
     .describe('Free-text search matched against order id, customer name, email, etc.'),
-  dateRange: DateRange.optional(),
+  dateRange: DateRangeArg.optional(),
   late: z.boolean().optional(),
   sortingField: z.enum(['id', 'createdAt', 'completedAt', 'amount']).default('id'),
   sortingType: z.enum(['ASC', 'DESC']).default('DESC'),
@@ -148,7 +144,7 @@ const OrderGetArgs = z.object({
 type OrderGetArgs = z.infer<typeof OrderGetArgs>;
 
 const OrderStatsArgs = z.object({
-  dateRange: DateRange,
+  dateRange: DateRangeArg,
   types: z.array(z.enum(TRANSACTION_TYPES)).optional()
     .describe('Transaction types to include. Omit to include all types (useful for wholesale-customer aggregates that span Wholesale + Third Party + refunds).'),
   search: z.string().min(1).max(200).optional()
@@ -217,13 +213,12 @@ function buildPorterTools(conn: GantriPorterConnector): ToolDef[] {
         statuses: { type: 'array', items: { type: 'string', enum: ORDER_STATUSES as unknown as string[] } },
         search: { type: 'string' },
         dateRange: {
-          type: 'object',
-          additionalProperties: false,
-          required: ['startDate', 'endDate'],
-          properties: {
-            startDate: { type: 'string', description: 'YYYY-MM-DD, Pacific Time.' },
-            endDate: { type: 'string', description: 'YYYY-MM-DD, inclusive, Pacific Time.' },
-          },
+          // Union: preset string | {start,end} | {startDate,endDate}.
+          anyOf: [
+            { type: 'string', description: 'PT preset (e.g. "last_30_days").' },
+            { type: 'object', required: ['startDate', 'endDate'], properties: { startDate: { type: 'string', description: 'YYYY-MM-DD, Pacific Time.' }, endDate: { type: 'string', description: 'YYYY-MM-DD, inclusive, Pacific Time.' } } },
+            { type: 'object', required: ['start', 'end'], properties: { start: { type: 'string' }, end: { type: 'string' } } },
+          ],
         },
         late: { type: 'boolean' },
         sortingField: { type: 'string', enum: ['id', 'createdAt', 'completedAt', 'amount'] },
@@ -244,8 +239,9 @@ function buildPorterTools(conn: GantriPorterConnector): ToolDef[] {
       if (args.search) body.search = args.search;
       if (args.late) body.late = true;
       if (args.dateRange) {
-        body.startDate = toPorterDate(args.dateRange.startDate);
-        body.endDate = toPorterDate(args.dateRange.endDate);
+        const range = normalizeDateRange(args.dateRange);
+        body.startDate = toPorterDate(range.startDate);
+        body.endDate = toPorterDate(range.endDate);
       }
       const data = await conn.fetchJson<{
         orders: unknown[];
@@ -410,21 +406,21 @@ function buildPorterTools(conn: GantriPorterConnector): ToolDef[] {
       required: ['dateRange'],
       properties: {
         dateRange: {
-          type: 'object',
-          additionalProperties: false,
-          required: ['startDate', 'endDate'],
-          properties: {
-            startDate: { type: 'string' },
-            endDate: { type: 'string' },
-          },
+          // Union: preset string | {start,end} | {startDate,endDate}.
+          anyOf: [
+            { type: 'string' },
+            { type: 'object', required: ['startDate', 'endDate'], properties: { startDate: { type: 'string' }, endDate: { type: 'string' } } },
+            { type: 'object', required: ['start', 'end'], properties: { start: { type: 'string' }, end: { type: 'string' } } },
+          ],
         },
         types: { type: 'array', items: { type: 'string', enum: TRANSACTION_TYPES as unknown as string[] } },
         search: { type: 'string', description: 'Free-text search (customer name, email, order id).' },
       },
     },
     async execute(args) {
-      const startDateStr = toPorterDate(args.dateRange.startDate);
-      const endDateStr = toPorterDate(args.dateRange.endDate);
+      const period = normalizeDateRange(args.dateRange);
+      const startDateStr = toPorterDate(period.startDate);
+      const endDateStr = toPorterDate(period.endDate);
 
       // Probe page 1 once to learn the true total. If it fits under the
       // pagination cap we paginate Porter for full per-row breakdowns. If not,
@@ -508,7 +504,7 @@ function buildPorterTools(conn: GantriPorterConnector): ToolDef[] {
 
       const totalRevenueDollars = round2(totalRevenueCents / 100);
       return {
-        period: args.dateRange,
+        period,
         typesFilter: args.types,
         source: 'porter' as const,
         totalOrders: totalCount,

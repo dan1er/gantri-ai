@@ -53,17 +53,10 @@ export class NorthbeamApiConnector implements Connector {
 
 // ---- tool schemas ----
 
-const DateRange = z.union([
-  z
-    .enum(['yesterday', 'last_7_days', 'last_14_days', 'last_30_days', 'last_90_days', 'last_180_days', 'last_365_days', 'this_month', 'last_month', 'month_to_date', 'quarter_to_date', 'year_to_date'])
-    .describe('Preset relative window. Use this whenever the question is "last week", "last 30 days", "year to date", etc. Calendar-relative presets (month_to_date, quarter_to_date, year_to_date, this_month, last_month) are resolved to exact start/end dates before the API call.'),
-  z
-    .object({
-      start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD'),
-      end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD'),
-    })
-    .describe('Fixed date range, both bounds inclusive. Use for specific dates ("on Jan 1", "March 2026").'),
-]);
+// Shared canonical date-range union (preset string | {start,end} | {startDate,endDate}).
+// metrics_explorer's normalize logic below also lower-cases / underscore-pads
+// the LLM-generated preset before passing through.
+const DateRange = DateRangeArg;
 
 const Breakdown = z
   .object({
@@ -295,10 +288,14 @@ export function buildExportPayload(args: MetricsExplorerArgs): DataExportPayload
   const breakdowns: DataExportBreakdown[] = args.breakdown ? [args.breakdown] : [];
   // Resolve calendar-relative presets (month_to_date, quarter_to_date, etc.)
   // that NB doesn't natively support into explicit {start, end} date ranges.
-  const resolvedDateRange: typeof args.dateRange =
+  // We also collapse the canonical {startDate, endDate} shape (from the
+  // shared DateRangeArg) into the local {start, end} shape used downstream.
+  const resolvedDateRange: string | { start: string; end: string } =
     typeof args.dateRange === 'string'
       ? (resolveCalendarPreset(args.dateRange) ?? args.dateRange)
-      : args.dateRange;
+      : 'startDate' in args.dateRange
+        ? { start: args.dateRange.startDate, end: args.dateRange.endDate }
+        : { start: args.dateRange.start, end: args.dateRange.end };
 
   const periodFields: Pick<DataExportPayload, 'period_type' | 'period_options'> =
     typeof resolvedDateRange === 'string'
@@ -343,6 +340,7 @@ function presetToPeriodType(preset: string): string {
     case 'last_7_days': return 'LAST_7_DAYS';
     case 'last_14_days': return 'LAST_14_DAYS';
     case 'last_30_days': return 'LAST_30_DAYS';
+    case 'last_60_days': return 'LAST_60_DAYS';
     case 'last_90_days': return 'LAST_90_DAYS';
     case 'last_180_days': return 'LAST_180_DAYS';
     case 'last_365_days': return 'LAST_52_WEEKS';
@@ -353,46 +351,27 @@ function presetToPeriodType(preset: string): string {
 /**
  * Resolve calendar-relative presets that NB doesn't natively support
  * (last_14_days, month_to_date, quarter_to_date, year_to_date, this_month,
- * last_month) into explicit {start, end} date objects. NB-native presets pass
- * through unchanged so the NB API can use its own logic.
+ * last_month, this_week, last_week, today) into explicit {start, end} date
+ * objects. NB-native presets pass through unchanged so the NB API can use
+ * its own logic.
  *
  * All "today" / month / quarter / year boundaries are computed in PACIFIC TIME
  * to match the rest of Gantri's reporting (NB orders bucketed by PT day,
  * Grafana panels filtered by PT, late-orders cutoffs in PT).
  */
 function resolveCalendarPreset(preset: string): { start: string; end: string } | null {
-  // Today's calendar date in Pacific Time.
-  const ptParts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/Los_Angeles',
-    year: 'numeric', month: '2-digit', day: '2-digit',
-  }).formatToParts(new Date());
-  const y = Number(ptParts.find((p) => p.type === 'year')?.value ?? '0');
-  const m = Number(ptParts.find((p) => p.type === 'month')?.value ?? '0');
-  const d = Number(ptParts.find((p) => p.type === 'day')?.value ?? '0');
-  const todayStr = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-  // Date-only arithmetic on a noon UTC anchor is safe across DST.
-  const subDays = (n: number): string => {
-    const dt = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
-    dt.setUTCDate(dt.getUTCDate() - n);
-    return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
-  };
-  switch (preset) {
-    case 'last_14_days': return { start: subDays(13), end: todayStr };
-    case 'this_month':
-    case 'month_to_date': return { start: `${y}-${String(m).padStart(2, '0')}-01`, end: todayStr };
-    case 'last_month': {
-      const lmYear = m === 1 ? y - 1 : y;
-      const lmMonth = m === 1 ? 12 : m - 1;
-      const lastDayOfPrev = new Date(Date.UTC(y, m - 1, 0, 12, 0, 0));
-      const endStr = `${lastDayOfPrev.getUTCFullYear()}-${String(lastDayOfPrev.getUTCMonth() + 1).padStart(2, '0')}-${String(lastDayOfPrev.getUTCDate()).padStart(2, '0')}`;
-      return { start: `${lmYear}-${String(lmMonth).padStart(2, '0')}-01`, end: endStr };
-    }
-    case 'quarter_to_date': {
-      const qStart = Math.floor((m - 1) / 3) * 3 + 1;
-      return { start: `${y}-${String(qStart).padStart(2, '0')}-01`, end: todayStr };
-    }
-    case 'year_to_date': return { start: `${y}-01-01`, end: todayStr };
-    default: return null; // NB-native preset — pass through to API
+  // NB-native presets pass through to the API as-is.
+  const NB_NATIVE = new Set(['yesterday', 'last_7_days', 'last_30_days', 'last_60_days', 'last_90_days', 'last_180_days', 'last_365_days']);
+  if (NB_NATIVE.has(preset)) return null;
+  // Everything else (today, last_14_days, this_week, last_week, this_month,
+  // last_month, month_to_date, quarter_to_date, year_to_date) — resolve via
+  // the shared PT-anchored helper, then collapse to NB's local {start, end}
+  // shape.
+  try {
+    const normalized = normalizeDateRange(preset as Parameters<typeof normalizeDateRange>[0]);
+    return { start: normalized.startDate, end: normalized.endDate };
+  } catch {
+    return null;
   }
 }
 

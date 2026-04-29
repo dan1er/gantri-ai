@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { Connector, ToolDef } from '../base/connector.js';
 import { zodToJsonSchema } from '../base/zod-to-json-schema.js';
+import { DateRangeArg, normalizeDateRange } from '../base/date-range.js';
 import type { Ga4Client, Ga4ReportRequest, Ga4ReportResponse } from './client.js';
 import { Ga4ApiError } from './client.js';
 
@@ -8,14 +9,10 @@ export interface Ga4ConnectorDeps {
   client: Ga4Client;
 }
 
-const DateRange = z.union([
-  z.enum(['yesterday', 'today', 'last_7_days', 'last_14_days', 'last_30_days', 'last_90_days', 'last_180_days', 'last_365_days', 'this_month', 'last_month'])
-    .describe('Preset relative window. GA4 buckets in the property\'s reporting time zone.'),
-  z.object({
-    start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD'),
-    end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD'),
-  }).describe('Fixed date range, both bounds inclusive.'),
-]);
+// Use the shared DateRangeArg union — accepts {startDate,endDate}, {start,end},
+// or any preset string. GA4 buckets in the property's reporting time zone, but
+// the preset list is the same canonical PT-anchored set used by every tool.
+const DateRange = DateRangeArg;
 
 const RunReportArgs = z.object({
   dateRange: DateRange.default('last_7_days'),
@@ -265,36 +262,27 @@ export class Ga4Connector implements Connector {
 
 function resolveDateRange(input: RunReportArgs['dateRange']): { startDate: string; endDate: string } {
   if (typeof input === 'string') {
+    // Fast path: GA4-native relative tokens for the common rolling windows.
+    // GA4 accepts strings like `7daysAgo`, `today`, `yesterday` directly.
     switch (input) {
       case 'yesterday': return { startDate: 'yesterday', endDate: 'yesterday' };
       case 'today': return { startDate: 'today', endDate: 'today' };
       case 'last_7_days': return { startDate: '7daysAgo', endDate: 'today' };
       case 'last_14_days': return { startDate: '14daysAgo', endDate: 'today' };
       case 'last_30_days': return { startDate: '30daysAgo', endDate: 'today' };
+      case 'last_60_days': return { startDate: '60daysAgo', endDate: 'today' };
       case 'last_90_days': return { startDate: '90daysAgo', endDate: 'today' };
       case 'last_180_days': return { startDate: '180daysAgo', endDate: 'today' };
       case 'last_365_days': return { startDate: '365daysAgo', endDate: 'today' };
-      // GA4 doesn't ship "this_month"/"last_month" relative tokens — translate to fixed strings client-side.
-      // Use the property's reporting timezone is fine; we approximate with UTC since GA4 also accepts YYYY-MM-DD literals.
-      case 'this_month': {
-        const now = new Date();
-        const y = now.getUTCFullYear();
-        const m = String(now.getUTCMonth() + 1).padStart(2, '0');
-        return { startDate: `${y}-${m}-01`, endDate: 'today' };
-      }
-      case 'last_month': {
-        const now = new Date();
-        const last = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
-        const y = last.getUTCFullYear();
-        const m = String(last.getUTCMonth() + 1).padStart(2, '0');
-        const endOfMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 0));
-        const eY = endOfMonth.getUTCFullYear();
-        const eM = String(endOfMonth.getUTCMonth() + 1).padStart(2, '0');
-        const eD = String(endOfMonth.getUTCDate()).padStart(2, '0');
-        return { startDate: `${y}-${m}-01`, endDate: `${eY}-${eM}-${eD}` };
-      }
     }
-    throw new Error(`Unknown dateRange preset: ${input as string}`);
+    // Slow path: calendar-relative presets (this_month, year_to_date, etc.) —
+    // GA4 has no native token, so resolve via the shared PT-anchored helper
+    // and pass YYYY-MM-DD literals (GA4 accepts those too).
+    const normalized = normalizeDateRange(input);
+    return { startDate: normalized.startDate, endDate: normalized.endDate };
+  }
+  if ('startDate' in input && 'endDate' in input) {
+    return { startDate: input.startDate, endDate: input.endDate };
   }
   return { startDate: input.start, endDate: input.end };
 }

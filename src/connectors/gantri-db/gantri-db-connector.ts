@@ -1,6 +1,7 @@
 import pg from 'pg';
 import { z } from 'zod';
 import type { Connector, ToolDef } from '../base/connector.js';
+import { DateRangeArg, normalizeDateRange } from '../base/date-range.js';
 import { logger } from '../../logger.js';
 
 const { Pool } = pg;
@@ -97,11 +98,6 @@ const ORDER_STATUSES = [
   'Lost',
 ] as const;
 
-const DateRange = z.object({
-  startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-});
-
 /** PT-to-UTC instant conversion matching our other date-range handling. */
 function toIsoRange(range: { startDate: string; endDate: string }) {
   const nextDay = new Date(`${range.endDate}T00:00:00Z`);
@@ -121,7 +117,7 @@ const OrdersQueryArgs = z.object({
   userId: z.number().int().positive().optional(),
   organizationId: z.number().int().positive().optional(),
   customerNameContains: z.string().min(1).max(100).optional(),
-  dateRange: DateRange.optional(),
+  dateRange: DateRangeArg.optional(),
   minTotalDollars: z.number().min(0).optional(),
   maxTotalDollars: z.number().min(0).optional(),
   limit: z.number().int().min(1).max(500).default(25),
@@ -135,7 +131,7 @@ const OrderGetArgs = z.object({
 type OrderGetArgs = z.infer<typeof OrderGetArgs>;
 
 const OrderStatsArgs = z.object({
-  dateRange: DateRange,
+  dateRange: DateRangeArg,
   types: z.array(z.enum(TRANSACTION_TYPES)).default(['Order']),
 });
 type OrderStatsArgs = z.infer<typeof OrderStatsArgs>;
@@ -158,13 +154,12 @@ function buildGantriDbTools(pool: pg.Pool): ToolDef[] {
         organizationId: { type: 'integer', minimum: 1 },
         customerNameContains: { type: 'string' },
         dateRange: {
-          type: 'object',
-          additionalProperties: false,
-          required: ['startDate', 'endDate'],
-          properties: {
-            startDate: { type: 'string', description: 'YYYY-MM-DD, interpreted in Pacific Time.' },
-            endDate: { type: 'string', description: 'YYYY-MM-DD, inclusive, interpreted in Pacific Time.' },
-          },
+          // Union: preset string | {start,end} | {startDate,endDate}.
+          anyOf: [
+            { type: 'string', description: 'PT preset (e.g. "last_30_days").' },
+            { type: 'object', required: ['startDate', 'endDate'], properties: { startDate: { type: 'string', description: 'YYYY-MM-DD, interpreted in Pacific Time.' }, endDate: { type: 'string', description: 'YYYY-MM-DD, inclusive, interpreted in Pacific Time.' } } },
+            { type: 'object', required: ['start', 'end'], properties: { start: { type: 'string' }, end: { type: 'string' } } },
+          ],
         },
         minTotalDollars: { type: 'number', minimum: 0 },
         maxTotalDollars: { type: 'number', minimum: 0 },
@@ -195,7 +190,7 @@ function buildGantriDbTools(pool: pg.Pool): ToolDef[] {
         p++;
       }
       if (args.dateRange) {
-        const { start, end } = toIsoRange(args.dateRange);
+        const { start, end } = toIsoRange(normalizeDateRange(args.dateRange));
         conds.push(`t."createdAt" >= $${p++}`);
         params.push(start);
         conds.push(`t."createdAt" <= $${p++}`);
@@ -292,19 +287,19 @@ function buildGantriDbTools(pool: pg.Pool): ToolDef[] {
       required: ['dateRange'],
       properties: {
         dateRange: {
-          type: 'object',
-          additionalProperties: false,
-          required: ['startDate', 'endDate'],
-          properties: {
-            startDate: { type: 'string' },
-            endDate: { type: 'string' },
-          },
+          // Union: preset string | {start,end} | {startDate,endDate}.
+          anyOf: [
+            { type: 'string' },
+            { type: 'object', required: ['startDate', 'endDate'], properties: { startDate: { type: 'string' }, endDate: { type: 'string' } } },
+            { type: 'object', required: ['start', 'end'], properties: { start: { type: 'string' }, end: { type: 'string' } } },
+          ],
         },
         types: { type: 'array', items: { type: 'string', enum: TRANSACTION_TYPES as unknown as string[] } },
       },
     },
     async execute(args) {
-      const { start, end } = toIsoRange(args.dateRange);
+      const period = normalizeDateRange(args.dateRange);
+      const { start, end } = toIsoRange(period);
       const types = args.types ?? ['Order'];
       const totalSql = `
         select
@@ -336,7 +331,7 @@ function buildGantriDbTools(pool: pg.Pool): ToolDef[] {
         pool.query(typeSql, [types, start, end]),
       ]);
       return {
-        period: args.dateRange,
+        period,
         typesFilter: types,
         totalOrders: total.rows[0].totalOrders as number,
         totalRevenueDollars: Number(total.rows[0].totalRevenueDollars),

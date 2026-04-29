@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { Connector, ToolDef } from '../base/connector.js';
+import { DateRangeArg, normalizeDateRange } from '../base/date-range.js';
 import { logger } from '../../logger.js';
 
 export interface GrafanaConfig {
@@ -98,11 +99,6 @@ export class GrafanaConnector implements Connector {
 // Tool definitions
 // ============================================================================
 
-const DateRange = z.object({
-  startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-});
-
 /** Convert YYYY-MM-DD (Pacific Time) to UTC unix-ms bounds. */
 function ptRangeToMs(range: { startDate: string; endDate: string }) {
   const fromMs = Date.parse(`${range.startDate}T07:00:00.000Z`);
@@ -122,7 +118,7 @@ type ListDashboardsArgs = z.infer<typeof ListDashboardsArgs>;
 const RunDashboardArgs = z.object({
   dashboardUid: z.string().min(1)
     .describe('Dashboard UID from grafana.list_dashboards (e.g. "edc38l4mkbsaoa" for the Sales dashboard).'),
-  dateRange: DateRange
+  dateRange: DateRangeArg
     .describe('Date range in Pacific Time (YYYY-MM-DD). All panels inherit this range via Grafana time macros.'),
   panelIds: z.array(z.number().int()).optional()
     .describe('Optional: restrict to a subset of panel IDs. Omit to run every panel on the dashboard.'),
@@ -133,7 +129,7 @@ type RunDashboardArgs = z.infer<typeof RunDashboardArgs>;
 const SqlArgs = z.object({
   sql: z.string().min(1).max(20_000)
     .describe('Read-only PostgreSQL against Gantri\'s Porter DB (read-replica). Runs through Grafana\'s query proxy. Use standard Postgres syntax. Grafana macros supported: `$__timeFrom()`, `$__timeTo()`, `$__timeFilter(<column>)`.'),
-  dateRange: DateRange
+  dateRange: DateRangeArg
     .describe('Time range exposed to the query as $__timeFrom / $__timeTo / $__timeFilter(...), in Pacific Time.'),
   maxRows: z.number().int().min(1).max(1000).default(100),
 });
@@ -179,10 +175,12 @@ function buildGrafanaTools(conn: GrafanaConnector): ToolDef[] {
       properties: {
         dashboardUid: { type: 'string' },
         dateRange: {
-          type: 'object',
-          additionalProperties: false,
-          required: ['startDate', 'endDate'],
-          properties: { startDate: { type: 'string' }, endDate: { type: 'string' } },
+          // Union: preset string | {start,end} | {startDate,endDate}.
+          anyOf: [
+            { type: 'string' },
+            { type: 'object', required: ['startDate', 'endDate'], properties: { startDate: { type: 'string' }, endDate: { type: 'string' } } },
+            { type: 'object', required: ['start', 'end'], properties: { start: { type: 'string' }, end: { type: 'string' } } },
+          ],
         },
         panelIds: { type: 'array', items: { type: 'integer' } },
         maxRowsPerPanel: { type: 'integer', minimum: 1, maximum: 1000 },
@@ -192,7 +190,8 @@ function buildGrafanaTools(conn: GrafanaConnector): ToolDef[] {
       const dash = await conn.request<{ dashboard: { title: string; panels: any[] } }>(
         `/api/dashboards/uid/${encodeURIComponent(args.dashboardUid)}`,
       );
-      const { fromMs, toMs } = ptRangeToMs(args.dateRange);
+      const period = normalizeDateRange(args.dateRange);
+      const { fromMs, toMs } = ptRangeToMs(period);
       const allPanels = dash.dashboard.panels.filter((p) => Array.isArray(p.targets) && p.targets.length > 0);
       const selected = args.panelIds?.length
         ? allPanels.filter((p) => args.panelIds!.includes(p.id))
@@ -224,7 +223,7 @@ function buildGrafanaTools(conn: GrafanaConnector): ToolDef[] {
 
       return {
         dashboard: { uid: args.dashboardUid, title: dash.dashboard.title },
-        period: args.dateRange,
+        period,
         panels: results,
       };
     },
@@ -242,16 +241,19 @@ function buildGrafanaTools(conn: GrafanaConnector): ToolDef[] {
       properties: {
         sql: { type: 'string' },
         dateRange: {
-          type: 'object',
-          additionalProperties: false,
-          required: ['startDate', 'endDate'],
-          properties: { startDate: { type: 'string' }, endDate: { type: 'string' } },
+          // Union: preset string | {start,end} | {startDate,endDate}.
+          anyOf: [
+            { type: 'string' },
+            { type: 'object', required: ['startDate', 'endDate'], properties: { startDate: { type: 'string' }, endDate: { type: 'string' } } },
+            { type: 'object', required: ['start', 'end'], properties: { start: { type: 'string' }, end: { type: 'string' } } },
+          ],
         },
         maxRows: { type: 'integer', minimum: 1, maximum: 1000 },
       },
     },
     async execute(args) {
-      const { fromMs, toMs } = ptRangeToMs(args.dateRange);
+      const period = normalizeDateRange(args.dateRange);
+      const { fromMs, toMs } = ptRangeToMs(period);
       const t0 = Date.now();
       try {
         const { fields, rows } = await conn.runSql({
@@ -261,7 +263,7 @@ function buildGrafanaTools(conn: GrafanaConnector): ToolDef[] {
           maxRows: args.maxRows,
         });
         return {
-          period: args.dateRange,
+          period,
           fields,
           rowCount: rows.length,
           rows,

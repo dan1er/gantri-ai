@@ -1,20 +1,33 @@
 import { describe, it, expect } from 'vitest';
 import { z } from 'zod';
 import { WHITELISTED_TOOLS } from '../../../../src/reports/live/spec.js';
+import { unstringifyJsonObjects } from '../../../../src/connectors/base/registry.js';
 
 /**
  * INVARIANT — every whitelisted live-report tool that accepts a `dateRange`
- * argument MUST accept a preset string like `'last_30_days'` (the runtime
- * value `$REPORT_RANGE` resolves to). Three separate connectors (Impact,
- * Klaviyo, gantri.sales_report) shipped with object-only `dateRange` Zod
- * schemas and silently failed Live-Reports smoke validation. This test is
- * the systemic guard against ever shipping that bug a fourth time.
+ * argument MUST accept three input shapes (as they appear AFTER the registry's
+ * `unstringifyJsonObjects` preprocess runs):
+ *
+ *   1. Preset string                — `'last_30_days'` (the runtime value
+ *                                     `$REPORT_RANGE` resolves to).
+ *   2. Object literal               — `{ startDate: '2026-01-01', endDate: '2026-01-31' }`.
+ *   3. JSON-stringified object      — `'{"startDate":"2026-01-01","endDate":"2026-01-31"}'`.
+ *      The LLM occasionally serializes nested args this way; the registry
+ *      preprocess parses it back into an object before validation.
+ *
+ * Three separate connectors (Impact, Klaviyo, gantri.sales_report) shipped
+ * with object-only `dateRange` Zod schemas and silently failed Live-Reports
+ * smoke validation. Then in feedback 18994b97, Impact tools rejected a
+ * stringified-object dateRange that would have matched if it had arrived as
+ * a real object. This test is the systemic guard against ever shipping any
+ * of those bugs again.
  *
  * Implementation: import every whitelisted tool's connector module, inspect
  * the Zod schema attached to each ToolDef, find the schema for the
- * `dateRange` arg, and call `safeParse('last_30_days')`. If the schema
- * rejects the preset string, the test fails and prints the offending tool
- * name and Zod path so the dev knows exactly what to migrate.
+ * `dateRange` arg, and exercise it through the registry's preprocess +
+ * `safeParse`. If the schema rejects any of the three shapes, the test fails
+ * and prints the offending tool name and Zod path so the dev knows exactly
+ * what to migrate.
  */
 
 import * as impact from '../../../../src/connectors/impact/connector.js';
@@ -49,22 +62,6 @@ function getArgSchema(schema: unknown, argName: string): z.ZodTypeAny | null {
 
 interface ToolLike { name: string; schema: unknown }
 
-/** Pull every ToolDef out of the connector classes / factories exported from
- *  a connector module. We walk every export, looking for either a class
- *  instance with `tools` or a factory function whose result has `tools`. */
-function extractTools(mod: Record<string, unknown>): ToolLike[] {
-  const tools: ToolLike[] = [];
-  for (const exp of Object.values(mod)) {
-    // Class with a static `tools` field
-    if (exp && typeof exp === 'object' && 'tools' in exp && Array.isArray((exp as { tools: unknown[] }).tools)) {
-      for (const t of (exp as { tools: ToolLike[] }).tools) {
-        if (t?.name && t?.schema) tools.push(t);
-      }
-    }
-  }
-  return tools;
-}
-
 /** Some connectors only expose factory functions (not pre-built instances).
  *  For those we hard-code minimal stubs to satisfy DI and pull tools out. */
 const inspectionEntries: Array<{ moduleName: string; mod: Record<string, unknown>; instances: Array<{ tools: ToolLike[] }> }> = [
@@ -95,7 +92,7 @@ const inspectionEntries: Array<{ moduleName: string; mod: Record<string, unknown
   ]},
 ];
 
-describe('every whitelisted tool with dateRange accepts a preset string', () => {
+describe('every whitelisted tool with dateRange accepts all three input shapes via the registry pipeline', () => {
   const allTools: ToolLike[] = inspectionEntries.flatMap((e) => e.instances.flatMap((inst) => inst.tools));
   const whitelistedToolsWithDateRange = allTools.filter((t) => WHITELISTED_TOOLS.has(t.name) && getArgSchema(t.schema, 'dateRange') !== null);
 
@@ -104,22 +101,33 @@ describe('every whitelisted tool with dateRange accepts a preset string', () => 
     expect(whitelistedToolsWithDateRange.length).toBeGreaterThanOrEqual(5);
   });
 
+  // Three shapes the LLM (or the live-reports runner) might emit.
+  const inputs: Array<{ name: string; value: unknown }> = [
+    { name: 'preset string', value: 'last_30_days' },
+    { name: 'object literal {startDate,endDate}', value: { startDate: '2026-01-01', endDate: '2026-01-31' } },
+    { name: 'JSON-stringified object', value: '{"startDate":"2026-01-01","endDate":"2026-01-31"}' },
+  ];
+
   for (const tool of whitelistedToolsWithDateRange) {
-    it(`${tool.name}: accepts preset 'last_30_days' as dateRange`, () => {
-      const schema = getArgSchema(tool.schema, 'dateRange');
-      expect(schema).not.toBeNull();
-      const result = schema!.safeParse('last_30_days');
-      if (!result.success) {
-        const issues = result.error.issues.map((i) => `  - ${i.path.join('.')}: ${i.message}`).join('\n');
-        throw new Error(
-          `Tool '${tool.name}' rejected the preset string 'last_30_days' for dateRange. ` +
-          `Live-Reports' $REPORT_RANGE substitution will fail smoke validation when a viewer ` +
-          `selects this tool with a preset range.\n` +
-          `Fix: import { DateRangeArg, normalizeDateRange } from '../base/date-range.js' and use ` +
-          `DateRangeArg in the Zod schema, then call normalizeDateRange(args.dateRange) before ` +
-          `using startDate/endDate.\nZod issues:\n${issues}`,
-        );
-      }
-    });
+    for (const input of inputs) {
+      it(`${tool.name}: accepts dateRange as ${input.name}`, () => {
+        const schema = getArgSchema(tool.schema, 'dateRange');
+        expect(schema).not.toBeNull();
+        // Run the same preprocess the registry runs before Zod validation.
+        const preprocessed = unstringifyJsonObjects({ dateRange: input.value }) as { dateRange: unknown };
+        const result = schema!.safeParse(preprocessed.dateRange);
+        if (!result.success) {
+          const issues = result.error.issues.map((i) => `  - ${i.path.join('.')}: ${i.message}`).join('\n');
+          throw new Error(
+            `Tool '${tool.name}' rejected ${input.name} for dateRange after registry preprocess. ` +
+            `Live-Reports' $REPORT_RANGE substitution and LLM-stringified payloads will both ` +
+            `fail validation.\n` +
+            `Fix: import { DateRangeArg, normalizeDateRange } from '../base/date-range.js' and use ` +
+            `DateRangeArg in the Zod schema, then call normalizeDateRange(args.dateRange) before ` +
+            `using startDate/endDate.\nZod issues:\n${issues}`,
+          );
+        }
+      });
+    }
   }
 });

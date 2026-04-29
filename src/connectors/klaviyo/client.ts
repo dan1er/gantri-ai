@@ -98,6 +98,21 @@ export interface KlaviyoMetricAttrs {
   [key: string]: unknown;
 }
 
+/** Profile resource attributes (`/api/profiles`). We only read `created`
+ *  + `subscriptions.email.marketing.consent` for the consented-signups
+ *  rollup; other fields are typed permissively because the JSON:API
+ *  payload includes many we don't care about. */
+export interface KlaviyoProfileAttrs {
+  email?: string | null;
+  created: string; // ISO 8601
+  updated?: string;
+  subscriptions?: {
+    email?: { marketing?: { consent?: string; consent_timestamp?: string } };
+    sms?: unknown;
+  } | null;
+  [key: string]: unknown;
+}
+
 /** A single row from a *-values-report response: dimension keys (`groupings`)
  *  + numeric stats. Stats requested mirror what the connector exposes. */
 export interface ValuesReportRow {
@@ -235,6 +250,43 @@ export class KlaviyoApiClient {
     return out;
   }
 
+  /** Walk every page of a JSON:API collection without the 50-page cap that
+   *  `paginate` enforces. ONLY for jobs where we actually need to read every
+   *  matching resource (e.g. the consented-signups rollup walking all
+   *  profiles created in a day). A 10000-page sanity cap still fires if the
+   *  cursor loops, so we don't run forever silently. Sibling of `paginate`,
+   *  not a replacement — pick the right tool. */
+  private async paginateUnbounded<TAttrs>(initialPath: string): Promise<KlaviyoResource<TAttrs>[]> {
+    const SANITY_CAP = 10000;
+    const out: KlaviyoResource<TAttrs>[] = [];
+    let url: string = `${this.baseUrl}${initialPath}`;
+    let pageNum = 0;
+    while (url) {
+      if (pageNum >= SANITY_CAP) {
+        throw new KlaviyoApiError(
+          `paginateUnbounded exceeded ${SANITY_CAP}-page sanity cap; aborting`,
+          0,
+          null,
+        );
+      }
+      const t0 = Date.now();
+      const res = await this.fetchImpl(url, { method: 'GET', headers: this.headers() });
+      const elapsed = Date.now() - t0;
+      if (!res.ok) {
+        let body: unknown = null;
+        try { body = await res.json(); } catch { body = await res.text().catch(() => null); }
+        logger.warn({ path: '<paginateUnbounded>', status: res.status, elapsed, body }, 'klaviyo api error');
+        throw new KlaviyoApiError(`GET <paginateUnbounded> -> ${res.status}`, res.status, body);
+      }
+      const json = (await res.json()) as CollectionResponse<TAttrs>;
+      logger.info({ path: '<paginateUnbounded>', status: res.status, elapsed, page: pageNum }, 'klaviyo api ok');
+      out.push(...(json.data ?? []));
+      url = json.links?.next ?? '';
+      pageNum++;
+    }
+    return out;
+  }
+
   /** All metrics in the account. Used at boot to discover the "Placed Order"
    *  metric id, which the *-values-reports require as `conversion_metric_id`.
    *  Memoized — the metrics list is stable across a process lifetime. */
@@ -357,4 +409,36 @@ export class KlaviyoApiClient {
     const resp = await this.post<ValuesReportResponse>('/flow-values-reports', body);
     return resp.data?.attributes?.results ?? [];
   }
+
+  /** GET /profiles filtered by `created` in [startDate, endDate] (inclusive
+   *  YMD on both ends). Returns ALL matching profiles via unbounded
+   *  pagination — designed for the consented-signups rollup that walks an
+   *  entire day's signups. The `additional-fields[profile]=subscriptions`
+   *  query param ensures we get the marketing-consent payload back without
+   *  a follow-up fetch per profile.
+   *
+   *  `endDate` is inclusive at the YMD level; we translate it to a
+   *  `less-than` (exclusive) on next-day midnight UTC, since Klaviyo's
+   *  filter operators are open-interval on the high end. */
+  async searchProfilesByCreatedRange(opts: { startDate: string; endDate: string }): Promise<KlaviyoResource<KlaviyoProfileAttrs>[]> {
+    const startISO = `${opts.startDate}T00:00:00.000Z`;
+    const endExclusive = addDaysYmd(opts.endDate, 1);
+    const endISO = `${endExclusive}T00:00:00.000Z`;
+    const filter = `and(greater-or-equal(created,${startISO}),less-than(created,${endISO}))`;
+    const params = new URLSearchParams();
+    params.set('filter', filter);
+    params.set('additional-fields[profile]', 'subscriptions');
+    return this.paginateUnbounded<KlaviyoProfileAttrs>(`/profiles?${params.toString()}`);
+  }
+}
+
+/** Add `n` days to a YMD-format string and return the result in YMD format,
+ *  using UTC arithmetic so DST doesn't shift the boundary. Used by
+ *  `searchProfilesByCreatedRange` to convert an inclusive end date to the
+ *  next-day exclusive boundary Klaviyo's `less-than` operator wants. */
+function addDaysYmd(ymd: string, n: number): string {
+  const [y, m, d] = ymd.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + n);
+  return dt.toISOString().slice(0, 10);
 }

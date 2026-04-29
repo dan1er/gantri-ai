@@ -90,6 +90,9 @@ export class PipedriveConnector implements Connector {
       this.toolDealDetail(),
       this.toolOrganizationPerformance(),
       this.toolOrganizationDetail(),
+      this.toolLostReasonsBreakdown(),
+      this.toolActivitySummary(),
+      this.toolUserPerformance(),
     ];
   }
 
@@ -623,9 +626,206 @@ export class PipedriveConnector implements Connector {
       },
     };
   }
+
+  // ============================================================
+  // Group E — Lost reasons + productivity
+  // ============================================================
+
+  private toolLostReasonsBreakdown(): ToolDef {
+    const Args = z.object({
+      dateRange: DateRangeArg,
+      pipelineId: z.number().int().optional(),
+      groupBy: z.enum(['reason', 'reason_and_stage']).default('reason'),
+      topN: z.number().int().min(1).max(100).default(25),
+    });
+    type A = z.infer<typeof Args>;
+    return {
+      name: 'pipedrive.lost_reasons_breakdown',
+      description: [
+        'Group lost deals by `lost_reason` (and optionally last stage) over a window. Paginates /v2/deals?status=lost, aggregates client-side. Capped at 10 pages.',
+        'Output rows: { reason, count, totalValueUsd, percentOfTotal, ...stageBreakdown if groupBy="reason_and_stage" }.',
+        'Use for "why did we lose Q1 deals", "lost reasons in Wholesale physical pipeline last quarter".',
+      ].join(' '),
+      schema: Args as z.ZodType<A>,
+      jsonSchema: zodToJsonSchema(Args),
+      execute: async (rawArgs) => {
+        const args = rawArgs as A;
+        try {
+          const { startDate, endDate } = normalizeDateRange(args.dateRange);
+          const [dealsRes, stages] = await Promise.all([
+            this.client.listDeals({ status: 'lost', pipelineId: args.pipelineId, startDate, endDate, limit: 500 }),
+            args.groupBy === 'reason_and_stage' ? this.client.listStages() : Promise.resolve([]),
+          ]);
+          const stageNameById = new Map(stages.map((s) => [s.id, s.name] as const));
+          const buckets = new Map<string, { reason: string; count: number; total: number; byStage: Map<number, { count: number; total: number }> }>();
+          for (const d of dealsRes.items) {
+            const ts = d.lost_time ?? d.update_time ?? d.add_time ?? null;
+            if (ts) { const ymd = ts.slice(0, 10); if (ymd < startDate || ymd > endDate) continue; }
+            const reason = d.lost_reason ?? '(unspecified)';
+            const e = buckets.get(reason) ?? { reason, count: 0, total: 0, byStage: new Map() };
+            e.count += 1;
+            e.total += Number(d.value) || 0;
+            const sb = e.byStage.get(d.stage_id) ?? { count: 0, total: 0 };
+            sb.count += 1; sb.total += Number(d.value) || 0;
+            e.byStage.set(d.stage_id, sb);
+            buckets.set(reason, e);
+          }
+          const totalCount = [...buckets.values()].reduce((s, b) => s + b.count, 0) || 1;
+          const rows = [...buckets.values()]
+            .map((b) => {
+              const base: Record<string, unknown> = {
+                reason: b.reason,
+                count: b.count,
+                totalValueUsd: round2(b.total),
+                percentOfTotal: round2((b.count / totalCount) * 100),
+              };
+              if (args.groupBy === 'reason_and_stage') {
+                base.stageBreakdown = [...b.byStage.entries()].map(([sid, agg]) => ({ stageId: sid, stageName: stageNameById.get(sid) ?? `stage_${sid}`, count: agg.count, totalValueUsd: round2(agg.total) }));
+              }
+              return base;
+            })
+            .sort((a, b) => (b.count as number) - (a.count as number))
+            .slice(0, args.topN);
+          return {
+            ok: true,
+            data: {
+              dateRange: { startDate, endDate },
+              groupBy: args.groupBy,
+              totalLostDeals: totalCount,
+              truncated: dealsRes.hasMore,
+              note: dealsRes.hasMore ? 'Result truncated at 10-page scan cap.' : undefined,
+              rows,
+            },
+          };
+        } catch (err) { return pipedriveErrorResult(err); }
+      },
+    };
+  }
+
+  private toolActivitySummary(): ToolDef {
+    const Args = z.object({
+      dateRange: DateRangeArg,
+      granularity: z.enum(['day', 'week', 'month']).default('month'),
+      userId: z.number().int().optional(),
+      type: z.enum(['call', 'meeting', 'email', 'task', 'all']).default('all'),
+      status: z.enum(['done', 'pending', 'all']).default('done'),
+    });
+    type A = z.infer<typeof Args>;
+    return {
+      name: 'pipedrive.activity_summary',
+      description: [
+        'Volume of activities by user/type/status over a window. Paginates /v1/activities with filters, aggregates client-side. Capped at 5000 activities.',
+        'Output rows: { key, count, byType: {call, meeting, email, task}, byUser: [{userId, userName, count}] }. `key` is YYYY-MM-DD (day), week-start (week), or YYYY-MM (month).',
+        'Use for "how many calls did Max log in March", "pending activities by user", "meeting count trend last 6 months".',
+      ].join(' '),
+      schema: Args as z.ZodType<A>,
+      jsonSchema: zodToJsonSchema(Args),
+      execute: async (rawArgs) => {
+        const args = rawArgs as A;
+        const { startDate, endDate } = normalizeDateRange(args.dateRange);
+        const [activitiesRes, users] = await Promise.all([
+          this.client.listActivities({
+            startDate, endDate,
+            userId: args.userId,
+            type: args.type === 'all' ? undefined : args.type,
+            done: args.status === 'all' ? undefined : (args.status === 'done' ? 1 : 0),
+          }),
+          this.client.listUsers(),
+        ]);
+        const userById = new Map(users.map((u) => [u.id, u.name] as const));
+        const buckets = new Map<string, { count: number; byType: Record<string, number>; byUser: Map<number, number> }>();
+        for (const a of activitiesRes.items) {
+          const ts = a.marked_as_done_time ?? a.due_date ?? a.add_time;
+          if (!ts) continue;
+          const ymd = ts.slice(0, 10);
+          const key = args.granularity === 'month' ? ymd.slice(0, 7) : args.granularity === 'week' ? weekStart(ymd) : ymd;
+          const e = buckets.get(key) ?? { count: 0, byType: {} as Record<string, number>, byUser: new Map<number, number>() };
+          e.count += 1;
+          e.byType[a.type] = (e.byType[a.type] ?? 0) + 1;
+          e.byUser.set(a.user_id, (e.byUser.get(a.user_id) ?? 0) + 1);
+          buckets.set(key, e);
+        }
+        const rows = [...buckets.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([key, agg]) => ({
+          key,
+          count: agg.count,
+          byType: agg.byType,
+          byUser: [...agg.byUser.entries()].map(([uid, cnt]) => ({ userId: uid, userName: userById.get(uid) ?? `user_${uid}`, count: cnt })).sort((a, b) => b.count - a.count),
+        }));
+        return {
+          period: { startDate, endDate },
+          granularity: args.granularity,
+          totalActivities: activitiesRes.items.length,
+          truncated: activitiesRes.hasMore,
+          rows,
+          note: activitiesRes.hasMore ? 'Activity scan hit the 10-page cap; tighten date range or filter by user/type.' : undefined,
+        };
+      },
+    };
+  }
+
+  private toolUserPerformance(): ToolDef {
+    const Args = z.object({
+      dateRange: DateRangeArg,
+      metric: z.enum(['won_value', 'won_count', 'activities_done', 'avg_deal_value']).default('won_value'),
+      topN: z.number().int().min(1).max(50).default(10),
+    });
+    type A = z.infer<typeof Args>;
+    return {
+      name: 'pipedrive.user_performance',
+      description: [
+        'Sales rep leaderboard for the window. For deal metrics, calls /v1/deals/timeline?user_id=… per active user (cached directory). For activity metric, paginates /v1/activities and groups.',
+        'Output rows: { userId, userName, value, rank } where `value` is the requested metric.',
+        'Use for "top performer last quarter by won revenue", "who closed the most deals in March", "best avg deal size by rep".',
+      ].join(' '),
+      schema: Args as z.ZodType<A>,
+      jsonSchema: zodToJsonSchema(Args),
+      execute: async (rawArgs) => {
+        const args = rawArgs as A;
+        try {
+          const { startDate, endDate } = normalizeDateRange(args.dateRange);
+          const users = (await this.client.listUsers()).filter((u) => u.active_flag);
+          const amount = bucketsBetween(startDate, endDate, 'month');
+          if (args.metric === 'activities_done') {
+            const activitiesRes = await this.client.listActivities({ startDate, endDate, done: 1 });
+            const counts = new Map<number, number>();
+            for (const a of activitiesRes.items) counts.set(a.user_id, (counts.get(a.user_id) ?? 0) + 1);
+            const rows = users.map((u) => ({ userId: u.id, userName: u.name, value: counts.get(u.id) ?? 0 }))
+              .sort((a, b) => b.value - a.value).slice(0, args.topN)
+              .map((r, i) => ({ ...r, rank: i + 1 }));
+            return { ok: true, data: { dateRange: { startDate, endDate }, metric: args.metric, rows } };
+          }
+          const perUser = await Promise.all(users.map(async (u) => {
+            const buckets = await this.client.dealsTimeline({ startDate, amount, interval: 'month', fieldKey: 'won_time', userId: u.id });
+            const wonCount = buckets.reduce((s, b) => s + b.won_count, 0);
+            const wonValue = buckets.reduce((s, b) => s + b.won_value_usd, 0);
+            const totalCount = buckets.reduce((s, b) => s + b.count, 0);
+            const totalValue = buckets.reduce((s, b) => s + b.total_value_usd, 0);
+            const value =
+              args.metric === 'won_value' ? round2(wonValue) :
+              args.metric === 'won_count' ? wonCount :
+              totalCount > 0 ? round2(totalValue / totalCount) : 0;
+            return { userId: u.id, userName: u.name, value };
+          }));
+          const rows = perUser.sort((a, b) => b.value - a.value).slice(0, args.topN).map((r, i) => ({ ...r, rank: i + 1 }));
+          return { ok: true, data: { dateRange: { startDate, endDate }, metric: args.metric, rows } };
+        } catch (err) { return pipedriveErrorResult(err); }
+      },
+    };
+  }
 }
 
 function round2(n: number): number { return Math.round(n * 100) / 100; }
+
+/** Monday-anchored ISO week start for a YYYY-MM-DD date. Used by activity_summary
+ *  when granularity='week'. Returns the YYYY-MM-DD of the Monday of that week (UTC). */
+function weekStart(ymd: string): string {
+  const [y, m, d] = ymd.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  const dow = dt.getUTCDay();
+  const daysSinceMonday = (dow + 6) % 7;
+  dt.setUTCDate(dt.getUTCDate() - daysSinceMonday);
+  return dt.toISOString().slice(0, 10);
+}
 
 /** Number of buckets of size `interval` between two YYYY-MM-DD dates,
  *  inclusive on both ends. Used to compute the `amount` arg /v1/deals/timeline

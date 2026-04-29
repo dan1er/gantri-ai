@@ -372,3 +372,67 @@ describe('pipedrive.organization_detail', () => {
     expect(r.data.activities).toBeUndefined();
   });
 });
+
+describe('pipedrive.lost_reasons_breakdown', () => {
+  it('groups lost deals by reason with percentOfTotal', async () => {
+    const stub = makeStub({
+      listDeals: vi.fn().mockResolvedValue({ items: [
+        { id: 1, title: 'A', value: 1000, currency: 'USD', status: 'lost', stage_id: 11, pipeline_id: 3, owner_id: 7, person_id: null, org_id: null, lost_reason: 'Budget', lost_time: '2026-04-10' },
+        { id: 2, title: 'B', value: 2000, currency: 'USD', status: 'lost', stage_id: 11, pipeline_id: 3, owner_id: 7, person_id: null, org_id: null, lost_reason: 'Budget', lost_time: '2026-04-15' },
+        { id: 3, title: 'C', value: 5000, currency: 'USD', status: 'lost', stage_id: 12, pipeline_id: 3, owner_id: 7, person_id: null, org_id: null, lost_reason: 'Timing', lost_time: '2026-04-20' },
+      ], hasMore: false }),
+    });
+    const conn = new PipedriveConnector({ client: stub });
+    const tool = conn.tools.find((t) => t.name === 'pipedrive.lost_reasons_breakdown')!;
+    const r = await tool.execute({ dateRange: 'last_30_days', groupBy: 'reason', topN: 25 }) as any;
+    expect(r.data.rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ reason: 'Budget', count: 2, totalValueUsd: 3000 }),
+      expect.objectContaining({ reason: 'Timing', count: 1, totalValueUsd: 5000 }),
+    ]));
+    const total = r.data.rows.reduce((s: number, r: any) => s + r.percentOfTotal, 0);
+    expect(total).toBeCloseTo(100, 0);
+  });
+});
+
+describe('pipedrive.activity_summary', () => {
+  it('aggregates activities by month with byType + byUser breakdowns', async () => {
+    const stub = makeStub({
+      listActivities: vi.fn().mockResolvedValue({ items: [
+        { id: 1, type: 'call', subject: 'a', user_id: 7, done: 1, due_date: '2026-04-05', marked_as_done_time: '2026-04-05 10:00:00' },
+        { id: 2, type: 'meeting', subject: 'b', user_id: 7, done: 1, due_date: '2026-04-10', marked_as_done_time: '2026-04-10 10:00:00' },
+        { id: 3, type: 'call', subject: 'c', user_id: 8, done: 1, due_date: '2026-04-12', marked_as_done_time: '2026-04-12 10:00:00' },
+      ], hasMore: false }),
+      listUsers: vi.fn().mockResolvedValue([{ id: 7, name: 'Lana', email: 'l@g.com', active_flag: true }, { id: 8, name: 'Max', email: 'm@g.com', active_flag: true }]),
+    });
+    const conn = new PipedriveConnector({ client: stub });
+    const tool = conn.tools.find((t) => t.name === 'pipedrive.activity_summary')!;
+    const r = await tool.execute({ dateRange: { startDate: '2026-04-01', endDate: '2026-04-30' }, granularity: 'month', status: 'done' }) as any;
+    expect(r.rows).toHaveLength(1);
+    expect(r.rows[0].count).toBe(3);
+    expect(r.rows[0].byType).toMatchObject({ call: 2, meeting: 1 });
+    expect(r.rows[0].byUser.find((u: any) => u.userName === 'Lana').count).toBe(2);
+  });
+});
+
+describe('pipedrive.user_performance', () => {
+  it('returns per-user won_value with rank sorted desc', async () => {
+    const stub = makeStub({
+      listUsers: vi.fn().mockResolvedValue([
+        { id: 7, name: 'Lana', email: 'l@g.com', active_flag: true },
+        { id: 8, name: 'Max', email: 'm@g.com', active_flag: true },
+      ]),
+      dealsTimeline: vi.fn().mockImplementation(async (opts: any) => {
+        if (opts.userId === 7) return [{ period_start: '2026-04-01', period_end: '2026-04-30', count: 3, total_value_usd: 9000, weighted_value_usd: 4500, open_count: 0, open_value_usd: 0, won_count: 3, won_value_usd: 9000 }];
+        if (opts.userId === 8) return [{ period_start: '2026-04-01', period_end: '2026-04-30', count: 1, total_value_usd: 1500, weighted_value_usd: 1000, open_count: 0, open_value_usd: 0, won_count: 1, won_value_usd: 1500 }];
+        return [];
+      }),
+    });
+    const conn = new PipedriveConnector({ client: stub });
+    const tool = conn.tools.find((t) => t.name === 'pipedrive.user_performance')!;
+    const r = await tool.execute({ dateRange: 'last_30_days', metric: 'won_value', topN: 10 }) as any;
+    expect(r.data.rows).toEqual([
+      { userId: 7, userName: 'Lana', value: 9000, rank: 1 },
+      { userId: 8, userName: 'Max', value: 1500, rank: 2 },
+    ]);
+  });
+});

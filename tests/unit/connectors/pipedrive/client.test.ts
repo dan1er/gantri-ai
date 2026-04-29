@@ -230,3 +230,46 @@ describe('PipedriveApiClient list endpoints', () => {
     expect(String(url)).toContain('done=1');
   });
 });
+
+describe('PipedriveApiClient detail + search', () => {
+  it('getDeal hits /v2/deals/{id}', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      success: true, data: { id: 816, title: 'KBM-Hogue', value: 24500, currency: 'USD' },
+    }), { status: 200 }));
+    const client = new PipedriveApiClient({ apiToken: 'tok', fetchImpl });
+    const out = await client.getDeal(816);
+    expect(out.id).toBe(816);
+    const [url] = fetchImpl.mock.calls[0];
+    expect(String(url)).toContain('/v2/deals/816');
+  });
+
+  it('getOrganization hits /v2/organizations/{id}', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      success: true, data: { id: 5, name: 'KBM-Hogue', address: '1 Main St', web: 'kbm.com' },
+    }), { status: 200 }));
+    const client = new PipedriveApiClient({ apiToken: 'tok', fetchImpl });
+    const out = await client.getOrganization(5);
+    expect(out.name).toBe('KBM-Hogue');
+    const [url] = fetchImpl.mock.calls[0];
+    expect(String(url)).toContain('/v2/organizations/5');
+  });
+
+  it('itemSearch hits /v1/itemSearch with query + entity filter', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      success: true,
+      data: {
+        items: [
+          { result_score: 0.92, item: { type: 'deal', id: 816, title: 'KBM-Hogue', value: 24500 } },
+          { result_score: 0.71, item: { type: 'organization', id: 5, name: 'KBM-Hogue' } },
+        ],
+      },
+    }), { status: 200 }));
+    const client = new PipedriveApiClient({ apiToken: 'tok', fetchImpl });
+    const out = await client.itemSearch({ term: 'KBM', itemTypes: ['deal', 'organization'], limit: 10 });
+    expect(out.length).toBe(2);
+    const [url] = fetchImpl.mock.calls[0];
+    expect(String(url)).toContain('/v1/itemSearch');
+    expect(String(url)).toContain('term=KBM');
+    expect(String(url)).toContain('item_types=deal%2Corganization');
+  });
+});

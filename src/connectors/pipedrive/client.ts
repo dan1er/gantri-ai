@@ -166,6 +166,16 @@ interface RawTimelinePeriod {
   totals: RawTimelineTotals;
 }
 
+/** Result row from `/v1/itemSearch`. We flatten Pipedrive's `{result_score, item}` envelope down to the
+ *  fields tools surface in mention/lookup output. */
+export interface SearchHit {
+  type: 'deal' | 'organization' | 'person';
+  id: number;
+  title: string;
+  summary: string;
+  score: number;
+}
+
 export interface DealsTimelineOpts {
   /** YYYY-MM-DD anchor for the first bucket. */
   startDate: string;
@@ -436,5 +446,55 @@ export class PipedriveApiClient {
       done: opts.done !== undefined ? String(opts.done) : undefined,
     };
     return this.paginateV1<Activity>('/v1/activities', query, DEFAULT_MAX_PAGES);
+  }
+
+  // ---- Detail + search (NOT cached) ---- //
+
+  /**
+   * `/v2/deals/{id}` — full deal record including the `custom_fields` object
+   * (the resolver in `connector.ts` maps custom-field hash keys to their
+   * human names via `listDealFields()`).
+   */
+  async getDeal(id: number): Promise<Deal> {
+    const resp = await this.request<{ success: boolean; data: Deal }>(`/v2/deals/${id}`);
+    return resp.data;
+  }
+
+  /** `/v2/organizations/{id}` — full org record. */
+  async getOrganization(id: number): Promise<Organization> {
+    const resp = await this.request<{ success: boolean; data: Organization }>(`/v2/organizations/${id}`);
+    return resp.data;
+  }
+
+  /**
+   * `/v1/itemSearch` — global text search across deals/orgs/persons. Pipedrive
+   * returns `{result_score, item}` envelopes; we flatten to `SearchHit[]` so
+   * tools can surface `id/title/score` without leaking internal shapes.
+   *
+   * `itemTypes` defaults to all 3 entity types when omitted (server-side default).
+   */
+  async itemSearch(opts: { term: string; itemTypes?: Array<'deal' | 'organization' | 'person'>; limit?: number }): Promise<SearchHit[]> {
+    const query: Record<string, string | undefined> = {
+      term: opts.term,
+      item_types: opts.itemTypes?.join(','),
+      limit: opts.limit !== undefined ? String(opts.limit) : '10',
+    };
+    const resp = await this.request<{
+      success: boolean;
+      data: {
+        items: Array<{
+          result_score: number;
+          item: { type: string; id: number; title?: string; name?: string; value?: number };
+        }>;
+      };
+    }>('/v1/itemSearch', query);
+    const items = resp.data?.items ?? [];
+    return items.map((h) => ({
+      type: h.item.type as SearchHit['type'],
+      id: h.item.id,
+      title: h.item.title ?? h.item.name ?? '(unnamed)',
+      summary: h.item.value !== undefined ? `value=${h.item.value}` : '',
+      score: h.result_score,
+    }));
   }
 }

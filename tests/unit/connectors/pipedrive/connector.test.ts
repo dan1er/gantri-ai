@@ -325,3 +325,50 @@ describe('pipedrive.deal_detail', () => {
     expect(r.data.customFields).toMatchObject({ Source: 'ICFF' });
   });
 });
+
+describe('pipedrive.organization_performance', () => {
+  it('groups won/open deals by org_id with names + lastDealTime', async () => {
+    const stub = makeStub({
+      listDeals: vi.fn().mockResolvedValue({ items: [
+        { id: 1, title: 'A', value: 1000, currency: 'USD', status: 'won', stage_id: 11, pipeline_id: 3, owner_id: 7, person_id: null, org_id: { value: 5, name: 'KBM-Hogue' }, won_time: '2026-04-10', add_time: '2026-04-01' },
+        { id: 2, title: 'B', value: 2000, currency: 'USD', status: 'won', stage_id: 11, pipeline_id: 3, owner_id: 7, person_id: null, org_id: { value: 5, name: 'KBM-Hogue' }, won_time: '2026-04-15', add_time: '2026-04-02' },
+        { id: 3, title: 'C', value: 5000, currency: 'USD', status: 'open', stage_id: 12, pipeline_id: 3, owner_id: 7, person_id: null, org_id: { value: 6, name: 'Bilotti' }, add_time: '2026-04-05' },
+      ], hasMore: false }),
+    });
+    const conn = new PipedriveConnector({ client: stub });
+    const tool = conn.tools.find((t) => t.name === 'pipedrive.organization_performance')!;
+    const r = await tool.execute({ dateRange: 'last_30_days', topN: 25, metric: 'won_value' }) as any;
+    expect(r.data.rows[0]).toMatchObject({ orgId: 5, orgName: 'KBM-Hogue', wonCount: 2, wonValueUsd: 3000 });
+    expect(r.data.rows[1]).toMatchObject({ orgId: 6, orgName: 'Bilotti', openCount: 1, openValueUsd: 5000 });
+  });
+
+  it('flags truncated when listDeals.hasMore is true', async () => {
+    const stub = makeStub({ listDeals: vi.fn().mockResolvedValue({ items: [], hasMore: true }) });
+    const conn = new PipedriveConnector({ client: stub });
+    const tool = conn.tools.find((t) => t.name === 'pipedrive.organization_performance')!;
+    const r = await tool.execute({ dateRange: 'last_30_days', topN: 25, metric: 'won_value' }) as any;
+    expect(r.data.truncated).toBe(true);
+  });
+});
+
+describe('pipedrive.organization_detail', () => {
+  it('returns org + deals + persons (activities omitted by default)', async () => {
+    const stub = makeStub({
+      getOrganization: vi.fn().mockResolvedValue({ id: 5, name: 'KBM-Hogue', address: '1 Main St', web: 'kbm.com' }),
+      listDeals: vi.fn().mockResolvedValue({ items: [
+        { id: 1, title: 'A', value: 1000, currency: 'USD', status: 'open', stage_id: 11, pipeline_id: 3, owner_id: 7, person_id: null, org_id: { value: 5, name: 'KBM-Hogue' } },
+      ], hasMore: false }),
+      listPersons: vi.fn().mockResolvedValue({ items: [
+        { id: 12, name: 'Tasha', emails: [{ value: 't@kbm.com', primary: true }], phones: [], org_id: { value: 5, name: 'KBM-Hogue' } },
+      ], hasMore: false }),
+      listDealFields: vi.fn().mockResolvedValue([]),
+    });
+    const conn = new PipedriveConnector({ client: stub });
+    const tool = conn.tools.find((t) => t.name === 'pipedrive.organization_detail')!;
+    const r = await tool.execute({ orgId: 5 }) as any;
+    expect(r.data.org.name).toBe('KBM-Hogue');
+    expect(r.data.deals).toHaveLength(1);
+    expect(r.data.persons).toHaveLength(1);
+    expect(r.data.activities).toBeUndefined();
+  });
+});

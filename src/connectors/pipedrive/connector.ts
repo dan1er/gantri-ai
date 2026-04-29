@@ -88,6 +88,8 @@ export class PipedriveConnector implements Connector {
       this.toolPipelineSnapshot(),
       this.toolListDeals(),
       this.toolDealDetail(),
+      this.toolOrganizationPerformance(),
+      this.toolOrganizationDetail(),
     ];
   }
 
@@ -477,6 +479,146 @@ export class PipedriveConnector implements Connector {
               customFields,
             },
           };
+        } catch (err) { return pipedriveErrorResult(err); }
+      },
+    };
+  }
+
+  // ============================================================
+  // Group D — Organization analysis
+  // ============================================================
+
+  private toolOrganizationPerformance(): ToolDef {
+    const Args = z.object({
+      dateRange: DateRangeArg,
+      topN: z.number().int().min(1).max(100).default(25),
+      metric: z.enum(['won_value', 'won_count', 'open_value']).default('won_value'),
+    });
+    type A = z.infer<typeof Args>;
+    return {
+      name: 'pipedrive.organization_performance',
+      description: [
+        'Top organizations by contribution over a window. Hybrid: paginates /v2/deals, groups client-side by org_id, joins names from the deal\'s embedded org_id.',
+        'Capped at ~5000 deals scanned (10 pages). Returns `truncated: true` when the cap is hit.',
+        'Output rows: { orgId, orgName, dealCount, totalValueUsd, wonCount, wonValueUsd, openCount, openValueUsd, lastDealTime }.',
+        'Use for "top firms by trade revenue YTD", "customer concentration analysis", "repeat buyers in Q1".',
+      ].join(' '),
+      schema: Args as z.ZodType<A>,
+      jsonSchema: zodToJsonSchema(Args),
+      execute: async (rawArgs) => {
+        const args = rawArgs as A;
+        try {
+          const { startDate, endDate } = normalizeDateRange(args.dateRange);
+          const dealsRes = await this.client.listDeals({
+            status: 'all_not_deleted',
+            startDate, endDate,
+            limit: 500,
+          });
+          const byOrg = new Map<number, {
+            orgId: number; orgName: string | null;
+            dealCount: number; totalValueUsd: number;
+            wonCount: number; wonValueUsd: number;
+            openCount: number; openValueUsd: number;
+            lastDealTime: string | null;
+          }>();
+          for (const d of dealsRes.items) {
+            const org = typeof d.org_id === 'object' && d.org_id !== null ? d.org_id : null;
+            if (!org) continue; // skip orphan deals — they can't be grouped
+            const ts = d.won_time ?? d.add_time ?? null;
+            // window check (client-side, since v2 deals lacks server-side range filter)
+            if (ts) {
+              const ymd = ts.slice(0, 10);
+              if (ymd < startDate || ymd > endDate) continue;
+            }
+            const e = byOrg.get(org.value) ?? {
+              orgId: org.value, orgName: org.name,
+              dealCount: 0, totalValueUsd: 0,
+              wonCount: 0, wonValueUsd: 0,
+              openCount: 0, openValueUsd: 0,
+              lastDealTime: null,
+            };
+            e.dealCount += 1;
+            e.totalValueUsd += Number(d.value) || 0;
+            if (d.status === 'won') { e.wonCount += 1; e.wonValueUsd += Number(d.value) || 0; }
+            if (d.status === 'open') { e.openCount += 1; e.openValueUsd += Number(d.value) || 0; }
+            if (ts && (!e.lastDealTime || ts > e.lastDealTime)) e.lastDealTime = ts;
+            byOrg.set(org.value, e);
+          }
+          const sortKey = args.metric === 'won_value' ? 'wonValueUsd' : args.metric === 'won_count' ? 'wonCount' : 'openValueUsd';
+          const rows = [...byOrg.values()]
+            .map((r) => ({ ...r, totalValueUsd: round2(r.totalValueUsd), wonValueUsd: round2(r.wonValueUsd), openValueUsd: round2(r.openValueUsd) }))
+            .sort((a, b) => (b[sortKey] as number) - (a[sortKey] as number))
+            .slice(0, args.topN);
+          return {
+            ok: true,
+            data: {
+              dateRange: { startDate, endDate },
+              metric: args.metric,
+              orgCount: byOrg.size,
+              truncated: dealsRes.hasMore,
+              note: dealsRes.hasMore ? 'Result truncated at 10-page (~5000-deal) scan cap.' : undefined,
+              rows,
+            },
+          };
+        } catch (err) { return pipedriveErrorResult(err); }
+      },
+    };
+  }
+
+  private toolOrganizationDetail(): ToolDef {
+    const Args = z.object({
+      orgId: z.number().int().positive(),
+      includeDeals: z.boolean().default(true),
+      includePersons: z.boolean().default(true),
+      includeActivities: z.boolean().default(false),
+    });
+    type A = z.infer<typeof Args>;
+    return {
+      name: 'pipedrive.organization_detail',
+      description: [
+        'Single org with deals, contacts, and optionally activities. Useful for account-context lookups: "tell me about Rarify — who\'s our contact, what\'s open, last interaction".',
+        'Output: { org: {id, name, address, web, ...}, deals?: [list_deals row, max 50], persons?: [{id, name, emails, phones}, max 50], activities?: [{id, type, subject, due, done, ownerName}, max 50] }.',
+      ].join(' '),
+      schema: Args as z.ZodType<A>,
+      jsonSchema: zodToJsonSchema(Args),
+      execute: async (rawArgs) => {
+        const args = Args.parse(rawArgs);
+        try {
+          const orgPromise = this.client.getOrganization(args.orgId);
+          const dealsPromise = args.includeDeals ? this.client.listDeals({ orgId: args.orgId, limit: 50 }) : Promise.resolve({ items: [], hasMore: false });
+          const personsPromise = args.includePersons ? this.client.listPersons({ orgId: args.orgId }) : Promise.resolve({ items: [], hasMore: false });
+          const activitiesPromise = args.includeActivities ? this.client.listActivities({}) : Promise.resolve({ items: [], hasMore: false });
+          const usersPromise = args.includeActivities ? this.client.listUsers() : Promise.resolve([] as Awaited<ReturnType<typeof this.client.listUsers>>);
+          const [org, dealsRes, personsRes, activitiesRes, users] = await Promise.all([orgPromise, dealsPromise, personsPromise, activitiesPromise, usersPromise]);
+          const userById = new Map(users.map((u) => [u.id, u.name] as const));
+
+          const data: Record<string, unknown> = {
+            org: { id: org.id, name: org.name, address: org.address ?? null, web: org.web ?? null },
+          };
+          if (args.includeDeals) {
+            data.deals = dealsRes.items.slice(0, 50).map((d) => ({ id: d.id, title: d.title, status: d.status, valueUsd: round2(Number(d.value) || 0), stageId: d.stage_id, pipelineId: d.pipeline_id }));
+          }
+          if (args.includePersons) {
+            data.persons = personsRes.items.slice(0, 50).map((p) => ({ id: p.id, name: p.name, emails: p.emails ?? [], phones: p.phones ?? [] }));
+          }
+          if (args.includeActivities) {
+            data.activities = activitiesRes.items.slice(0, 50).map((a) => ({ id: a.id, type: a.type, subject: a.subject, due: a.due_date ?? null, done: a.done === 1, ownerName: userById.get(a.user_id) ?? null }));
+          }
+          const truncatedFlags = {
+            deals: args.includeDeals && dealsRes.hasMore,
+            persons: args.includePersons && personsRes.hasMore,
+            activities: args.includeActivities && activitiesRes.hasMore,
+          };
+          const truncated = truncatedFlags.deals || truncatedFlags.persons || truncatedFlags.activities;
+          if (truncated) {
+            const capped: string[] = [];
+            if (truncatedFlags.deals) capped.push('deals');
+            if (truncatedFlags.persons) capped.push('persons');
+            if (truncatedFlags.activities) capped.push('activities');
+            data.truncated = true;
+            data.note = `Underlying scan hit the 10-page cap for: ${capped.join(', ')}. Results may be partial.`;
+          }
+          return { ok: true, data };
         } catch (err) { return pipedriveErrorResult(err); }
       },
     };

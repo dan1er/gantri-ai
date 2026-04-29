@@ -421,10 +421,18 @@ export class KlaviyoApiClient {
    *  `less-than` (exclusive) on next-day midnight UTC, since Klaviyo's
    *  filter operators are open-interval on the high end. */
   async searchProfilesByCreatedRange(opts: { startDate: string; endDate: string }): Promise<KlaviyoResource<KlaviyoProfileAttrs>[]> {
-    const startISO = `${opts.startDate}T00:00:00.000Z`;
+    // Klaviyo's `created` field only supports greater-than / less-than (not -or-equal).
+    // To keep startDate inclusive, subtract 1ms: greater-than(prevInstant) == greater-or-equal(startInstant).
+    const startInclusiveMs = Date.UTC(
+      Number(opts.startDate.slice(0, 4)),
+      Number(opts.startDate.slice(5, 7)) - 1,
+      Number(opts.startDate.slice(8, 10)),
+    );
+    const startExclusiveISO = new Date(startInclusiveMs - 1).toISOString();
+    // End is already exclusive in the API, but our argument is YMD inclusive — so endExclusive = next-day midnight.
     const endExclusive = addDaysYmd(opts.endDate, 1);
     const endISO = `${endExclusive}T00:00:00.000Z`;
-    const filter = `and(greater-or-equal(created,${startISO}),less-than(created,${endISO}))`;
+    const filter = `and(greater-than(created,${startExclusiveISO}),less-than(created,${endISO}))`;
     const params = new URLSearchParams();
     params.set('filter', filter);
     params.set('additional-fields[profile]', 'subscriptions');

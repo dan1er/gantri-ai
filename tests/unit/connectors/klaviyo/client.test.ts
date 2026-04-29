@@ -11,7 +11,7 @@ describe('KlaviyoApiClient.searchProfilesByCreatedRange', () => {
       if (call === 1) {
         // First call: verify filter + additional-fields
         const filter = u.searchParams.get('filter');
-        expect(filter).toBe('and(greater-or-equal(created,2026-01-01T00:00:00.000Z),less-than(created,2026-02-01T00:00:00.000Z))');
+        expect(filter).toBe('and(greater-than(created,2025-12-31T23:59:59.999Z),less-than(created,2026-02-01T00:00:00.000Z))');
         expect(u.searchParams.get('additional-fields[profile]')).toBe('subscriptions');
         return new Response(JSON.stringify({
           data: [{ id: '1', type: 'profile', attributes: { created: '2026-01-15T10:00:00.000Z', subscriptions: { email: { marketing: { consent: 'SUBSCRIBED' } } } } }],

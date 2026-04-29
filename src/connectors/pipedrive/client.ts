@@ -55,6 +55,12 @@ interface V2Response<T> {
   additional_data?: { next_cursor?: string | null };
 }
 
+/** TS shapes — only the fields tools actually surface. */
+export interface Pipeline { id: number; name: string; active: boolean; order_nr?: number; deal_probability?: number }
+export interface Stage { id: number; name: string; pipeline_id: number; order_nr: number; active_flag?: boolean }
+export interface User { id: number; name: string; email: string; active_flag: boolean; is_admin?: number }
+export interface DealField { key: string; name: string; field_type: string; options?: Array<{ id: number | string; label: string }> }
+
 const DEFAULT_MAX_PAGES = 10;
 
 export class PipedriveApiClient {
@@ -161,10 +167,32 @@ export class PipedriveApiClient {
   }
 
   // ---- Directory (cached 10 min) ---- //
-  /** Stub used by tests; real implementations land in Task 3. */
-  async listPipelines(): Promise<unknown[]> {
-    const resp = await this.request<V1Response<unknown>>('/v1/pipelines');
-    return resp.data ?? [];
+  async listPipelines(): Promise<Pipeline[]> {
+    return this.cacheGet('pipelines', async () => {
+      const resp = await this.request<V1Response<Pipeline>>('/v1/pipelines');
+      return resp.data ?? [];
+    });
+  }
+
+  async listStages(): Promise<Stage[]> {
+    return this.cacheGet('stages', async () => {
+      const resp = await this.request<V1Response<Stage>>('/v1/stages');
+      return resp.data ?? [];
+    });
+  }
+
+  async listUsers(): Promise<User[]> {
+    return this.cacheGet('users', async () => {
+      const resp = await this.request<V1Response<User>>('/v1/users');
+      return resp.data ?? [];
+    });
+  }
+
+  async listDealFields(): Promise<DealField[]> {
+    return this.cacheGet('dealFields', async () => {
+      const resp = await this.request<V1Response<DealField>>('/v1/dealFields');
+      return resp.data ?? [];
+    });
   }
 
   /** Cached read-through helper. */

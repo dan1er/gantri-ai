@@ -71,3 +71,43 @@ describe('PipedriveApiClient core', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(3);
   });
 });
+
+describe('PipedriveApiClient directory + 10-min cache', () => {
+  it('listPipelines roundtrips and caches across calls', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ success: true, data: [{ id: 1, name: 'Trade' }] }), { status: 200 }),
+    );
+    const client = new PipedriveApiClient({ apiToken: 'tok', fetchImpl });
+    const a = await client.listPipelines();
+    const b = await client.listPipelines();
+    expect(a).toEqual([{ id: 1, name: 'Trade' }]);
+    expect(b).toEqual(a);
+    expect(fetchImpl).toHaveBeenCalledTimes(1); // cached
+  });
+
+  it('listStages, listUsers, listDealFields each roundtrip independently', async () => {
+    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes('/v1/stages')) return new Response(JSON.stringify({ success: true, data: [{ id: 11, name: 'Discovery', pipeline_id: 3 }] }), { status: 200 });
+      if (url.includes('/v1/users')) return new Response(JSON.stringify({ success: true, data: [{ id: 7, name: 'Lana' }] }), { status: 200 });
+      if (url.includes('/v1/dealFields')) return new Response(JSON.stringify({ success: true, data: [{ key: 'abc', name: 'Source' }] }), { status: 200 });
+      return new Response('nope', { status: 404 });
+    });
+    const client = new PipedriveApiClient({ apiToken: 'tok', fetchImpl });
+    expect(await client.listStages()).toEqual([{ id: 11, name: 'Discovery', pipeline_id: 3 }]);
+    expect(await client.listUsers()).toEqual([{ id: 7, name: 'Lana' }]);
+    expect(await client.listDealFields()).toEqual([{ key: 'abc', name: 'Source' }]);
+  });
+
+  it('cache TTL expires (forced via clock injection)', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ success: true, data: [{ id: 1 }] }), { status: 200 }),
+    );
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    const client = new PipedriveApiClient({ apiToken: 'tok', fetchImpl });
+    await client.listPipelines();
+    now.mockReturnValue(1_000_000 + 11 * 60 * 1000); // +11 min — past TTL
+    await client.listPipelines();
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    now.mockRestore();
+  });
+});

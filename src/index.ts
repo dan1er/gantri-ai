@@ -158,11 +158,12 @@ async function main() {
     logger.warn('impact not configured (IMPACT_ACCOUNT_SID and/or IMPACT_AUTH_TOKEN missing) — skipping registration');
   }
 
+  let klaviyoSignupRollupJob: KlaviyoSignupRollupJob | null = null;
   if (klaviyoApiKey) {
     const klaviyoClient = new KlaviyoApiClient({ apiKey: klaviyoApiKey });
     const klaviyoSignupRepo = new KlaviyoSignupRollupRepo(supabase);
     registry.register(new KlaviyoConnector({ client: klaviyoClient, signupRepo: klaviyoSignupRepo }));
-    const klaviyoSignupRollupJob = new KlaviyoSignupRollupJob({ client: klaviyoClient, repo: klaviyoSignupRepo });
+    klaviyoSignupRollupJob = new KlaviyoSignupRollupJob({ client: klaviyoClient, repo: klaviyoSignupRepo });
     klaviyoSignupRollupJob.start();
     logger.info('klaviyo connector registered');
   } else {
@@ -320,6 +321,24 @@ async function main() {
     }
     const result = await reportsRunner.tick();
     res.json({ ok: true, result });
+  });
+
+  // POST /internal/run-klaviyo-rollup — admin-only manual trigger for the
+  // Klaviyo signup rollup. The job otherwise only fires at 03:00 PT. Useful
+  // after a deploy or fix when you want fresh data immediately. Returns 202
+  // and runs in background — full backfill across ~358k profiles takes ~10 min.
+  receiver.router.post('/internal/run-klaviyo-rollup', (req, res) => {
+    const auth = req.header('x-internal-secret');
+    if (!process.env.INTERNAL_SHARED_SECRET || auth !== process.env.INTERNAL_SHARED_SECRET) {
+      return res.status(403).json({ ok: false, error: 'forbidden' });
+    }
+    if (!klaviyoSignupRollupJob) {
+      return res.status(503).json({ ok: false, error: 'klaviyo not configured' });
+    }
+    void klaviyoSignupRollupJob.run().catch((err) => {
+      logger.error({ err: err instanceof Error ? err.stack : String(err) }, 'manual klaviyo rollup failed');
+    });
+    res.status(202).json({ ok: true, status: 'queued', note: 'rollup started in background; check klaviyo_signups_daily table or fly logs for completion' });
   });
 
   // POST /internal/recompile-report — admin-only endpoint to recompile a report spec.

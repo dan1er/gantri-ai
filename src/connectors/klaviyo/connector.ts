@@ -6,7 +6,6 @@ import { logger } from '../../logger.js';
 import {
   KlaviyoApiClient,
   KlaviyoApiError,
-  type KlaviyoApiConfig,
   type KlaviyoTimeframe,
 } from './client.js';
 import type { KlaviyoSignupRollupRepo } from '../../storage/repositories/klaviyo-signup-rollup.js';
@@ -454,9 +453,4 @@ function isoWeekStart(ymd: string): string {
   const dayOfWeek = (dt.getUTCDay() + 6) % 7; // Mon=0, Sun=6
   dt.setUTCDate(dt.getUTCDate() - dayOfWeek);
   return dt.toISOString().slice(0, 10);
-}
-
-/** Factory used by index.ts so the wiring stays consistent with other connectors. */
-export function buildKlaviyoConnector(cfg: KlaviyoApiConfig, signupRepo: KlaviyoSignupRollupRepo): KlaviyoConnector {
-  return new KlaviyoConnector({ client: new KlaviyoApiClient(cfg), signupRepo });
 }

@@ -34,6 +34,7 @@ import { Ga4Client } from './connectors/ga4/client.js';
 import { Ga4Connector } from './connectors/ga4/connector.js';
 import { buildImpactConnector } from './connectors/impact/connector.js';
 import { buildKlaviyoConnector } from './connectors/klaviyo/connector.js';
+import { KlaviyoSignupRollupRepo } from './storage/repositories/klaviyo-signup-rollup.js';
 import { buildSearchConsoleConnector } from './connectors/gsc/connector.js';
 import { Orchestrator, getActiveActor, getActiveThread, runWithContext } from './orchestrator/orchestrator.js';
 import { buildSlackApp } from './slack/app.js';
@@ -156,7 +157,10 @@ async function main() {
   }
 
   if (klaviyoApiKey) {
-    registry.register(buildKlaviyoConnector({ apiKey: klaviyoApiKey }));
+    registry.register(buildKlaviyoConnector(
+      { apiKey: klaviyoApiKey },
+      new KlaviyoSignupRollupRepo(supabase),
+    ));
     logger.info('klaviyo connector registered');
   } else {
     logger.warn('klaviyo not configured (KLAVIYO_API_KEY missing) — skipping registration');

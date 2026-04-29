@@ -61,11 +61,26 @@ function makeStub(opts: {
   } as unknown as KlaviyoApiClient;
 }
 
+/** Stub signup-rollup repo for the existing tests that don't exercise it.
+ *  Returns empty rows on getRange so tools that don't touch signup data are
+ *  unaffected. */
+function stubSignupRepo() {
+  return {
+    getRange: vi.fn(async () => []),
+    upsertManyDays: vi.fn(),
+    latestDay: vi.fn(),
+    count: vi.fn(),
+  } as any;
+}
+
 describe('klaviyo.list_campaigns', () => {
   it('returns campaigns with totalAcrossAccount + filter by search', async () => {
-    const c = new KlaviyoConnector(makeStub({
-      campaigns: [campaign({ id: 'A', attributes: { name: 'Spring Launch' } as any }), campaign({ id: 'B', attributes: { name: 'Black Friday' } as any })],
-    }));
+    const c = new KlaviyoConnector({
+      client: makeStub({
+        campaigns: [campaign({ id: 'A', attributes: { name: 'Spring Launch' } as any }), campaign({ id: 'B', attributes: { name: 'Black Friday' } as any })],
+      }),
+      signupRepo: stubSignupRepo(),
+    });
     const tool = c.tools.find((t) => t.name === 'klaviyo.list_campaigns')!;
     const r = await tool.execute({ channel: 'email', archived: false, limit: 100, search: 'spring' }) as any;
     expect(r.ok).toBe(true);
@@ -82,10 +97,13 @@ describe('klaviyo.list_segments', () => {
   });
 
   it('joins directory + segment-values-report, sorts by total_members, applies minProfileCount', async () => {
-    const c = new KlaviyoConnector(makeStub({
-      segments: [segment('s1', 'Tiny test', 0), segment('s2', 'Engaged 90d', 0), segment('s3', 'All Subs', 0)],
-      segmentReportRows: [segReport('s1', 5), segReport('s2', 41210, 100, 80), segReport('s3', 124530, 200, 50)],
-    }));
+    const c = new KlaviyoConnector({
+      client: makeStub({
+        segments: [segment('s1', 'Tiny test', 0), segment('s2', 'Engaged 90d', 0), segment('s3', 'All Subs', 0)],
+        segmentReportRows: [segReport('s1', 5), segReport('s2', 41210, 100, 80), segReport('s3', 124530, 200, 50)],
+      }),
+      signupRepo: stubSignupRepo(),
+    });
     const tool = c.tools.find((t) => t.name === 'klaviyo.list_segments')!;
     const r = await tool.execute({ limit: 100, minProfileCount: 100 }) as any;
     expect(r.ok).toBe(true);
@@ -98,7 +116,7 @@ describe('klaviyo.list_segments', () => {
   it('returns segments with null counts if segment-values-report fails (degrades gracefully)', async () => {
     const stub = makeStub({ segments: [segment('s1', 'Foo', 0)] });
     (stub.segmentValuesReport as any).mockRejectedValueOnce(new Error('rate limited'));
-    const c = new KlaviyoConnector(stub);
+    const c = new KlaviyoConnector({ client: stub, signupRepo: stubSignupRepo() });
     const tool = c.tools.find((t) => t.name === 'klaviyo.list_segments')!;
     const r = await tool.execute({ limit: 100 }) as any;
     expect(r.ok).toBe(true);
@@ -109,13 +127,16 @@ describe('klaviyo.list_segments', () => {
 
 describe('klaviyo.campaign_performance', () => {
   it('returns rows with campaign_name resolved + totals over summable metrics', async () => {
-    const c = new KlaviyoConnector(makeStub({
-      campaigns: [campaign({ id: 'A', attributes: { name: 'Big Send' } as any }), campaign({ id: 'B', attributes: { name: 'Small Send' } as any })],
-      campaignReportRows: [
-        reportRow({ groupings: { campaign_id: 'A', send_channel: 'email' } as any, statistics: { recipients: 10000, open_rate: 0.6, click_rate: 0.05, conversion_uniques: 20, conversion_value: 5000, unsubscribes: 30 } }),
-        reportRow({ groupings: { campaign_id: 'B', send_channel: 'email' } as any, statistics: { recipients: 1000, open_rate: 0.5, click_rate: 0.04, conversion_uniques: 2, conversion_value: 200, unsubscribes: 5 } }),
-      ],
-    }));
+    const c = new KlaviyoConnector({
+      client: makeStub({
+        campaigns: [campaign({ id: 'A', attributes: { name: 'Big Send' } as any }), campaign({ id: 'B', attributes: { name: 'Small Send' } as any })],
+        campaignReportRows: [
+          reportRow({ groupings: { campaign_id: 'A', send_channel: 'email' } as any, statistics: { recipients: 10000, open_rate: 0.6, click_rate: 0.05, conversion_uniques: 20, conversion_value: 5000, unsubscribes: 30 } }),
+          reportRow({ groupings: { campaign_id: 'B', send_channel: 'email' } as any, statistics: { recipients: 1000, open_rate: 0.5, click_rate: 0.04, conversion_uniques: 2, conversion_value: 200, unsubscribes: 5 } }),
+        ],
+      }),
+      signupRepo: stubSignupRepo(),
+    });
     const tool = c.tools.find((t) => t.name === 'klaviyo.campaign_performance')!;
     const r = await tool.execute({
       dateRange: { startDate: '2026-04-01', endDate: '2026-04-27' },
@@ -133,7 +154,7 @@ describe('klaviyo.campaign_performance', () => {
   });
 
   it('returns ok:false when Placed Order metric is not in account', async () => {
-    const c = new KlaviyoConnector(makeStub({ metrics: [] }));
+    const c = new KlaviyoConnector({ client: makeStub({ metrics: [] }), signupRepo: stubSignupRepo() });
     const tool = c.tools.find((t) => t.name === 'klaviyo.campaign_performance')!;
     const r = await tool.execute({
       dateRange: 'last_7_days', channel: 'email',
@@ -144,9 +165,12 @@ describe('klaviyo.campaign_performance', () => {
   });
 
   it('accepts $REPORT_RANGE preset string (live-reports path)', async () => {
-    const c = new KlaviyoConnector(makeStub({
-      campaignReportRows: [reportRow({ groupings: { campaign_id: 'A' } as any, statistics: { recipients: 100, conversion_value: 50 } })],
-    }));
+    const c = new KlaviyoConnector({
+      client: makeStub({
+        campaignReportRows: [reportRow({ groupings: { campaign_id: 'A' } as any, statistics: { recipients: 100, conversion_value: 50 } })],
+      }),
+      signupRepo: stubSignupRepo(),
+    });
     const tool = c.tools.find((t) => t.name === 'klaviyo.campaign_performance')!;
     const r = await tool.execute({
       dateRange: 'last_30_days', channel: 'email',
@@ -159,12 +183,15 @@ describe('klaviyo.campaign_performance', () => {
 
 describe('klaviyo.flow_performance', () => {
   it('aggregates rows by flow with name resolution', async () => {
-    const c = new KlaviyoConnector(makeStub({
-      flows: [{ type: 'flow', id: 'PJh', attributes: { name: 'Welcome Series', status: 'live', archived: false } as any }],
-      flowReportRows: [
-        reportRow({ groupings: { flow_id: 'PJh', flow_message_id: 'PJh-1', send_channel: 'email' } as any, statistics: { recipients: 8210, open_rate: 0.71, click_rate: 0.085, conversion_uniques: 67, conversion_value: 11200.45 } }),
-      ],
-    }));
+    const c = new KlaviyoConnector({
+      client: makeStub({
+        flows: [{ type: 'flow', id: 'PJh', attributes: { name: 'Welcome Series', status: 'live', archived: false } as any }],
+        flowReportRows: [
+          reportRow({ groupings: { flow_id: 'PJh', flow_message_id: 'PJh-1', send_channel: 'email' } as any, statistics: { recipients: 8210, open_rate: 0.71, click_rate: 0.085, conversion_uniques: 67, conversion_value: 11200.45 } }),
+        ],
+      }),
+      signupRepo: stubSignupRepo(),
+    });
     const tool = c.tools.find((t) => t.name === 'klaviyo.flow_performance')!;
     const r = await tool.execute({
       dateRange: { startDate: '2026-04-01', endDate: '2026-04-27' },
@@ -180,7 +207,7 @@ describe('klaviyo.flow_performance', () => {
 
   it('omits send_channel filter when channel=all', async () => {
     const stub = makeStub({ flowReportRows: [] });
-    const c = new KlaviyoConnector(stub);
+    const c = new KlaviyoConnector({ client: stub, signupRepo: stubSignupRepo() });
     const tool = c.tools.find((t) => t.name === 'klaviyo.flow_performance')!;
     await tool.execute({
       dateRange: 'last_7_days', channel: 'all',
@@ -188,5 +215,78 @@ describe('klaviyo.flow_performance', () => {
     });
     const callArgs = (stub.flowValuesReport as any).mock.calls[0][0];
     expect(callArgs.filter).toBeUndefined();
+  });
+});
+
+describe('klaviyo.consented_signups', () => {
+  function makeConnector(rows: Array<{ day: string; signupsTotal: number; signupsConsentedEmail: number; computedAt: string }>) {
+    const signupRepo = {
+      getRange: vi.fn().mockResolvedValue(rows),
+      upsertManyDays: vi.fn(),
+      latestDay: vi.fn(),
+      count: vi.fn(),
+    } as any;
+    const client = {} as any;
+    const conn = new KlaviyoConnector({ client, signupRepo });
+    const tool = conn.tools.find((t) => t.name === 'klaviyo.consented_signups')!;
+    return { tool, signupRepo };
+  }
+
+  it('aggregates daily rows to monthly buckets', async () => {
+    const { tool } = makeConnector([
+      { day: '2026-01-01', signupsTotal: 10, signupsConsentedEmail: 7, computedAt: '2026-04-29T10:00:00.000Z' },
+      { day: '2026-01-15', signupsTotal: 5, signupsConsentedEmail: 3, computedAt: '2026-04-29T10:00:00.000Z' },
+      { day: '2026-02-01', signupsTotal: 8, signupsConsentedEmail: 5, computedAt: '2026-04-29T10:00:00.000Z' },
+    ]);
+    const out = await tool.execute({ dateRange: { startDate: '2026-01-01', endDate: '2026-02-28' }, granularity: 'monthly' }) as any;
+    expect(out.rows).toEqual([
+      { key: '2026-01', signupsTotal: 15, signupsConsentedEmail: 10 },
+      { key: '2026-02', signupsTotal: 8, signupsConsentedEmail: 5 },
+    ]);
+  });
+
+  it('passes through daily rows unchanged for granularity=daily', async () => {
+    const { tool } = makeConnector([
+      { day: '2026-01-01', signupsTotal: 1, signupsConsentedEmail: 1, computedAt: '2026-04-29T10:00:00.000Z' },
+    ]);
+    const out = await tool.execute({ dateRange: { startDate: '2026-01-01', endDate: '2026-01-01' }, granularity: 'daily' }) as any;
+    expect(out.rows).toEqual([{ key: '2026-01-01', signupsTotal: 1, signupsConsentedEmail: 1 }]);
+  });
+
+  it('accepts a preset string for dateRange', async () => {
+    const { tool } = makeConnector([]);
+    await expect(tool.execute({ dateRange: 'last_30_days', granularity: 'monthly' })).resolves.toBeDefined();
+  });
+
+  it('returns empty rows + null rollupFreshness when no data exists', async () => {
+    const { tool } = makeConnector([]);
+    const out = await tool.execute({ dateRange: { startDate: '2030-01-01', endDate: '2030-12-31' }, granularity: 'monthly' }) as any;
+    expect(out.rows).toEqual([]);
+    expect(out.rollupFreshness).toEqual({ latestComputedDay: null, computedAt: null });
+  });
+
+  it('reports the latest computed day in rollupFreshness', async () => {
+    const { tool } = makeConnector([
+      { day: '2026-01-01', signupsTotal: 1, signupsConsentedEmail: 1, computedAt: '2026-04-29T10:00:00.000Z' },
+      { day: '2026-01-02', signupsTotal: 1, signupsConsentedEmail: 1, computedAt: '2026-04-29T10:00:00.000Z' },
+    ]);
+    const out = await tool.execute({ dateRange: { startDate: '2026-01-01', endDate: '2026-01-31' }, granularity: 'daily' }) as any;
+    expect(out.rollupFreshness.latestComputedDay).toBe('2026-01-02');
+    expect(out.rollupFreshness.computedAt).toBe('2026-04-29T10:00:00.000Z');
+  });
+
+  it('aggregates weekly into ISO week buckets keyed by Monday', async () => {
+    const { tool } = makeConnector([
+      // 2026-01-01 is a Thursday — its ISO week starts Monday 2025-12-29.
+      { day: '2026-01-01', signupsTotal: 4, signupsConsentedEmail: 2, computedAt: '2026-04-29T10:00:00.000Z' },
+      { day: '2026-01-04', signupsTotal: 1, signupsConsentedEmail: 0, computedAt: '2026-04-29T10:00:00.000Z' },
+      // 2026-01-05 is the Monday of the next ISO week.
+      { day: '2026-01-05', signupsTotal: 6, signupsConsentedEmail: 4, computedAt: '2026-04-29T10:00:00.000Z' },
+    ]);
+    const out = await tool.execute({ dateRange: { startDate: '2026-01-01', endDate: '2026-01-31' }, granularity: 'weekly' }) as any;
+    expect(out.rows).toEqual([
+      { key: '2025-12-29', signupsTotal: 5, signupsConsentedEmail: 2 },
+      { key: '2026-01-05', signupsTotal: 6, signupsConsentedEmail: 4 },
+    ]);
   });
 });

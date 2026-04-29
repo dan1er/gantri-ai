@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { Connector, ToolDef } from '../base/connector.js';
 import { zodToJsonSchema } from '../base/zod-to-json-schema.js';
+import { DateRangeArg, normalizeDateRange } from '../base/date-range.js';
 import { logger } from '../../logger.js';
 import {
   KlaviyoApiClient,
@@ -8,6 +9,7 @@ import {
   type KlaviyoApiConfig,
   type KlaviyoTimeframe,
 } from './client.js';
+import type { KlaviyoSignupRollupRepo } from '../../storage/repositories/klaviyo-signup-rollup.js';
 
 /**
  * Klaviyo email/SMS analytics connector — read-only. Mirrors the surface
@@ -18,6 +20,9 @@ import {
  *   - klaviyo.list_segments         — segments + member counts
  *   - klaviyo.campaign_performance  — per-campaign opens/clicks/revenue/etc
  *   - klaviyo.flow_performance      — per-flow same shape
+ *   - klaviyo.consented_signups     — daily/weekly/monthly counts of profiles
+ *                                     created in window AND consented to email,
+ *                                     served from the nightly rollup table
  *
  * Klaviyo's `*-values-reports` endpoints are rate-limited HARD (1/s burst,
  * 2/min steady, 225/day). Don't disable the cache layer — every "answer"
@@ -25,29 +30,10 @@ import {
  * steady state.
  */
 
-/** Date-range shapes accepted by all aggregation tools. Mirrors Impact's
- *  union (preset string | { start, end } | { startDate, endDate }) so a
- *  Live-Reports spec can pass `$REPORT_RANGE` and the runner's substitutions
- *  always hit one of the accepted shapes. Normalized to canonical
- *  `{ startDate, endDate }` (UTC dates, end-of-day inclusive) before any
- *  request is made. */
-const PT_PRESETS = [
-  'yesterday', 'last_7_days', 'last_14_days', 'last_30_days', 'last_90_days',
-  'last_180_days', 'last_365_days', 'this_month', 'last_month',
-  'month_to_date', 'quarter_to_date', 'year_to_date',
-] as const;
-const DateRange = z.union([
-  z.object({
-    startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD'),
-    endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD'),
-  }),
-  z.object({
-    start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD'),
-    end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD'),
-  }),
-  z.enum(PT_PRESETS),
-]);
-type DateRangeArg = z.infer<typeof DateRange>;
+export interface KlaviyoConnectorDeps {
+  client: KlaviyoApiClient;
+  signupRepo: KlaviyoSignupRollupRepo;
+}
 
 const Channel = z.enum(['email', 'sms', 'mobile_push']).default('email')
   .describe('Klaviyo send channel. Defaults to email — most callers want email-specific stats.');
@@ -80,7 +66,7 @@ const StatsList = z.array(z.enum([
 ])).min(1).max(15);
 
 const CampaignPerformanceArgs = z.object({
-  dateRange: DateRange,
+  dateRange: DateRangeArg,
   channel: Channel,
   metrics: StatsList.default(['recipients', 'open_rate', 'click_rate', 'conversion_uniques', 'conversion_value', 'unsubscribes']),
   sortBy: z.enum(['conversion_value', 'recipients', 'open_rate', 'click_rate', 'conversion_rate']).default('conversion_value').describe('Field to sort campaigns by, descending. Default conversion_value (= attributed revenue).'),
@@ -89,7 +75,7 @@ const CampaignPerformanceArgs = z.object({
 type CampaignPerformanceArgs = z.infer<typeof CampaignPerformanceArgs>;
 
 const FlowPerformanceArgs = z.object({
-  dateRange: DateRange,
+  dateRange: DateRangeArg,
   channel: z.enum(['email', 'sms', 'mobile_push', 'all']).default('email').describe('Filter rows by send_channel. "all" returns every channel a flow uses.'),
   metrics: StatsList.default(['recipients', 'open_rate', 'click_rate', 'conversion_uniques', 'conversion_value']),
   sortBy: z.enum(['conversion_value', 'recipients', 'open_rate', 'click_rate', 'conversion_rate']).default('conversion_value'),
@@ -97,13 +83,24 @@ const FlowPerformanceArgs = z.object({
 });
 type FlowPerformanceArgs = z.infer<typeof FlowPerformanceArgs>;
 
+const ConsentedSignupsArgs = z.object({
+  dateRange: DateRangeArg.describe('Date window over which to count signups (by profile.created in PT).'),
+  granularity: z.enum(['daily', 'weekly', 'monthly']).default('monthly')
+    .describe("Aggregation bucket. 'monthly' is most common."),
+});
+type ConsentedSignupsArgs = z.infer<typeof ConsentedSignupsArgs>;
+
 export class KlaviyoConnector implements Connector {
   readonly name = 'klaviyo';
   readonly tools: readonly ToolDef[];
+  private readonly client: KlaviyoApiClient;
+  private readonly signupRepo: KlaviyoSignupRollupRepo;
   private placedOrderMetricId: string | null = null;
   private metricDiscoveryAttempted = false;
 
-  constructor(private readonly client: KlaviyoApiClient) {
+  constructor(deps: KlaviyoConnectorDeps) {
+    this.client = deps.client;
+    this.signupRepo = deps.signupRepo;
     this.tools = this.buildTools();
   }
 
@@ -257,7 +254,8 @@ export class KlaviyoConnector implements Connector {
           try {
             const conversionMetricId = await this.getPlacedOrderMetricId();
             if (!conversionMetricId) return { ok: false, error: { code: 'KLAVIYO_NO_PLACED_ORDER_METRIC', message: 'Placed Order metric not found in account; cannot compute revenue/conversion stats.' } };
-            const timeframe = toKlaviyoTimeframe(args.dateRange);
+            const { startDate, endDate } = normalizeDateRange(args.dateRange);
+            const timeframe = toKlaviyoTimeframe(startDate, endDate);
             // Resolve campaign names with one extra call so the LLM can render
             // human-readable rows. List is short for any single account.
             const [reportRows, campaigns] = await Promise.all([
@@ -283,7 +281,7 @@ export class KlaviyoConnector implements Connector {
               ok: true,
               data: {
                 channel: args.channel,
-                dateRange: normalizeDateRange(args.dateRange),
+                dateRange: { startDate, endDate },
                 campaignCount: rows.length,
                 totals,
                 campaigns: trimmed,
@@ -305,7 +303,8 @@ export class KlaviyoConnector implements Connector {
           try {
             const conversionMetricId = await this.getPlacedOrderMetricId();
             if (!conversionMetricId) return { ok: false, error: { code: 'KLAVIYO_NO_PLACED_ORDER_METRIC', message: 'Placed Order metric not found in account; cannot compute revenue/conversion stats.' } };
-            const timeframe = toKlaviyoTimeframe(args.dateRange);
+            const { startDate, endDate } = normalizeDateRange(args.dateRange);
+            const timeframe = toKlaviyoTimeframe(startDate, endDate);
             const filter = args.channel === 'all' ? undefined : `equals(send_channel,'${args.channel}')`;
             const [reportRows, flows] = await Promise.all([
               this.client.flowValuesReport({
@@ -331,7 +330,7 @@ export class KlaviyoConnector implements Connector {
               ok: true,
               data: {
                 channel: args.channel,
-                dateRange: normalizeDateRange(args.dateRange),
+                dateRange: { startDate, endDate },
                 flowCount: rows.length,
                 totals,
                 flows: trimmed,
@@ -340,78 +339,47 @@ export class KlaviyoConnector implements Connector {
           } catch (err) { return errorResult(err); }
         },
       },
+      {
+        name: 'klaviyo.consented_signups',
+        description:
+          'Count of profiles created in the window AND currently subscribed to email marketing in Klaviyo. Use for questions like "how many email signups did we get in March?" or "monthly consented signups in 2026". Reads from the nightly rollup table — fast (millis), refreshed once/day at 03:00 PT.',
+        schema: ConsentedSignupsArgs as z.ZodType<ConsentedSignupsArgs>,
+        jsonSchema: zodToJsonSchema(ConsentedSignupsArgs),
+        execute: async (rawArgs) => {
+          const args = rawArgs as ConsentedSignupsArgs;
+          const { startDate, endDate } = normalizeDateRange(args.dateRange);
+          const days = await this.signupRepo.getRange(startDate, endDate);
+
+          const rows = aggregateSignups(days, args.granularity);
+
+          let latestComputedDay: string | null = null;
+          let computedAt: string | null = null;
+          for (const d of days) {
+            if (latestComputedDay === null || d.day > latestComputedDay) latestComputedDay = d.day;
+            if (computedAt === null || d.computedAt > computedAt) computedAt = d.computedAt;
+          }
+
+          return {
+            period: { startDate, endDate },
+            granularity: args.granularity,
+            rows,
+            rollupFreshness: { latestComputedDay, computedAt },
+            note: 'Consent reflects current state. Counts may decrease over time as profiles unsubscribe.',
+          };
+        },
+      },
     ];
   }
 }
 
-/** Convert a connector-level DateRangeArg into the shape Klaviyo's
- *  `*-values-reports` accept. Klaviyo supports its own preset keys (overlap
- *  with ours but not 1:1 — e.g. they have `last_30_days`, no `last_180_days`)
- *  AND custom `{start, end}` ISO datetime windows. We always emit
- *  `{start, end}` for parity across our connectors. */
-function toKlaviyoTimeframe(input: DateRangeArg): KlaviyoTimeframe {
-  const { startDate, endDate } = normalizeDateRange(input);
+/** Convert a normalized `{ startDate, endDate }` window into the shape
+ *  Klaviyo's `*-values-reports` accept. We always emit `{ start, end }` with
+ *  full-day UTC bounds for parity across our connectors. */
+function toKlaviyoTimeframe(startDate: string, endDate: string): KlaviyoTimeframe {
   return {
     start: `${startDate}T00:00:00+00:00`,
     end: `${endDate}T23:59:59+00:00`,
   };
-}
-
-/** Collapse the union into canonical `{ startDate, endDate }`. PT presets are
- *  resolved off Pacific-Time today so ranges align with the rest of the bot's
- *  time vocabulary. */
-function normalizeDateRange(input: DateRangeArg): { startDate: string; endDate: string } {
-  if (typeof input === 'string') return presetToRange(input);
-  if ('startDate' in input && 'endDate' in input) return { startDate: input.startDate, endDate: input.endDate };
-  return { startDate: input.start, endDate: input.end };
-}
-
-function ptToday(now: Date = new Date()): string {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
-}
-function addDaysIso(ymd: string, n: number): string {
-  const [y, m, d] = ymd.split('-').map(Number);
-  const dt = new Date(Date.UTC(y, m - 1, d));
-  dt.setUTCDate(dt.getUTCDate() + n);
-  return dt.toISOString().slice(0, 10);
-}
-function presetToRange(preset: string): { startDate: string; endDate: string } {
-  const today = ptToday();
-  switch (preset) {
-    case 'yesterday': { const y = addDaysIso(today, -1); return { startDate: y, endDate: y }; }
-    case 'last_7_days': return { startDate: addDaysIso(today, -6), endDate: today };
-    case 'last_14_days': return { startDate: addDaysIso(today, -13), endDate: today };
-    case 'last_30_days': return { startDate: addDaysIso(today, -29), endDate: today };
-    case 'last_90_days': return { startDate: addDaysIso(today, -89), endDate: today };
-    case 'last_180_days': return { startDate: addDaysIso(today, -179), endDate: today };
-    case 'last_365_days': return { startDate: addDaysIso(today, -364), endDate: today };
-    case 'this_month':
-    case 'month_to_date': {
-      const [y, m] = today.split('-');
-      return { startDate: `${y}-${m}-01`, endDate: today };
-    }
-    case 'last_month': {
-      const [yStr, mStr] = today.split('-');
-      const y = Number(yStr); const m = Number(mStr);
-      const lmY = m === 1 ? y - 1 : y;
-      const lmM = m === 1 ? 12 : m - 1;
-      const startDate = `${lmY}-${String(lmM).padStart(2, '0')}-01`;
-      const lastDay = new Date(Date.UTC(y, m - 1, 0)).getUTCDate();
-      const endDate = `${lmY}-${String(lmM).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
-      return { startDate, endDate };
-    }
-    case 'quarter_to_date': {
-      const [yStr, mStr] = today.split('-');
-      const m = Number(mStr);
-      const qStartMonth = Math.floor((m - 1) / 3) * 3 + 1;
-      return { startDate: `${yStr}-${String(qStartMonth).padStart(2, '0')}-01`, endDate: today };
-    }
-    case 'year_to_date': {
-      const [y] = today.split('-');
-      return { startDate: `${y}-01-01`, endDate: today };
-    }
-    default: throw new Error(`Unknown PT preset: ${preset}`);
-  }
 }
 
 /** Sort rows desc by a given field. Stat values may be missing on rows where
@@ -456,7 +424,39 @@ function errorResult(err: unknown): { ok: false; error: { code: string; status?:
 
 function round2(n: number): number { return Math.round(n * 100) / 100; }
 
+/** Bucket daily signup rows into the requested granularity. `monthly` keys are
+ *  `YYYY-MM`; `weekly` keys are the Monday (ISO 8601) of the week, formatted
+ *  `YYYY-MM-DD`; `daily` is a pass-through. Rows are sorted ascending by key. */
+function aggregateSignups(
+  days: Array<{ day: string; signupsTotal: number; signupsConsentedEmail: number }>,
+  granularity: 'daily' | 'weekly' | 'monthly',
+): Array<{ key: string; signupsTotal: number; signupsConsentedEmail: number }> {
+  if (granularity === 'daily') {
+    return days.map((d) => ({ key: d.day, signupsTotal: d.signupsTotal, signupsConsentedEmail: d.signupsConsentedEmail }));
+  }
+  const buckets = new Map<string, { signupsTotal: number; signupsConsentedEmail: number }>();
+  for (const d of days) {
+    const key = granularity === 'monthly' ? d.day.slice(0, 7) : isoWeekStart(d.day);
+    const cur = buckets.get(key) ?? { signupsTotal: 0, signupsConsentedEmail: 0 };
+    cur.signupsTotal += d.signupsTotal;
+    cur.signupsConsentedEmail += d.signupsConsentedEmail;
+    buckets.set(key, cur);
+  }
+  return [...buckets.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([key, v]) => ({ key, ...v }));
+}
+
+function isoWeekStart(ymd: string): string {
+  // Returns the Monday (ISO 8601 week start) of the week containing ymd, formatted YYYY-MM-DD.
+  const [y, m, d] = ymd.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  const dayOfWeek = (dt.getUTCDay() + 6) % 7; // Mon=0, Sun=6
+  dt.setUTCDate(dt.getUTCDate() - dayOfWeek);
+  return dt.toISOString().slice(0, 10);
+}
+
 /** Factory used by index.ts so the wiring stays consistent with other connectors. */
-export function buildKlaviyoConnector(cfg: KlaviyoApiConfig): KlaviyoConnector {
-  return new KlaviyoConnector(new KlaviyoApiClient(cfg));
+export function buildKlaviyoConnector(cfg: KlaviyoApiConfig, signupRepo: KlaviyoSignupRollupRepo): KlaviyoConnector {
+  return new KlaviyoConnector({ client: new KlaviyoApiClient(cfg), signupRepo });
 }

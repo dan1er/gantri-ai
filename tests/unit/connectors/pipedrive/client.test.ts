@@ -175,3 +175,58 @@ describe('PipedriveApiClient aggregations', () => {
     expect(out).toMatchObject({ count: 157, total_value_usd: 2481089, weighted_value_usd: 1240500 });
   });
 });
+
+describe('PipedriveApiClient list endpoints', () => {
+  it('listDeals uses v2 cursor pagination + passes filters', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      success: true,
+      data: [{ id: 816, title: 'KBM-Hogue', value: 24500, currency: 'USD', status: 'open', stage_id: 11, pipeline_id: 3, owner_id: { id: 7, name: 'Lana' }, person_id: { value: 12, name: 'Tasha' }, org_id: { value: 5, name: 'KBM-Hogue' }, add_time: '2026-04-01T00:00:00Z', custom_fields: {} }],
+      additional_data: { next_cursor: null },
+    }), { status: 200 }));
+    const client = new PipedriveApiClient({ apiToken: 'tok', fetchImpl });
+    const out = await client.listDeals({ status: 'open', pipelineId: 3, limit: 100 });
+    expect(out.items.length).toBe(1);
+    expect(out.hasMore).toBe(false);
+    const [url] = fetchImpl.mock.calls[0];
+    expect(String(url)).toContain('/v2/deals');
+    expect(String(url)).toContain('status=open');
+    expect(String(url)).toContain('pipeline_id=3');
+  });
+
+  it('listOrganizations uses v2 cursor pagination', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      success: true, data: [{ id: 5, name: 'KBM-Hogue' }], additional_data: { next_cursor: null },
+    }), { status: 200 }));
+    const client = new PipedriveApiClient({ apiToken: 'tok', fetchImpl });
+    const out = await client.listOrganizations({ ids: [5] });
+    expect(out.items.length).toBe(1);
+    const [url] = fetchImpl.mock.calls[0];
+    expect(String(url)).toContain('/v2/organizations');
+  });
+
+  it('listPersons uses v2 cursor pagination', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      success: true, data: [{ id: 12, name: 'Tasha' }], additional_data: { next_cursor: null },
+    }), { status: 200 }));
+    const client = new PipedriveApiClient({ apiToken: 'tok', fetchImpl });
+    const out = await client.listPersons({});
+    expect(out.items.length).toBe(1);
+    const [url] = fetchImpl.mock.calls[0];
+    expect(String(url)).toContain('/v2/persons');
+  });
+
+  it('listActivities uses v1 offset pagination + passes filters', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      success: true, data: [{ id: 100, type: 'call', subject: 'Discovery call', user_id: 7, done: 1, due_date: '2026-04-15' }],
+      additional_data: { pagination: { start: 0, limit: 500, more_items_in_collection: false } },
+    }), { status: 200 }));
+    const client = new PipedriveApiClient({ apiToken: 'tok', fetchImpl });
+    const out = await client.listActivities({ startDate: '2026-04-01', endDate: '2026-04-30', userId: 7, type: 'call', done: 1 });
+    expect(out.items.length).toBe(1);
+    const [url] = fetchImpl.mock.calls[0];
+    expect(String(url)).toContain('/v1/activities');
+    expect(String(url)).toContain('user_id=7');
+    expect(String(url)).toContain('type=call');
+    expect(String(url)).toContain('done=1');
+  });
+});

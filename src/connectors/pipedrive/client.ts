@@ -61,6 +61,74 @@ export interface Stage { id: number; name: string; pipeline_id: number; order_nr
 export interface User { id: number; name: string; email: string; active_flag: boolean; is_admin?: number }
 export interface DealField { key: string; name: string; field_type: string; options?: Array<{ id: number | string; label: string }> }
 
+export interface Deal {
+  id: number;
+  title: string;
+  value: number;
+  currency: string;
+  status: 'open' | 'won' | 'lost' | 'deleted';
+  stage_id: number;
+  pipeline_id: number;
+  owner_id: number | { id: number; name: string };
+  person_id: number | { value: number; name: string } | null;
+  org_id: number | { value: number; name: string } | null;
+  add_time?: string;
+  update_time?: string;
+  won_time?: string | null;
+  lost_time?: string | null;
+  close_time?: string | null;
+  lost_reason?: string | null;
+  expected_close_date?: string | null;
+  custom_fields?: Record<string, unknown>;
+}
+
+export interface Organization {
+  id: number;
+  name: string;
+  address?: string | null;
+  web?: string | null;
+  owner_id?: number | { id: number; name: string };
+  add_time?: string;
+}
+
+export interface Person {
+  id: number;
+  name: string;
+  emails?: Array<{ value: string; primary?: boolean }>;
+  phones?: Array<{ value: string; primary?: boolean }>;
+  org_id?: number | { value: number; name: string } | null;
+}
+
+export interface Activity {
+  id: number;
+  type: string;
+  subject: string;
+  user_id: number;
+  done: 0 | 1;
+  due_date?: string;
+  add_time?: string;
+  marked_as_done_time?: string;
+  deal_id?: number | null;
+  org_id?: number | null;
+  person_id?: number | null;
+}
+
+export interface ListDealsOpts {
+  status?: 'open' | 'won' | 'lost' | 'deleted' | 'all_not_deleted';
+  pipelineId?: number;
+  stageId?: number;
+  ownerId?: number;
+  orgId?: number;
+  personId?: number;
+  /** Reserved for caller-side window filters; v2 has no clean range filter today. */
+  startDate?: string;
+  endDate?: string;
+  sortBy?: 'value' | 'add_time' | 'update_time' | 'won_time';
+  sortOrder?: 'asc' | 'desc';
+  /** Reserved — paginateV2 always uses limit=500. Caller can slice the result. */
+  limit?: number;
+}
+
 /** One bucket from `/v1/deals/timeline`. Gantri is USD-only — values are
  *  pulled from `totals.values.USD` (server-converted via `totals_convert_currency=USD`). */
 export interface TimelineBucket {
@@ -312,5 +380,61 @@ export class PipedriveApiClient {
       total_value_usd: resp.data?.total_currency_converted_value ?? 0,
       weighted_value_usd: resp.data?.total_weighted_currency_converted_value ?? 0,
     };
+  }
+
+  // ---- List endpoints (NOT cached) ---- //
+
+  /**
+   * `/v2/deals` — cursor-paginated deal list with server-side filters. v2 has
+   * no clean date-range filter on `add_time`/`won_time` today, so callers that
+   * need a window slice the items themselves (or pull `update_time` and filter
+   * client-side). `limit` in opts is reserved for future use; the underlying
+   * paginator always asks for 500 per page.
+   */
+  async listDeals(opts: ListDealsOpts): Promise<{ items: Deal[]; hasMore: boolean }> {
+    const query: Record<string, string | undefined> = {
+      status: opts.status,
+      pipeline_id: opts.pipelineId !== undefined ? String(opts.pipelineId) : undefined,
+      stage_id: opts.stageId !== undefined ? String(opts.stageId) : undefined,
+      owner_id: opts.ownerId !== undefined ? String(opts.ownerId) : undefined,
+      org_id: opts.orgId !== undefined ? String(opts.orgId) : undefined,
+      person_id: opts.personId !== undefined ? String(opts.personId) : undefined,
+      sort_by: opts.sortBy,
+      sort_direction: opts.sortOrder,
+    };
+    return this.paginateV2<Deal>('/v2/deals', query, DEFAULT_MAX_PAGES);
+  }
+
+  /** `/v2/organizations` — cursor-paginated. */
+  async listOrganizations(opts: { ids?: number[]; ownerId?: number }): Promise<{ items: Organization[]; hasMore: boolean }> {
+    const query: Record<string, string | undefined> = {
+      ids: opts.ids?.length ? opts.ids.join(',') : undefined,
+      owner_id: opts.ownerId !== undefined ? String(opts.ownerId) : undefined,
+    };
+    return this.paginateV2<Organization>('/v2/organizations', query, DEFAULT_MAX_PAGES);
+  }
+
+  /** `/v2/persons` — cursor-paginated. */
+  async listPersons(opts: { ownerId?: number; orgId?: number }): Promise<{ items: Person[]; hasMore: boolean }> {
+    const query: Record<string, string | undefined> = {
+      owner_id: opts.ownerId !== undefined ? String(opts.ownerId) : undefined,
+      org_id: opts.orgId !== undefined ? String(opts.orgId) : undefined,
+    };
+    return this.paginateV2<Person>('/v2/persons', query, DEFAULT_MAX_PAGES);
+  }
+
+  /**
+   * `/v1/activities` — offset-paginated. v1 supports proper `start_date`/`end_date`
+   * filters on `due_date`, plus `user_id`/`type`/`done` for narrower slices.
+   */
+  async listActivities(opts: { startDate?: string; endDate?: string; userId?: number; type?: string; done?: 0 | 1 }): Promise<{ items: Activity[]; hasMore: boolean }> {
+    const query: Record<string, string | undefined> = {
+      start_date: opts.startDate,
+      end_date: opts.endDate,
+      user_id: opts.userId !== undefined ? String(opts.userId) : undefined,
+      type: opts.type,
+      done: opts.done !== undefined ? String(opts.done) : undefined,
+    };
+    return this.paginateV1<Activity>('/v1/activities', query, DEFAULT_MAX_PAGES);
   }
 }

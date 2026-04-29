@@ -58,6 +58,7 @@ async function main() {
     impactAccountSid, impactAuthToken,
     klaviyoApiKey,
     gscOauthClientId, gscOauthClientSecret, gscOauthRefreshToken,
+    pipedriveApiToken,
   ] = await Promise.all([
     readVaultSecret(supabase, 'NORTHBEAM_EMAIL'),
     readVaultSecret(supabase, 'NORTHBEAM_PASSWORD'),
@@ -78,6 +79,7 @@ async function main() {
     readVaultSecret(supabase, 'GSC_OAUTH_CLIENT_ID').catch(() => null),
     readVaultSecret(supabase, 'GSC_OAUTH_CLIENT_SECRET').catch(() => null),
     readVaultSecret(supabase, 'GSC_OAUTH_REFRESH_TOKEN').catch(() => null),
+    readVaultSecret(supabase, 'PIPEDRIVE_API_TOKEN').catch(() => null),
   ]);
 
   const registry = new ConnectorRegistry();
@@ -174,6 +176,10 @@ async function main() {
   } else {
     logger.warn('gsc not configured (GSC_OAUTH_CLIENT_ID / GSC_OAUTH_CLIENT_SECRET / GSC_OAUTH_REFRESH_TOKEN missing) — skipping registration');
   }
+
+  // Pipedrive connector wired in Task 13 — for now just touch the var so the
+  // declaration above passes noUnusedLocals.
+  void pipedriveApiToken;
 
   const claude = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
   const orchestrator = new Orchestrator({

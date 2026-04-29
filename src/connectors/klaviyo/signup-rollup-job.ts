@@ -19,8 +19,7 @@ export class KlaviyoSignupRollupJob {
   start(): void {
     if (this.timer) return;
     this.timer = setInterval(() => { void this.tickIfDue(); }, 15 * 60 * 1000);
-    logger.info({}, 'klaviyo signup rollup job started (15-min poll, fires at 03:00 PT)');
-    void this.run().catch((err) => logger.error({ err: err instanceof Error ? err.stack : String(err) }, 'initial klaviyo signup rollup failed'));
+    logger.info({}, 'klaviyo signup rollup job started (15-min poll, fires at 03:00 PT — no boot backfill, paginating ~358k profiles starves the event loop)');
   }
 
   stop(): void {

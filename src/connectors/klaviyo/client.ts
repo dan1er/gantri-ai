@@ -283,6 +283,10 @@ export class KlaviyoApiClient {
       out.push(...(json.data ?? []));
       url = json.links?.next ?? '';
       pageNum++;
+      // Yield to the event loop every page so the HTTP server / Slack handler
+      // stay responsive during multi-thousand-page batch jobs (358k+ profiles
+      // on Gantri's tenant). Without this, the loop starves all I/O on the box.
+      await new Promise((resolve) => setImmediate(resolve));
     }
     return out;
   }

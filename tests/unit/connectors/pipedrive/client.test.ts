@@ -111,3 +111,67 @@ describe('PipedriveApiClient directory + 10-min cache', () => {
     now.mockRestore();
   });
 });
+
+describe('PipedriveApiClient aggregations', () => {
+  it('dealsTimeline parses totals.{count, values, weighted_values, open_count, open_values, won_count, won_values}', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      success: true,
+      data: {
+        period_start: '2026-01-01',
+        period_count: 3,
+        period_units: 'month',
+        totals: {
+          count: 30,
+          values: { USD: 150000 },
+          weighted_values: { USD: 75000 },
+          open_count: 10, open_values: { USD: 50000 },
+          won_count: 18, won_values: { USD: 90000 },
+        },
+        data: [
+          { period_start: '2026-01-01', period_end: '2026-01-31', totals: {
+            count: 12, values: { USD: 60000 }, weighted_values: { USD: 30000 },
+            open_count: 4, open_values: { USD: 20000 },
+            won_count: 7, won_values: { USD: 35000 },
+          }, deals: [] },
+          { period_start: '2026-02-01', period_end: '2026-02-28', totals: {
+            count: 9, values: { USD: 45000 }, weighted_values: { USD: 22000 },
+            open_count: 3, open_values: { USD: 15000 },
+            won_count: 5, won_values: { USD: 25000 },
+          }, deals: [] },
+        ],
+      },
+    }), { status: 200 }));
+    const client = new PipedriveApiClient({ apiToken: 'tok', fetchImpl });
+    const out = await client.dealsTimeline({
+      startDate: '2026-01-01', amount: 3, interval: 'month', fieldKey: 'won_time',
+    });
+    expect(out.length).toBe(2);
+    expect(out[0]).toMatchObject({
+      period_start: '2026-01-01',
+      count: 12,
+      total_value_usd: 60000,
+      weighted_value_usd: 30000,
+      open_count: 4, open_value_usd: 20000,
+      won_count: 7, won_value_usd: 35000,
+    });
+    const [url] = fetchImpl.mock.calls[0];
+    expect(String(url)).toContain('/v1/deals/timeline');
+    expect(String(url)).toContain('field_key=won_time');
+    expect(String(url)).toContain('interval=month');
+  });
+
+  it('dealsSummary parses totals.{count, value, weighted_value} into flat shape', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      success: true,
+      data: {
+        total_count: 157,
+        total_currency_converted_value: 2481089,
+        total_weighted_currency_converted_value: 1240500,
+        values_total: { USD: { value: 2481089, count: 157, value_converted: 2481089 } },
+      },
+    }), { status: 200 }));
+    const client = new PipedriveApiClient({ apiToken: 'tok', fetchImpl });
+    const out = await client.dealsSummary({ status: 'open' });
+    expect(out).toMatchObject({ count: 157, total_value_usd: 2481089, weighted_value_usd: 1240500 });
+  });
+});

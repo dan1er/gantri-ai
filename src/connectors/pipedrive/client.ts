@@ -3,7 +3,7 @@ import { logger } from '../../logger.js';
 /**
  * Read-only client for Pipedrive's REST API. Uses a mix of v1 (aggregations,
  * metadata, search, activities) and v2 (entity reads) endpoints. Auth via
- * `Authorization: api_token=<token>` header — NEVER the `?api_token=` query
+ * `x-api-token: <token>` header — NEVER the `?api_token=` query
  * param, which leaks into request logs.
  *
  * Rate limits: token-budget based (~30K daily × seats). Each endpoint has a
@@ -206,7 +206,7 @@ export class PipedriveApiClient {
 
   private headers(): Record<string, string> {
     return {
-      Authorization: `api_token=${this.cfg.apiToken}`,
+      'x-api-token': this.cfg.apiToken,
       Accept: 'application/json',
       'Content-Type': 'application/json',
     };

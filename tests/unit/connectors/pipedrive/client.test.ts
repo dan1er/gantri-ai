@@ -2,14 +2,15 @@ import { describe, it, expect, vi } from 'vitest';
 import { PipedriveApiClient, PipedriveApiError } from '../../../../src/connectors/pipedrive/client.js';
 
 describe('PipedriveApiClient core', () => {
-  it('attaches Authorization: api_token=<token> header on every request', async () => {
+  it('attaches x-api-token header on every request (Pipedrive auth scheme)', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ success: true, data: [] }), { status: 200 }),
     );
     const client = new PipedriveApiClient({ apiToken: 'tok_abc', fetchImpl });
     await client.listPipelines();
     const [, opts] = fetchImpl.mock.calls[0];
-    expect(opts.headers.Authorization).toBe('api_token=tok_abc');
+    expect(opts.headers['x-api-token']).toBe('tok_abc');
+    expect(opts.headers.Authorization).toBeUndefined();
     expect(opts.headers.Accept).toBe('application/json');
   });
 

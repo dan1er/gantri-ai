@@ -464,21 +464,20 @@ export const TOOL_OUTPUT_SHAPES: Record<string, ToolOutputSample> = {
     expectedArrayElementKeys: { flows: ['flow_id', 'flow_name', 'send_channel'] },
   },
   'klaviyo.consented_signups': {
-    summary: 'Counts of profiles created in the window AND currently subscribed to email marketing in Klaviyo. { period: { startDate, endDate }, granularity: "daily"|"weekly"|"monthly", rows: [{ key, signupsTotal, signupsConsentedEmail }], rollupFreshness: { latestComputedDay, computedAt }, note }. `key` is `YYYY-MM-DD` for daily, the ISO-week Monday `YYYY-MM-DD` for weekly, and `YYYY-MM` for monthly. `signupsConsentedEmail` is the metric most callers want; `signupsTotal` is every profile created (including ones that never opted in to email). Backed by the nightly rollup table — counts for past months can drift down as profiles unsubscribe (consent reflects current state).',
+    summary: 'Counts of "Subscribed to Email Marketing" events in Klaviyo, bucketed by interval. { period: { startDate, endDate }, granularity: "daily"|"weekly"|"monthly", rows: [{ key, count }], note }. `key` is `YYYY-MM-DD` for daily, the local-tz week start `YYYY-MM-DD` for weekly, and `YYYY-MM` for monthly. `count` is the number of subscribe events in that bucket — includes new subscriptions AND re-subscriptions. Live ~500ms call to Klaviyo\'s `/metric-aggregates/` endpoint (server-side aggregation, no rollup table).',
     example: {
       period: { startDate: '2026-01-01', endDate: '2026-04-27' },
       granularity: 'monthly',
       rows: [
-        { key: '2026-01', signupsTotal: 4210, signupsConsentedEmail: 1842 },
-        { key: '2026-02', signupsTotal: 3877, signupsConsentedEmail: 1701 },
-        { key: '2026-03', signupsTotal: 5104, signupsConsentedEmail: 2231 },
-        { key: '2026-04', signupsTotal: 4655, signupsConsentedEmail: 2018 },
+        { key: '2026-01', count: 929 },
+        { key: '2026-02', count: 504 },
+        { key: '2026-03', count: 475 },
+        { key: '2026-04', count: 412 },
       ],
-      rollupFreshness: { latestComputedDay: '2026-04-26', computedAt: '2026-04-27T10:02:13Z' },
-      note: 'Consent reflects current state. Counts may decrease over time as profiles unsubscribe.',
+      note: "Counts events of type 'Subscribed to Email Marketing' (Klaviyo native metric). Includes new subscriptions and re-subscriptions. Differs from 'profiles created in window AND currently subscribed' — that definition is drift-tolerant; this one counts every subscribe event.",
     },
-    expectedTopLevelKeys: ['period', 'granularity', 'rows', 'rollupFreshness', 'note'],
-    expectedArrayElementKeys: { rows: ['key', 'signupsTotal', 'signupsConsentedEmail'] },
+    expectedTopLevelKeys: ['period', 'granularity', 'rows', 'note'],
+    expectedArrayElementKeys: { rows: ['key', 'count'] },
   },
 
   // ---------- Google Search Console (SEO) ----------

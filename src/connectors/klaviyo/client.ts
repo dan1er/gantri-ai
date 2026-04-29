@@ -98,21 +98,6 @@ export interface KlaviyoMetricAttrs {
   [key: string]: unknown;
 }
 
-/** Profile resource attributes (`/api/profiles`). We only read `created`
- *  + `subscriptions.email.marketing.consent` for the consented-signups
- *  rollup; other fields are typed permissively because the JSON:API
- *  payload includes many we don't care about. */
-export interface KlaviyoProfileAttrs {
-  email?: string | null;
-  created: string; // ISO 8601
-  updated?: string;
-  subscriptions?: {
-    email?: { marketing?: { consent?: string; consent_timestamp?: string } };
-    sms?: unknown;
-  } | null;
-  [key: string]: unknown;
-}
-
 /** A single row from a *-values-report response: dimension keys (`groupings`)
  *  + numeric stats. Stats requested mirror what the connector exposes. */
 export interface ValuesReportRow {
@@ -250,54 +235,6 @@ export class KlaviyoApiClient {
     return out;
   }
 
-  /** Walk every page of a JSON:API collection without the 50-page cap that
-   *  `paginate` enforces. STREAMING: invokes `onItem` for each item as pages
-   *  arrive — never accumulates the full set in memory. Required for batch
-   *  jobs against tenants with hundreds of thousands of resources (Gantri has
-   *  358k+ profiles in Klaviyo; accumulating crashed the 1GB Fly machine).
-   *  A 10000-page sanity cap still fires if the cursor loops, so we don't
-   *  run forever silently. Returns `{ pages, items }` counts for observability. */
-  private async paginateUnboundedStream<TAttrs>(
-    initialPath: string,
-    onItem: (item: KlaviyoResource<TAttrs>) => void,
-  ): Promise<{ pages: number; items: number }> {
-    const SANITY_CAP = 10000;
-    let url: string = `${this.baseUrl}${initialPath}`;
-    let pageNum = 0;
-    let itemCount = 0;
-    while (url) {
-      if (pageNum >= SANITY_CAP) {
-        throw new KlaviyoApiError(
-          `paginateUnboundedStream exceeded ${SANITY_CAP}-page sanity cap; aborting`,
-          0,
-          null,
-        );
-      }
-      const t0 = Date.now();
-      const res = await this.fetchImpl(url, { method: 'GET', headers: this.headers() });
-      const elapsed = Date.now() - t0;
-      if (!res.ok) {
-        let body: unknown = null;
-        try { body = await res.json(); } catch { body = await res.text().catch(() => null); }
-        logger.warn({ path: '<paginateUnboundedStream>', status: res.status, elapsed, body }, 'klaviyo api error');
-        throw new KlaviyoApiError(`GET <paginateUnboundedStream> -> ${res.status}`, res.status, body);
-      }
-      const json = (await res.json()) as CollectionResponse<TAttrs>;
-      logger.info({ path: '<paginateUnboundedStream>', status: res.status, elapsed, page: pageNum }, 'klaviyo api ok');
-      const items = json.data ?? [];
-      for (const item of items) {
-        onItem(item);
-        itemCount++;
-      }
-      url = json.links?.next ?? '';
-      pageNum++;
-      // Yield to the event loop every page so the HTTP server / Slack handler
-      // stay responsive during multi-thousand-page batch jobs.
-      await new Promise((resolve) => setImmediate(resolve));
-    }
-    return { pages: pageNum, items: itemCount };
-  }
-
   /** All metrics in the account. Used at boot to discover the "Placed Order"
    *  metric id, which the *-values-reports require as `conversion_metric_id`.
    *  Memoized — the metrics list is stable across a process lifetime. */
@@ -421,36 +358,52 @@ export class KlaviyoApiClient {
     return resp.data?.attributes?.results ?? [];
   }
 
-  /** GET /profiles filtered by `created` in [startDate, endDate] (inclusive
-   *  YMD on both ends). Returns ALL matching profiles via unbounded
-   *  pagination — designed for the consented-signups rollup that walks an
-   *  entire day's signups. The `additional-fields[profile]=subscriptions`
-   *  query param ensures we get the marketing-consent payload back without
-   *  a follow-up fetch per profile.
-   *
-   *  `endDate` is inclusive at the YMD level; we translate it to a
-   *  `less-than` (exclusive) on next-day midnight UTC, since Klaviyo's
-   *  filter operators are open-interval on the high end. */
-  async streamProfilesByCreatedRange(
-    opts: { startDate: string; endDate: string },
-    onItem: (item: KlaviyoResource<KlaviyoProfileAttrs>) => void,
-  ): Promise<{ pages: number; items: number }> {
-    // Klaviyo's `created` field only supports greater-than / less-than (not -or-equal).
-    // To keep startDate inclusive, subtract 1ms: greater-than(prevInstant) == greater-or-equal(startInstant).
-    const startInclusiveMs = Date.UTC(
-      Number(opts.startDate.slice(0, 4)),
-      Number(opts.startDate.slice(5, 7)) - 1,
-      Number(opts.startDate.slice(8, 10)),
-    );
-    const startExclusiveISO = new Date(startInclusiveMs - 1).toISOString();
-    // End is already exclusive in the API, but our argument is YMD inclusive — so endExclusive = next-day midnight.
-    const endExclusive = addDaysYmd(opts.endDate, 1);
-    const endISO = `${endExclusive}T00:00:00.000Z`;
-    const filter = `and(greater-than(created,${startExclusiveISO}),less-than(created,${endISO}))`;
-    const params = new URLSearchParams();
-    params.set('filter', filter);
-    params.set('additional-fields[profile]', 'subscriptions');
-    return this.paginateUnboundedStream<KlaviyoProfileAttrs>(`/profiles?${params.toString()}`, onItem);
+  /** POST /metric-aggregates/ — server-side aggregated counts of a metric over
+   *  a date range, bucketed by interval (day | week | month). One ~500ms call
+   *  returns the full series, no pagination, no rollup table required. The
+   *  metric name is resolved to its id via `findMetricIdByName` (cached). */
+  async metricAggregateByName(opts: {
+    metricName: string;
+    startDate: string; // YYYY-MM-DD inclusive
+    endDate: string; // YYYY-MM-DD inclusive
+    interval: 'day' | 'week' | 'month';
+    timezone?: string; // default 'America/Los_Angeles'
+    measurements?: string[]; // default ['count']
+  }): Promise<{ dates: string[]; counts: number[] }> {
+    const metricId = await this.findMetricIdByName(opts.metricName);
+    if (!metricId) {
+      throw new KlaviyoApiError(`metric '${opts.metricName}' not found in catalog`, 404, null);
+    }
+    const startISO = `${opts.startDate}T00:00:00.000Z`;
+    // metric-aggregates uses a [start, end) window — advance the inclusive
+    // YMD endDate by 1 day so the filter covers the whole final day.
+    const endISO = `${addDaysYmd(opts.endDate, 1)}T00:00:00.000Z`;
+    const body = {
+      data: {
+        type: 'metric-aggregate',
+        attributes: {
+          metric_id: metricId,
+          measurements: opts.measurements ?? ['count'],
+          interval: opts.interval,
+          timezone: opts.timezone ?? 'America/Los_Angeles',
+          filter: [
+            `greater-or-equal(datetime,${startISO})`,
+            `less-than(datetime,${endISO})`,
+          ],
+        },
+      },
+    };
+    const resp = await this.post<{
+      data: {
+        attributes: {
+          dates: string[];
+          data: Array<{ measurements: Record<string, number[]> }>;
+        };
+      };
+    }>('/metric-aggregates/', body);
+    const dates = resp.data?.attributes?.dates ?? [];
+    const counts = resp.data?.attributes?.data?.[0]?.measurements?.count ?? [];
+    return { dates, counts };
   }
 }
 

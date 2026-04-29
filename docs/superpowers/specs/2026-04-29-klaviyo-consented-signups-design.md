@@ -294,3 +294,23 @@ Manual smoke (post-deploy):
 - Signup source attribution (list, campaign, segment)
 - Sub-daily freshness
 - "Consented at signup" frozen semantics (drift-tolerant matches the puller)
+
+---
+
+## 2026-04-29 — Architectural pivot
+
+The original design (paginate `/api/profiles` for all profiles since 2020, bucket by PT day, upsert to nightly rollup table) had two showstoppers in production:
+
+1. **OOM**: 358k+ profiles on Gantri's Klaviyo tenant exceeded the 1GB Fly machine.
+2. **Definition mismatch**: even with streaming, the puller-style "profiles created in window AND currently subscribed" was complex to compute and gave drift-tolerant numbers that fluctuate over time.
+
+Discovered that Klaviyo exposes a native metric `Subscribed to Email Marketing` (id `UZk74x`) that fires on every email-consent event. Querying via `POST /api/metric-aggregates/` returns server-aggregated monthly/weekly/daily counts in a single ~500ms request — no pagination, no rollup.
+
+Pivoted to:
+- Tool calls `metric-aggregates` live (no cache, no nightly job, no rollup table)
+- Definition shifts from "profiles created in window AND currently subscribed" to "events of type 'Subscribed to Email Marketing' that happened in window"
+- Includes re-subscriptions (someone unsubscribes, then resubscribes) — this is more useful for marketing dashboards than the puller-style number
+
+Code dropped: client streaming method, rollup repo, rollup job, admin trigger endpoint, ~400 LoC + tests. Migration `0012_klaviyo_signups_daily.sql` retained as no-op (table is empty and benign).
+
+Numbers will differ from Lana's original puller reference. Pending confirmation with Lana on whether event-based count is acceptable for the dashboard.

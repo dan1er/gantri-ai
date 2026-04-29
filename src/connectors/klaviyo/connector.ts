@@ -8,7 +8,6 @@ import {
   KlaviyoApiError,
   type KlaviyoTimeframe,
 } from './client.js';
-import type { KlaviyoSignupRollupRepo } from '../../storage/repositories/klaviyo-signup-rollup.js';
 
 /**
  * Klaviyo email/SMS analytics connector — read-only. Mirrors the surface
@@ -19,9 +18,9 @@ import type { KlaviyoSignupRollupRepo } from '../../storage/repositories/klaviyo
  *   - klaviyo.list_segments         — segments + member counts
  *   - klaviyo.campaign_performance  — per-campaign opens/clicks/revenue/etc
  *   - klaviyo.flow_performance      — per-flow same shape
- *   - klaviyo.consented_signups     — daily/weekly/monthly counts of profiles
- *                                     created in window AND consented to email,
- *                                     served from the nightly rollup table
+ *   - klaviyo.consented_signups     — server-side metric-aggregates of the
+ *                                     "Subscribed to Email Marketing" event,
+ *                                     bucketed daily/weekly/monthly
  *
  * Klaviyo's `*-values-reports` endpoints are rate-limited HARD (1/s burst,
  * 2/min steady, 225/day). Don't disable the cache layer — every "answer"
@@ -31,7 +30,6 @@ import type { KlaviyoSignupRollupRepo } from '../../storage/repositories/klaviyo
 
 export interface KlaviyoConnectorDeps {
   client: KlaviyoApiClient;
-  signupRepo: KlaviyoSignupRollupRepo;
 }
 
 const Channel = z.enum(['email', 'sms', 'mobile_push']).default('email')
@@ -83,7 +81,7 @@ const FlowPerformanceArgs = z.object({
 type FlowPerformanceArgs = z.infer<typeof FlowPerformanceArgs>;
 
 const ConsentedSignupsArgs = z.object({
-  dateRange: DateRangeArg.describe('Date window over which to count signups (by profile.created in PT).'),
+  dateRange: DateRangeArg.describe('Date window over which to count "Subscribed to Email Marketing" events.'),
   granularity: z.enum(['daily', 'weekly', 'monthly']).default('monthly')
     .describe("Aggregation bucket. 'monthly' is most common."),
 });
@@ -93,13 +91,11 @@ export class KlaviyoConnector implements Connector {
   readonly name = 'klaviyo';
   readonly tools: readonly ToolDef[];
   private readonly client: KlaviyoApiClient;
-  private readonly signupRepo: KlaviyoSignupRollupRepo;
   private placedOrderMetricId: string | null = null;
   private metricDiscoveryAttempted = false;
 
   constructor(deps: KlaviyoConnectorDeps) {
     this.client = deps.client;
-    this.signupRepo = deps.signupRepo;
     this.tools = this.buildTools();
   }
 
@@ -341,29 +337,35 @@ export class KlaviyoConnector implements Connector {
       {
         name: 'klaviyo.consented_signups',
         description:
-          'Count of profiles created in the window AND currently subscribed to email marketing in Klaviyo. Use for questions like "how many email signups did we get in March?" or "monthly consented signups in 2026". Reads from the nightly rollup table — fast (millis), refreshed once/day at 03:00 PT.',
+          'Counts of "Subscribed to Email Marketing" events in Klaviyo, bucketed daily/weekly/monthly. Live ~500ms call to the metric-aggregates endpoint (server-side aggregation). Use for questions like "how many email signups did we get in March?" or "monthly consented signups in 2026". Includes new subscriptions AND re-subscriptions — counts the subscribe events, not "currently subscribed profiles created in window".',
         schema: ConsentedSignupsArgs as z.ZodType<ConsentedSignupsArgs>,
         jsonSchema: zodToJsonSchema(ConsentedSignupsArgs),
         execute: async (rawArgs) => {
           const args = rawArgs as ConsentedSignupsArgs;
           const { startDate, endDate } = normalizeDateRange(args.dateRange);
-          const days = await this.signupRepo.getRange(startDate, endDate);
-
-          const rows = aggregateSignups(days, args.granularity);
-
-          let latestComputedDay: string | null = null;
-          let computedAt: string | null = null;
-          for (const d of days) {
-            if (latestComputedDay === null || d.day > latestComputedDay) latestComputedDay = d.day;
-            if (computedAt === null || d.computedAt > computedAt) computedAt = d.computedAt;
-          }
-
+          const interval =
+            args.granularity === 'monthly' ? 'month' :
+            args.granularity === 'weekly' ? 'week' : 'day';
+          const result = await this.client.metricAggregateByName({
+            metricName: 'Subscribed to Email Marketing',
+            startDate,
+            endDate,
+            interval,
+          });
+          // Klaviyo returns dates as ISO timestamps with the local-timezone
+          // offset (e.g. "2026-01-01T08:00:00+00:00" for PT-anchored monthly
+          // buckets). Reduce to YYYY-MM (monthly), YYYY-MM-DD (weekly start =
+          // Mon, daily).
+          const rows = result.dates.map((d, i) => {
+            const ymd = d.slice(0, 10);
+            const key = interval === 'month' ? ymd.slice(0, 7) : ymd;
+            return { key, count: result.counts[i] ?? 0 };
+          });
           return {
             period: { startDate, endDate },
             granularity: args.granularity,
             rows,
-            rollupFreshness: { latestComputedDay, computedAt },
-            note: 'Consent reflects current state. Counts may decrease over time as profiles unsubscribe.',
+            note: "Counts events of type 'Subscribed to Email Marketing' (Klaviyo native metric). Includes new subscriptions and re-subscriptions. Differs from 'profiles created in window AND currently subscribed' — that definition is drift-tolerant; this one counts every subscribe event.",
           };
         },
       },
@@ -422,35 +424,3 @@ function errorResult(err: unknown): { ok: false; error: { code: string; status?:
 }
 
 function round2(n: number): number { return Math.round(n * 100) / 100; }
-
-/** Bucket daily signup rows into the requested granularity. `monthly` keys are
- *  `YYYY-MM`; `weekly` keys are the Monday (ISO 8601) of the week, formatted
- *  `YYYY-MM-DD`; `daily` is a pass-through. Rows are sorted ascending by key. */
-function aggregateSignups(
-  days: Array<{ day: string; signupsTotal: number; signupsConsentedEmail: number }>,
-  granularity: 'daily' | 'weekly' | 'monthly',
-): Array<{ key: string; signupsTotal: number; signupsConsentedEmail: number }> {
-  if (granularity === 'daily') {
-    return days.map((d) => ({ key: d.day, signupsTotal: d.signupsTotal, signupsConsentedEmail: d.signupsConsentedEmail }));
-  }
-  const buckets = new Map<string, { signupsTotal: number; signupsConsentedEmail: number }>();
-  for (const d of days) {
-    const key = granularity === 'monthly' ? d.day.slice(0, 7) : isoWeekStart(d.day);
-    const cur = buckets.get(key) ?? { signupsTotal: 0, signupsConsentedEmail: 0 };
-    cur.signupsTotal += d.signupsTotal;
-    cur.signupsConsentedEmail += d.signupsConsentedEmail;
-    buckets.set(key, cur);
-  }
-  return [...buckets.entries()]
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([key, v]) => ({ key, ...v }));
-}
-
-function isoWeekStart(ymd: string): string {
-  // Returns the Monday (ISO 8601 week start) of the week containing ymd, formatted YYYY-MM-DD.
-  const [y, m, d] = ymd.split('-').map(Number);
-  const dt = new Date(Date.UTC(y, m - 1, d));
-  const dayOfWeek = (dt.getUTCDay() + 6) % 7; // Mon=0, Sun=6
-  dt.setUTCDate(dt.getUTCDate() - dayOfWeek);
-  return dt.toISOString().slice(0, 10);
-}

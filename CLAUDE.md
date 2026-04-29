@@ -24,6 +24,7 @@ It is the canonical checklist of every touchpoint required for a connector to be
 - **Pagination**: existing helper `paginate<T>()` has a 50-page cap. For batch jobs that need full history, write a sibling `paginateUnbounded<T>()` with a 10K-page sanity cap — explicit opt-in.
 - **Repo reads**: use `.maybeSingle()` (not `.single()` + `PGRST116` sniffing) for "0 or 1 row" patterns.
 - **Live Reports tools**: must be in `WHITELISTED_TOOLS` (`src/reports/live/spec.ts`) AND have an output sample in `src/connectors/live-reports/tool-output-shapes.ts`, otherwise the compiler refuses to load.
+- **Klaviyo metric-aggregates**: for any "count events over time" question (subscribes, opens, etc.), prefer `POST /api/metric-aggregates/` over paginating profiles or events. One ~500ms call returns server-aggregated monthly/weekly/daily buckets. The metric catalog (`client.listMetrics()`) shows what's available.
 
 ## Deploy
 

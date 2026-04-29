@@ -395,7 +395,7 @@ export class PipedriveApiClient {
   // ---- List endpoints (NOT cached) ---- //
 
   /**
-   * `/v2/deals` — cursor-paginated deal list with server-side filters. v2 has
+   * `/api/v2/deals` — cursor-paginated deal list with server-side filters. v2 has
    * no clean date-range filter on `add_time`/`won_time` today, so callers that
    * need a window slice the items themselves (or pull `update_time` and filter
    * client-side). `limit` in opts is reserved for future use; the underlying
@@ -412,25 +412,25 @@ export class PipedriveApiClient {
       sort_by: opts.sortBy,
       sort_direction: opts.sortOrder,
     };
-    return this.paginateV2<Deal>('/v2/deals', query, DEFAULT_MAX_PAGES);
+    return this.paginateV2<Deal>('/api/v2/deals', query, DEFAULT_MAX_PAGES);
   }
 
-  /** `/v2/organizations` — cursor-paginated. */
+  /** `/api/v2/organizations` — cursor-paginated. */
   async listOrganizations(opts: { ids?: number[]; ownerId?: number }): Promise<{ items: Organization[]; hasMore: boolean }> {
     const query: Record<string, string | undefined> = {
       ids: opts.ids?.length ? opts.ids.join(',') : undefined,
       owner_id: opts.ownerId !== undefined ? String(opts.ownerId) : undefined,
     };
-    return this.paginateV2<Organization>('/v2/organizations', query, DEFAULT_MAX_PAGES);
+    return this.paginateV2<Organization>('/api/v2/organizations', query, DEFAULT_MAX_PAGES);
   }
 
-  /** `/v2/persons` — cursor-paginated. */
+  /** `/api/v2/persons` — cursor-paginated. */
   async listPersons(opts: { ownerId?: number; orgId?: number }): Promise<{ items: Person[]; hasMore: boolean }> {
     const query: Record<string, string | undefined> = {
       owner_id: opts.ownerId !== undefined ? String(opts.ownerId) : undefined,
       org_id: opts.orgId !== undefined ? String(opts.orgId) : undefined,
     };
-    return this.paginateV2<Person>('/v2/persons', query, DEFAULT_MAX_PAGES);
+    return this.paginateV2<Person>('/api/v2/persons', query, DEFAULT_MAX_PAGES);
   }
 
   /**
@@ -451,18 +451,18 @@ export class PipedriveApiClient {
   // ---- Detail + search (NOT cached) ---- //
 
   /**
-   * `/v2/deals/{id}` — full deal record including the `custom_fields` object
+   * `/api/v2/deals/{id}` — full deal record including the `custom_fields` object
    * (the resolver in `connector.ts` maps custom-field hash keys to their
    * human names via `listDealFields()`).
    */
   async getDeal(id: number): Promise<Deal> {
-    const resp = await this.request<{ success: boolean; data: Deal }>(`/v2/deals/${id}`);
+    const resp = await this.request<{ success: boolean; data: Deal }>(`/api/v2/deals/${id}`);
     return resp.data;
   }
 
-  /** `/v2/organizations/{id}` — full org record. */
+  /** `/api/v2/organizations/{id}` — full org record. */
   async getOrganization(id: number): Promise<Organization> {
-    const resp = await this.request<{ success: boolean; data: Organization }>(`/v2/organizations/${id}`);
+    const resp = await this.request<{ success: boolean; data: Organization }>(`/api/v2/organizations/${id}`);
     return resp.data;
   }
 

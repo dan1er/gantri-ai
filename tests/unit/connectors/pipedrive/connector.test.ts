@@ -226,3 +226,102 @@ describe('pipedrive.pipeline_snapshot', () => {
     expect(r.data.note).toMatch(/truncated|partial|cap/i);
   });
 });
+
+describe('pipedrive.list_deals', () => {
+  it('returns rows with custom-field hashes resolved (Source label)', async () => {
+    const stub = makeStub({
+      listDealFields: vi.fn().mockResolvedValue([
+        { key: 'f21bb44b8b693a780b3e881a258257db8897b6d0', name: 'Source', field_type: 'enum', options: [{ id: 161, label: 'ICFF' }] },
+        { key: '9539ba1ce1e5a79d39a30359e5c3e5b7a95ac082', name: 'Specifier', field_type: 'varchar' },
+      ]),
+      listDeals: vi.fn().mockResolvedValue({ items: [
+        { id: 816, title: 'KBM-Hogue', value: 24500, currency: 'USD', status: 'open', stage_id: 11, pipeline_id: 3, owner_id: { id: 7, name: 'Lana' }, person_id: { value: 12, name: 'Tasha' }, org_id: { value: 5, name: 'KBM-Hogue' }, add_time: '2026-04-01', won_time: null, lost_time: null, lost_reason: null, expected_close_date: '2026-05-15', custom_fields: { 'f21bb44b8b693a780b3e881a258257db8897b6d0': 161, '9539ba1ce1e5a79d39a30359e5c3e5b7a95ac082': 'AcmeArch' } },
+      ], hasMore: false }),
+    });
+    const conn = new PipedriveConnector({ client: stub });
+    const tool = conn.tools.find((t) => t.name === 'pipedrive.list_deals')!;
+    const r = await tool.execute({ dateRange: 'last_30_days', limit: 50 }) as any;
+    expect(r.data.rows[0]).toMatchObject({
+      id: 816, title: 'KBM-Hogue', valueUsd: 24500, ownerId: 7, ownerName: 'Lana',
+      orgId: 5, orgName: 'KBM-Hogue', personId: 12, personName: 'Tasha',
+      sourceLabel: 'ICFF', specifierOrgName: 'AcmeArch',
+    });
+  });
+
+  it('passes status, pipelineId, sourceOptionId filters through to client + filters client-side for source', async () => {
+    const stub = makeStub({
+      listDealFields: vi.fn().mockResolvedValue([
+        { key: 'f21bb44b8b693a780b3e881a258257db8897b6d0', name: 'Source', field_type: 'enum', options: [{ id: 161, label: 'ICFF' }, { id: 162, label: 'Design Miami' }] },
+      ]),
+      listDeals: vi.fn().mockResolvedValue({ items: [
+        { id: 1, title: 'A', value: 100, currency: 'USD', status: 'won', stage_id: 11, pipeline_id: 3, owner_id: 7, person_id: null, org_id: null, custom_fields: { 'f21bb44b8b693a780b3e881a258257db8897b6d0': 161 } },
+        { id: 2, title: 'B', value: 200, currency: 'USD', status: 'won', stage_id: 11, pipeline_id: 3, owner_id: 7, person_id: null, org_id: null, custom_fields: { 'f21bb44b8b693a780b3e881a258257db8897b6d0': 162 } },
+      ], hasMore: false }),
+    });
+    const conn = new PipedriveConnector({ client: stub });
+    const tool = conn.tools.find((t) => t.name === 'pipedrive.list_deals')!;
+    const r = await tool.execute({ status: 'won', pipelineId: 3, sourceOptionId: 161, limit: 50 }) as any;
+    expect((stub.listDeals as any)).toHaveBeenCalledWith(expect.objectContaining({ status: 'won', pipelineId: 3 }));
+    // Client-side filter on sourceOptionId keeps only deal 1.
+    expect(r.data.rows.map((d: any) => d.id)).toEqual([1]);
+  });
+
+  it('accepts dateRange as a preset string', async () => {
+    const stub = makeStub({
+      listDealFields: vi.fn().mockResolvedValue([]),
+      listDeals: vi.fn().mockResolvedValue({ items: [], hasMore: false }),
+    });
+    const conn = new PipedriveConnector({ client: stub });
+    const tool = conn.tools.find((t) => t.name === 'pipedrive.list_deals')!;
+    const r = await tool.execute({ dateRange: 'last_30_days', limit: 50 }) as any;
+    expect(r.ok).toBe(true);
+    expect(r.data.dateRange?.startDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  it('accepts dateRange as object', async () => {
+    const stub = makeStub({
+      listDealFields: vi.fn().mockResolvedValue([]),
+      listDeals: vi.fn().mockResolvedValue({ items: [], hasMore: false }),
+    });
+    const conn = new PipedriveConnector({ client: stub });
+    const tool = conn.tools.find((t) => t.name === 'pipedrive.list_deals')!;
+    const r = await tool.execute({ dateRange: { startDate: '2026-01-01', endDate: '2026-01-31' }, limit: 50 }) as any;
+    expect(r.ok).toBe(true);
+    expect(r.data.dateRange).toEqual({ startDate: '2026-01-01', endDate: '2026-01-31' });
+  });
+
+  it('accepts JSON-stringified-object dateRange (registry preprocess)', async () => {
+    const stub = makeStub({
+      listDealFields: vi.fn().mockResolvedValue([]),
+      listDeals: vi.fn().mockResolvedValue({ items: [], hasMore: false }),
+    });
+    const conn = new PipedriveConnector({ client: stub });
+    const tool = conn.tools.find((t) => t.name === 'pipedrive.list_deals')!;
+    const rawArgs = { dateRange: JSON.stringify({ startDate: '2026-01-01', endDate: '2026-01-31' }), limit: 50 };
+    const preprocessed = unstringifyJsonObjects(rawArgs) as Record<string, unknown>;
+    await expect(tool.execute(preprocessed)).resolves.toBeDefined();
+  });
+});
+
+describe('pipedrive.deal_detail', () => {
+  it('joins person + org + activity + product details with resolved custom fields', async () => {
+    const stub = makeStub({
+      getDeal: vi.fn().mockResolvedValue({ id: 816, title: 'KBM-Hogue', value: 24500, currency: 'USD', status: 'open', stage_id: 11, pipeline_id: 3, owner_id: { id: 7, name: 'Lana' }, person_id: { value: 12, name: 'Tasha' }, org_id: { value: 5, name: 'KBM-Hogue' }, custom_fields: { 'f21bb44b8b693a780b3e881a258257db8897b6d0': 161 } }),
+      listDealFields: vi.fn().mockResolvedValue([
+        { key: 'f21bb44b8b693a780b3e881a258257db8897b6d0', name: 'Source', field_type: 'enum', options: [{ id: 161, label: 'ICFF' }] },
+      ]),
+      getOrganization: vi.fn().mockResolvedValue({ id: 5, name: 'KBM-Hogue', address: '1 Main St', web: 'kbm.com' }),
+      listActivities: vi.fn().mockResolvedValue({ items: [
+        { id: 100, type: 'call', subject: 'Discovery call', user_id: 7, done: 1, due_date: '2026-04-15', deal_id: 816 },
+      ], hasMore: false }),
+    });
+    const conn = new PipedriveConnector({ client: stub });
+    const tool = conn.tools.find((t) => t.name === 'pipedrive.deal_detail')!;
+    const r = await tool.execute({ dealId: 816 }) as any;
+    expect(r.ok).toBe(true);
+    expect(r.data.id).toBe(816);
+    expect(r.data.orgDetail).toMatchObject({ id: 5, name: 'KBM-Hogue', address: '1 Main St', web: 'kbm.com' });
+    expect(r.data.lastActivity).toMatchObject({ type: 'call', subject: 'Discovery call', done: true });
+    expect(r.data.customFields).toMatchObject({ Source: 'ICFF' });
+  });
+});

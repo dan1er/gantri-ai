@@ -86,6 +86,8 @@ export class PipedriveConnector implements Connector {
       this.toolSearch(),
       this.toolDealTimeseries(),
       this.toolPipelineSnapshot(),
+      this.toolListDeals(),
+      this.toolDealDetail(),
     ];
   }
 
@@ -290,6 +292,189 @@ export class PipedriveConnector implements Connector {
               truncated: dealsRes.hasMore,
               note: dealsRes.hasMore ? 'Result truncated at 10-page (~5000-deal) scan cap. Re-call with `pipelineId` to narrow.' : undefined,
               rows,
+            },
+          };
+        } catch (err) { return pipedriveErrorResult(err); }
+      },
+    };
+  }
+
+  // ============================================================
+  // Group C — Deal-level
+  // ============================================================
+
+  private toolListDeals(): ToolDef {
+    const Args = z.object({
+      dateRange: DateRangeArg.optional(),
+      dateField: z.enum(['add_time', 'won_time', 'close_time', 'update_time']).default('update_time'),
+      status: z.enum(['open', 'won', 'lost', 'deleted', 'all_not_deleted']).default('all_not_deleted'),
+      pipelineId: z.number().int().optional(),
+      stageId: z.number().int().optional(),
+      ownerId: z.number().int().optional(),
+      orgId: z.number().int().optional(),
+      personId: z.number().int().optional(),
+      sourceOptionId: z.number().int().optional(),
+      search: z.string().optional().describe('Substring filter on deal title — applied client-side after fetch.'),
+      sortBy: z.enum(['value', 'add_time', 'update_time', 'won_time']).default('value'),
+      sortOrder: z.enum(['asc', 'desc']).default('desc'),
+      limit: z.number().int().min(1).max(500).default(50),
+    });
+    type A = z.infer<typeof Args>;
+    return {
+      name: 'pipedrive.list_deals',
+      description: [
+        'Cursor-paginated list of deals with the analytical fields. Hard cap of 500/call.',
+        'Output rows: { id, title, status, valueUsd, pipelineId, stageId, ownerId, ownerName, orgId, orgName, personId, personName, addTime, wonTime, lostTime, lostReason, sourceLabel, specifierOrgName, purchaserOrgName, expectedCloseDate }.',
+        'Use for "top 20 open deals by value", "lost deals last month with reasons", "all deals from ICFF source". Filter by status/pipeline/stage/owner/org/person/sourceOptionId.',
+      ].join(' '),
+      schema: Args as z.ZodType<A>,
+      jsonSchema: zodToJsonSchema(Args),
+      execute: async (rawArgs) => {
+        const args = Args.parse(rawArgs);
+        try {
+          const range = args.dateRange ? normalizeDateRange(args.dateRange) : null;
+          const [dealsRes, fields] = await Promise.all([
+            this.client.listDeals({
+              status: args.status,
+              pipelineId: args.pipelineId,
+              stageId: args.stageId,
+              ownerId: args.ownerId,
+              orgId: args.orgId,
+              personId: args.personId,
+              startDate: range?.startDate,
+              endDate: range?.endDate,
+              sortBy: args.sortBy,
+              sortOrder: args.sortOrder,
+              limit: args.limit,
+            }),
+            this.client.listDealFields(),
+          ]);
+          const sourceField = fields.find((f) => f.name === 'Source');
+          const specifierField = fields.find((f) => f.name === 'Specifier');
+          const purchaserField = fields.find((f) => f.name === 'Purchaser');
+          const sourceOptions = new Map<string | number, string>((sourceField?.options ?? []).map((o) => [o.id, o.label] as const));
+
+          let rows = dealsRes.items.map((d) => {
+            const cf = d.custom_fields ?? {};
+            const sourceRaw = sourceField ? cf[sourceField.key] : undefined;
+            const sourceLabel = sourceRaw !== undefined && sourceRaw !== null
+              ? sourceOptions.get(sourceRaw as string | number) ?? String(sourceRaw)
+              : null;
+            const specifierOrgName = specifierField ? (cf[specifierField.key] ?? null) : null;
+            const purchaserOrgName = purchaserField ? (cf[purchaserField.key] ?? null) : null;
+            const owner = typeof d.owner_id === 'object' && d.owner_id !== null
+              ? d.owner_id
+              : { id: d.owner_id as number, name: null as string | null };
+            const person = typeof d.person_id === 'object' && d.person_id !== null ? d.person_id : null;
+            const org = typeof d.org_id === 'object' && d.org_id !== null ? d.org_id : null;
+            // Client-side date filter (until v2 supports range query natively).
+            if (range) {
+              const tsStr = (d as unknown as Record<string, unknown>)[args.dateField] as string | undefined;
+              if (tsStr) {
+                const ymd = tsStr.slice(0, 10);
+                if (ymd < range.startDate || ymd > range.endDate) return null;
+              }
+            }
+            // Client-side filter on sourceOptionId since v2 doesn't expose it.
+            if (args.sourceOptionId !== undefined && Number(sourceRaw) !== args.sourceOptionId) return null;
+            // Client-side title substring search.
+            if (args.search && !d.title.toLowerCase().includes(args.search.toLowerCase())) return null;
+            return {
+              id: d.id,
+              title: d.title,
+              status: d.status,
+              valueUsd: round2(Number(d.value) || 0),
+              pipelineId: d.pipeline_id,
+              stageId: d.stage_id,
+              ownerId: owner.id,
+              ownerName: owner.name,
+              orgId: org?.value ?? null,
+              orgName: org?.name ?? null,
+              personId: person?.value ?? null,
+              personName: person?.name ?? null,
+              addTime: d.add_time ?? null,
+              wonTime: d.won_time ?? null,
+              lostTime: d.lost_time ?? null,
+              lostReason: d.lost_reason ?? null,
+              sourceLabel,
+              specifierOrgName,
+              purchaserOrgName,
+              expectedCloseDate: d.expected_close_date ?? null,
+            };
+          }).filter((r): r is NonNullable<typeof r> => r !== null);
+          rows = rows.slice(0, args.limit);
+          return {
+            ok: true,
+            data: {
+              dateRange: range,
+              count: rows.length,
+              truncated: dealsRes.hasMore,
+              note: dealsRes.hasMore ? 'Underlying scan hit the 10-page cap; tighten filters to ensure totals are exhaustive.' : undefined,
+              rows,
+            },
+          };
+        } catch (err) { return pipedriveErrorResult(err); }
+      },
+    };
+  }
+
+  private toolDealDetail(): ToolDef {
+    const Args = z.object({ dealId: z.number().int().positive() });
+    type A = z.infer<typeof Args>;
+    return {
+      name: 'pipedrive.deal_detail',
+      description: [
+        'Single deal with all fields, custom fields resolved to human names + linked person + org + last activity.',
+        'Output extends list_deals row with: personDetail{name, emails, phones}, orgDetail{name, address, web}, lastActivity{type, subject, dueDate, done}, products[{name, qty, priceUsd}], notesCount, activitiesCount, doneActivitiesCount, customFields{...}.',
+      ].join(' '),
+      schema: Args as z.ZodType<A>,
+      jsonSchema: zodToJsonSchema(Args),
+      execute: async (rawArgs) => {
+        const args = Args.parse(rawArgs);
+        try {
+          const deal = await this.client.getDeal(args.dealId);
+          const orgIdNum = typeof deal.org_id === 'object' && deal.org_id !== null
+            ? deal.org_id.value
+            : (deal.org_id as number | null);
+          const [orgDetail, activitiesRes, customFields] = await Promise.all([
+            orgIdNum ? this.client.getOrganization(orgIdNum).catch(() => null) : Promise.resolve(null),
+            this.client.listActivities({})
+              .then((res) => ({ items: res.items.filter((a) => a.deal_id === args.dealId), hasMore: res.hasMore }))
+              .catch(() => ({ items: [], hasMore: false })),
+            this.resolveCustomFieldValues(deal),
+          ]);
+          const activities = activitiesRes.items;
+          const lastActivity = activities.length > 0 ? activities[activities.length - 1] : null;
+          const owner = typeof deal.owner_id === 'object' && deal.owner_id !== null
+            ? deal.owner_id
+            : { id: deal.owner_id as number, name: null as string | null };
+          const person = typeof deal.person_id === 'object' && deal.person_id !== null ? deal.person_id : null;
+          const org = typeof deal.org_id === 'object' && deal.org_id !== null ? deal.org_id : null;
+          return {
+            ok: true,
+            data: {
+              id: deal.id,
+              title: deal.title,
+              status: deal.status,
+              valueUsd: round2(Number(deal.value) || 0),
+              pipelineId: deal.pipeline_id,
+              stageId: deal.stage_id,
+              ownerId: owner.id,
+              ownerName: owner.name,
+              orgId: org?.value ?? orgIdNum,
+              orgName: org?.name ?? orgDetail?.name ?? null,
+              personId: person?.value ?? null,
+              personName: person?.name ?? null,
+              addTime: deal.add_time ?? null,
+              wonTime: deal.won_time ?? null,
+              lostTime: deal.lost_time ?? null,
+              lostReason: deal.lost_reason ?? null,
+              expectedCloseDate: deal.expected_close_date ?? null,
+              orgDetail: orgDetail ? { id: orgDetail.id, name: orgDetail.name, address: orgDetail.address ?? null, web: orgDetail.web ?? null } : null,
+              lastActivity: lastActivity ? { type: lastActivity.type, subject: lastActivity.subject, dueDate: lastActivity.due_date ?? null, done: lastActivity.done === 1 } : null,
+              activitiesCount: activities.length,
+              doneActivitiesCount: activities.filter((a) => a.done === 1).length,
+              customFields,
             },
           };
         } catch (err) { return pipedriveErrorResult(err); }

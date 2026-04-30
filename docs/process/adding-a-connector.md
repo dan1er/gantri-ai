@@ -173,21 +173,27 @@ If any of these fail, fix before merging. The invariant test catches the most co
 
 **This step is non-negotiable for any new connector.** Unit tests only verify the code's *shape* (path string, header name, body structure) — they don't catch wrong API paths, wrong auth schemes, wrong field names, deprecated endpoints, or "this URL returns the marketing HTML page". Two consecutive bugs in the Pipedrive connector (`Authorization: api_token=X` instead of `x-api-token: X`, and `/v2/X` instead of `/api/v2/X`) shipped to production because this step was skipped.
 
-For every new connector, write `scripts/smoke-<connector>.sh` that:
-1. Reads the API token from `${<CONNECTOR>_API_TOKEN}` env var.
-2. Makes one **real GET** request per endpoint the bot uses (every method on the client class).
-3. Asserts each returns HTTP 200 (or whatever the success status for that endpoint is).
-4. Exits non-zero if any fails.
+**Two scripts, both required**:
 
-Run it before merge:
+#### H2a. `scripts/smoke-<connector>.sh` — endpoint reachability
+
+Hits each Pipedrive/Klaviyo/etc REST endpoint the client uses with `curl` and asserts HTTP 200. Catches: wrong auth scheme, wrong path prefix, deprecated endpoints, missing tenant access. Doesn't catch: invalid query-param values (those return 200 if endpoint ignores them, or 400 only when triggered by specific args).
+
+#### H2b. `scripts/smoke-<connector>-tools.mjs` — end-to-end tool invocation
+
+Imports the COMPILED `dist/` connector + client, instantiates with the real API token, and calls **every tool's `execute(...)` with realistic args**. Reports per-tool pass/fail. Catches: invalid default values for query params (e.g., `status=all_not_deleted` rejected by API), wrong response-shape parsing (e.g., `data.data` vs `data`), wrong field assumptions (e.g., assuming `org_id` is an embedded object when it's a number), wrong default filters (e.g., `user_id=<self>` filtering out everyone else's data). The Pipedrive connector shipped with **seven** bugs that only one of these tool-level invocations would have caught — the unit tests and the curl-level smoke both passed.
+
+Run BOTH before merge:
 
 ```bash
 PIPEDRIVE_API_TOKEN=$(supabase ... read_vault_secret 'PIPEDRIVE_API_TOKEN') ./scripts/smoke-<connector>.sh
+SUPABASE_URL=https://x.supabase.co SUPABASE_SERVICE_ROLE_KEY=x ANTHROPIC_API_KEY=sk-ant-x SLACK_BOT_TOKEN=xoxb-x SLACK_SIGNING_SECRET=x \
+  PIPEDRIVE_API_TOKEN=<token> node scripts/smoke-<connector>-tools.mjs
 ```
 
-The script lives in `scripts/`, doesn't need TS compilation, and can be re-run any time the connector is touched. See `scripts/smoke-pipedrive.sh` as the canonical reference.
+(The stub env vars are because the bot's logger module loads env validation; they don't need real values.)
 
-**The unit tests + this smoke script together** are the contract. Don't merge without both green.
+**The unit tests + endpoint smoke + tool-level smoke together** are the contract. Don't merge without all three green. See `scripts/smoke-pipedrive.sh` and `scripts/smoke-pipedrive-tools.mjs` as canonical references.
 
 ---
 

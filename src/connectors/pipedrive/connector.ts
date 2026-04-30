@@ -534,17 +534,22 @@ export class PipedriveConnector implements Connector {
             openCount: number; openValueUsd: number;
             lastDealTime: string | null;
           }>();
+          // First pass: group by org_id. v2 deals returns org_id as a NUMBER,
+          // not the v1-style {value, name} object — so the name is resolved
+          // separately below via listOrganizations({ids}).
           for (const d of dealsRes.items) {
-            const org = typeof d.org_id === 'object' && d.org_id !== null ? d.org_id : null;
-            if (!org) continue; // skip orphan deals — they can't be grouped
+            const orgId = typeof d.org_id === 'object' && d.org_id !== null
+              ? (d.org_id as { value?: number; id?: number }).value ?? (d.org_id as { id?: number }).id ?? null
+              : (typeof d.org_id === 'number' ? d.org_id : null);
+            if (orgId === null) continue; // skip orphan deals
             const ts = d.won_time ?? d.add_time ?? null;
             // window check (client-side, since v2 deals lacks server-side range filter)
             if (ts) {
               const ymd = ts.slice(0, 10);
               if (ymd < startDate || ymd > endDate) continue;
             }
-            const e = byOrg.get(org.value) ?? {
-              orgId: org.value, orgName: org.name,
+            const e = byOrg.get(orgId) ?? {
+              orgId, orgName: null as string | null,
               dealCount: 0, totalValueUsd: 0,
               wonCount: 0, wonValueUsd: 0,
               openCount: 0, openValueUsd: 0,
@@ -555,7 +560,21 @@ export class PipedriveConnector implements Connector {
             if (d.status === 'won') { e.wonCount += 1; e.wonValueUsd += Number(d.value) || 0; }
             if (d.status === 'open') { e.openCount += 1; e.openValueUsd += Number(d.value) || 0; }
             if (ts && (!e.lastDealTime || ts > e.lastDealTime)) e.lastDealTime = ts;
-            byOrg.set(org.value, e);
+            byOrg.set(orgId, e);
+          }
+          // Second pass: top-N by metric, then resolve names for those.
+          const sortKeyTemp = args.metric === 'won_value' ? 'wonValueUsd' : args.metric === 'won_count' ? 'wonCount' : 'openValueUsd';
+          const topIds = [...byOrg.values()]
+            .sort((a, b) => (b[sortKeyTemp] as number) - (a[sortKeyTemp] as number))
+            .slice(0, args.topN)
+            .map((e) => e.orgId);
+          if (topIds.length > 0) {
+            const orgs = await this.client.listOrganizations({ ids: topIds });
+            const nameById = new Map(orgs.items.map((o) => [o.id, o.name] as const));
+            for (const id of topIds) {
+              const e = byOrg.get(id);
+              if (e) e.orgName = nameById.get(id) ?? null;
+            }
           }
           const sortKey = args.metric === 'won_value' ? 'wonValueUsd' : args.metric === 'won_count' ? 'wonCount' : 'openValueUsd';
           const rows = [...byOrg.values()]

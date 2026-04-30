@@ -328,11 +328,17 @@ describe('pipedrive.deal_detail', () => {
 
 describe('pipedrive.organization_performance', () => {
   it('groups won/open deals by org_id with names + lastDealTime', async () => {
+    // v2 deals returns org_id as a NUMBER (not v1 {value, name} object). The
+    // connector groups by id and resolves names via listOrganizations({ids}).
     const stub = makeStub({
       listDeals: vi.fn().mockResolvedValue({ items: [
-        { id: 1, title: 'A', value: 1000, currency: 'USD', status: 'won', stage_id: 11, pipeline_id: 3, owner_id: 7, person_id: null, org_id: { value: 5, name: 'KBM-Hogue' }, won_time: '2026-04-10', add_time: '2026-04-01' },
-        { id: 2, title: 'B', value: 2000, currency: 'USD', status: 'won', stage_id: 11, pipeline_id: 3, owner_id: 7, person_id: null, org_id: { value: 5, name: 'KBM-Hogue' }, won_time: '2026-04-15', add_time: '2026-04-02' },
-        { id: 3, title: 'C', value: 5000, currency: 'USD', status: 'open', stage_id: 12, pipeline_id: 3, owner_id: 7, person_id: null, org_id: { value: 6, name: 'Bilotti' }, add_time: '2026-04-05' },
+        { id: 1, title: 'A', value: 1000, currency: 'USD', status: 'won', stage_id: 11, pipeline_id: 3, owner_id: 7, person_id: null, org_id: 5, won_time: '2026-04-10', add_time: '2026-04-01' },
+        { id: 2, title: 'B', value: 2000, currency: 'USD', status: 'won', stage_id: 11, pipeline_id: 3, owner_id: 7, person_id: null, org_id: 5, won_time: '2026-04-15', add_time: '2026-04-02' },
+        { id: 3, title: 'C', value: 5000, currency: 'USD', status: 'open', stage_id: 12, pipeline_id: 3, owner_id: 7, person_id: null, org_id: 6, add_time: '2026-04-05' },
+      ], hasMore: false }),
+      listOrganizations: vi.fn().mockResolvedValue({ items: [
+        { id: 5, name: 'KBM-Hogue' },
+        { id: 6, name: 'Bilotti' },
       ], hasMore: false }),
     });
     const conn = new PipedriveConnector({ client: stub });

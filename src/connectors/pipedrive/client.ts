@@ -448,7 +448,10 @@ export class PipedriveApiClient {
     const query: Record<string, string | undefined> = {
       start_date: opts.startDate,
       end_date: opts.endDate,
-      user_id: opts.userId !== undefined ? String(opts.userId) : undefined,
+      // Pipedrive's /v1/activities defaults to user_id=<self> (the API token's
+      // owner). Pass user_id=0 to get all users' activities. Caller can override
+      // with a specific user.
+      user_id: opts.userId !== undefined ? String(opts.userId) : '0',
       type: opts.type,
       done: opts.done !== undefined ? String(opts.done) : undefined,
     };

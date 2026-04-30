@@ -261,7 +261,8 @@ export class PipedriveConnector implements Connector {
             this.client.listStages(),
             this.client.listPipelines(),
             this.client.listDeals({
-              status: args.status === 'all' ? 'all_not_deleted' : args.status,
+              // v2 doesn't support 'all_not_deleted' — omit status for "all".
+              status: args.status === 'all' ? undefined : args.status,
               pipelineId: args.pipelineId,
               ownerId: args.ownerId,
               limit: 500,
@@ -312,7 +313,8 @@ export class PipedriveConnector implements Connector {
     const Args = z.object({
       dateRange: DateRangeArg.optional(),
       dateField: z.enum(['add_time', 'won_time', 'close_time', 'update_time']).default('update_time'),
-      status: z.enum(['open', 'won', 'lost', 'deleted', 'all_not_deleted']).default('all_not_deleted'),
+      // v2 deals only accepts open/won/lost. To query "all", omit the param (default).
+      status: z.enum(['open', 'won', 'lost']).optional(),
       pipelineId: z.number().int().optional(),
       stageId: z.number().int().optional(),
       ownerId: z.number().int().optional(),
@@ -320,7 +322,9 @@ export class PipedriveConnector implements Connector {
       personId: z.number().int().optional(),
       sourceOptionId: z.number().int().optional(),
       search: z.string().optional().describe('Substring filter on deal title — applied client-side after fetch.'),
-      sortBy: z.enum(['value', 'add_time', 'update_time', 'won_time']).default('value'),
+      // v2 sort_by is restricted to id/add_time/update_time. To sort by value
+      // or won_time, request 'update_time' here and we resort client-side.
+      sortBy: z.enum(['value', 'add_time', 'update_time', 'won_time']).default('update_time'),
       sortOrder: z.enum(['asc', 'desc']).default('desc'),
       limit: z.number().int().min(1).max(500).default(50),
     });
@@ -338,6 +342,11 @@ export class PipedriveConnector implements Connector {
         const args = Args.parse(rawArgs);
         try {
           const range = args.dateRange ? normalizeDateRange(args.dateRange) : null;
+          // v2 sort_by only accepts id/add_time/update_time. Map any caller-
+          // requested 'value' or 'won_time' to 'update_time' for the API call,
+          // then re-sort client-side after fetch.
+          const v2SortBy: 'id' | 'add_time' | 'update_time' =
+            args.sortBy === 'add_time' || args.sortBy === 'update_time' ? args.sortBy : 'update_time';
           const [dealsRes, fields] = await Promise.all([
             this.client.listDeals({
               status: args.status,
@@ -348,7 +357,7 @@ export class PipedriveConnector implements Connector {
               personId: args.personId,
               startDate: range?.startDate,
               endDate: range?.endDate,
-              sortBy: args.sortBy,
+              sortBy: v2SortBy,
               sortOrder: args.sortOrder,
               limit: args.limit,
             }),
@@ -512,8 +521,9 @@ export class PipedriveConnector implements Connector {
         const args = rawArgs as A;
         try {
           const { startDate, endDate } = normalizeDateRange(args.dateRange);
+          // v2 deals doesn't support 'all_not_deleted' — omit `status` to get all
+          // open + won + lost (deleted are excluded by default).
           const dealsRes = await this.client.listDeals({
-            status: 'all_not_deleted',
             startDate, endDate,
             limit: 500,
           });

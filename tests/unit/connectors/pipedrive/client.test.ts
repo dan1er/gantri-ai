@@ -115,32 +115,22 @@ describe('PipedriveApiClient directory + 10-min cache', () => {
 
 describe('PipedriveApiClient aggregations', () => {
   it('dealsTimeline parses totals.{count, values, weighted_values, open_count, open_values, won_count, won_values}', async () => {
+    // Real /v1/deals/timeline shape (verified live 2026-04-29): periods are
+    // DIRECTLY in `data` as an array, NOT nested under `data.data`.
     const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       success: true,
-      data: {
-        period_start: '2026-01-01',
-        period_count: 3,
-        period_units: 'month',
-        totals: {
-          count: 30,
-          values: { USD: 150000 },
-          weighted_values: { USD: 75000 },
-          open_count: 10, open_values: { USD: 50000 },
-          won_count: 18, won_values: { USD: 90000 },
-        },
-        data: [
-          { period_start: '2026-01-01', period_end: '2026-01-31', totals: {
-            count: 12, values: { USD: 60000 }, weighted_values: { USD: 30000 },
-            open_count: 4, open_values: { USD: 20000 },
-            won_count: 7, won_values: { USD: 35000 },
-          }, deals: [] },
-          { period_start: '2026-02-01', period_end: '2026-02-28', totals: {
-            count: 9, values: { USD: 45000 }, weighted_values: { USD: 22000 },
-            open_count: 3, open_values: { USD: 15000 },
-            won_count: 5, won_values: { USD: 25000 },
-          }, deals: [] },
-        ],
-      },
+      data: [
+        { period_start: '2026-01-01', period_end: '2026-01-31', totals: {
+          count: 12, values: { USD: 60000 }, weighted_values: { USD: 30000 },
+          open_count: 4, open_values: { USD: 20000 },
+          won_count: 7, won_values: { USD: 35000 },
+        }, deals: [] },
+        { period_start: '2026-02-01', period_end: '2026-02-28', totals: {
+          count: 9, values: { USD: 45000 }, weighted_values: { USD: 22000 },
+          open_count: 3, open_values: { USD: 15000 },
+          won_count: 5, won_values: { USD: 25000 },
+        }, deals: [] },
+      ],
     }), { status: 200 }));
     const client = new PipedriveApiClient({ apiToken: 'tok', fetchImpl });
     const out = await client.dealsTimeline({

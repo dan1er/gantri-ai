@@ -114,7 +114,8 @@ export interface Activity {
 }
 
 export interface ListDealsOpts {
-  status?: 'open' | 'won' | 'lost' | 'deleted' | 'all_not_deleted';
+  /** v2 deals endpoint only accepts these statuses. Omit for "all non-deleted". */
+  status?: 'open' | 'won' | 'lost';
   pipelineId?: number;
   stageId?: number;
   ownerId?: number;
@@ -123,7 +124,9 @@ export interface ListDealsOpts {
   /** Reserved for caller-side window filters; v2 has no clean range filter today. */
   startDate?: string;
   endDate?: string;
-  sortBy?: 'value' | 'add_time' | 'update_time' | 'won_time';
+  /** v2 sort_by is restricted to these three. To sort by `value` or `won_time`,
+   *  fetch with default sort and re-sort client-side. */
+  sortBy?: 'id' | 'add_time' | 'update_time';
   sortOrder?: 'asc' | 'desc';
   /** Reserved — paginateV2 always uses limit=500. Caller can slice the result. */
   limit?: number;
@@ -350,13 +353,16 @@ export class PipedriveApiClient {
       stage_id: opts.stageId !== undefined ? String(opts.stageId) : undefined,
       totals_convert_currency: 'USD',
     };
-    // Note: /v1/deals/timeline returns `data: { totals, data: [periods] }`,
-    // NOT the usual `data: [...]` envelope, so we type the inner shape directly.
-    const resp = await this.request<{ success: boolean; data: { data?: RawTimelinePeriod[] } }>(
+    // /v1/deals/timeline returns `{ success, data: [periods] }` — the periods
+    // live DIRECTLY in `data`, not in a nested `data.data`. (Earlier docs in
+    // this file claimed otherwise; verified empirically against live tenant
+    // 2026-04-29.) Each period has shape `{period_start, period_end, deals,
+    // totals, totals_converted}`.
+    const resp = await this.request<{ success: boolean; data: RawTimelinePeriod[] }>(
       '/v1/deals/timeline',
       query,
     );
-    const periods = resp.data?.data ?? [];
+    const periods = resp.data ?? [];
     return periods.map((p) => ({
       period_start: p.period_start,
       period_end: p.period_end,
@@ -375,6 +381,7 @@ export class PipedriveApiClient {
    * for "deals open right now" / "total won lifetime" style queries.
    */
   async dealsSummary(opts: { status?: 'open' | 'won' | 'lost' | 'all_not_deleted'; pipelineId?: number; userId?: number }): Promise<DealsSummary> {
+    // /v1/deals/summary DOES accept all_not_deleted (v1 endpoint, different rules from v2).
     const query: Record<string, string | undefined> = {
       status: opts.status,
       pipeline_id: opts.pipelineId !== undefined ? String(opts.pipelineId) : undefined,

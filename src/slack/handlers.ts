@@ -76,10 +76,13 @@ export interface HandlerDeps {
  */
 const SOURCE_LABELS: Record<string, string> = {
   northbeam: 'Northbeam',
-  gantri: 'Porter',
+  // User-facing label: Porter is internal; surface as Grafana so non-technical
+  // readers see a recognizable name. Order-data tools (`gantri.*`, `late_orders.*`)
+  // also pull from / reconcile against Grafana panels.
+  gantri: 'Grafana',
   grafana: 'Grafana',
   reports: 'Reports',
-  late_orders: 'Porter',
+  late_orders: 'Grafana',
   feedback: 'Feedback',
 };
 

@@ -12,7 +12,7 @@
 export const INTRO_MESSAGE = [
   'Hi team 👋',
   '',
-  "I'm *gantri-ai*, the internal analytics assistant for Gantri. I live in Slack and answer questions about the business by pulling live data from Northbeam, Google Analytics 4, Klaviyo, Impact, Pipedrive, Google Search Console, our order system, and the Grafana dashboards — then I come back with the answer, with sources, in seconds.",
+  "I'm *Gantri Assistant*, the internal analytics assistant for Gantri. I live in Slack and answer questions about the business by pulling live data from Northbeam, Google Analytics 4, Klaviyo, Impact, Pipedrive, Google Search Console, our order system, and the Grafana dashboards — then I come back with the answer, with sources, in seconds.",
   '',
   'Think of me as the analyst you can ping at any hour without bothering anyone. No need to know SQL, no need to know which dashboard has what — just describe what you want.',
   '',
@@ -146,5 +146,5 @@ export const INTRO_MESSAGE = [
   '',
   'Just DM me. Try it now: _"how much did we spend on ads this week?"_ 🚀',
   '',
-  '— gantri-ai',
+  '— Gantri Assistant',
 ].join('\n');

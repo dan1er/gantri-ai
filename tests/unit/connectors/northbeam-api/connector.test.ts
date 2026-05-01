@@ -66,8 +66,17 @@ describe('buildExportPayload', () => {
       aggregateData: true,
     });
     expect(p.period_type).toBe('FIXED');
-    const now = new Date();
-    const expectedStart = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-01T00:00:00.000Z`;
+    // Implementation buckets in Pacific Time, so the test must too.
+    // (UTC-based math fails on the last day of the PT month, when UTC has
+    // already rolled to the next month's date.)
+    const ptParts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Los_Angeles',
+      year: 'numeric',
+      month: '2-digit',
+    }).formatToParts(new Date());
+    const ptYear = ptParts.find((p) => p.type === 'year')!.value;
+    const ptMonth = ptParts.find((p) => p.type === 'month')!.value;
+    const expectedStart = `${ptYear}-${ptMonth}-01T00:00:00.000Z`;
     expect(p.period_options?.period_starting_at).toBe(expectedStart);
   });
 

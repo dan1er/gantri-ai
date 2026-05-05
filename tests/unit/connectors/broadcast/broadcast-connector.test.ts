@@ -26,6 +26,13 @@ function makeUsersRepo(users: User[], callerRole: string | null = 'admin') {
       created: !users.some((u) => u.slackUserId === input.slackUserId),
       user: { slackUserId: input.slackUserId, email: input.email ?? null, role: input.role },
     })),
+    updateRole: vi.fn(async (uid: string, role: string) => {
+      const found = users.find((u) => u.slackUserId === uid);
+      if (!found) return null;
+      const previousRole = found.role;
+      found.role = role;
+      return { previousRole };
+    }),
   };
 }
 
@@ -276,5 +283,83 @@ describe('BroadcastConnector → bot.add_user', () => {
     expect(usersRepo.upsertUser).toHaveBeenCalledWith(
       expect.objectContaining({ role: 'admin' }),
     );
+  });
+
+  it('admin caller can pass role=marketing through to upsertUser', async () => {
+    const slackClient = makeSlackClient();
+    slackClient.users.lookupByEmail.mockResolvedValue({ ok: true, user: { id: 'U_MKT' } });
+
+    const { conn, usersRepo } = makeDeps({ users: [], callerRole: 'admin', slackClient });
+    const tool = getTool(conn, 'bot.add_user');
+    // The Zod schema must accept 'marketing' for this parse to succeed.
+    const args = tool.schema.parse({ email: 'lana@gantri.com', role: 'marketing', sendIntro: false });
+    const res: any = await tool.execute(args);
+
+    expect(res.error).toBeUndefined();
+    expect(usersRepo.upsertUser).toHaveBeenCalledWith(
+      expect.objectContaining({ role: 'marketing' }),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// update_user_role tests
+// ---------------------------------------------------------------------------
+
+describe('BroadcastConnector → bot.update_user_role', () => {
+  it('admin can promote user → marketing', async () => {
+    const targetUsers: User[] = [
+      { slackUserId: 'U_target', email: 'lana@gantri.com', role: 'user' },
+    ];
+    const { conn, usersRepo } = makeDeps({ users: targetUsers, callerRole: 'admin', actorUid: 'U_admin' });
+    const tool = getTool(conn, 'bot.update_user_role');
+    const args = tool.schema.parse({ slack_user_id: 'U_target', role: 'marketing' });
+    const res: any = await tool.execute(args);
+
+    expect(res.ok).toBe(true);
+    expect(res.previous_role).toBe('user');
+    expect(res.new_role).toBe('marketing');
+    expect(usersRepo.updateRole).toHaveBeenCalledWith('U_target', 'marketing');
+  });
+
+  it('FORBIDDEN for non-admin caller', async () => {
+    const { conn, usersRepo } = makeDeps({ users: [], callerRole: 'marketing', actorUid: 'U_caller' });
+    const tool = getTool(conn, 'bot.update_user_role');
+    const args = tool.schema.parse({ slack_user_id: 'U_target', role: 'admin' });
+    const res: any = await tool.execute(args);
+
+    expect(res.error.code).toBe('FORBIDDEN');
+    expect(usersRepo.updateRole).not.toHaveBeenCalled();
+  });
+
+  it('USER_NOT_FOUND when target does not exist', async () => {
+    // No users in repo → updateRole mock returns null.
+    const { conn } = makeDeps({ users: [], callerRole: 'admin', actorUid: 'U_admin' });
+    const tool = getTool(conn, 'bot.update_user_role');
+    const args = tool.schema.parse({ slack_user_id: 'U_missing', role: 'marketing' });
+    const res: any = await tool.execute(args);
+
+    expect(res.error.code).toBe('USER_NOT_FOUND');
+  });
+
+  it('NO_ACTOR when no actor in context', async () => {
+    const usersRepo = makeUsersRepo([], 'admin');
+    const conn = new BroadcastConnector({
+      slackClient: makeSlackClient() as any,
+      usersRepo: usersRepo as any,
+      getActor: () => undefined,
+    });
+    const tool = getTool(conn, 'bot.update_user_role');
+    const args = tool.schema.parse({ slack_user_id: 'U_target', role: 'marketing' });
+    const res: any = await tool.execute(args);
+
+    expect(res.error.code).toBe('NO_ACTOR');
+    expect(usersRepo.updateRole).not.toHaveBeenCalled();
+  });
+
+  it('rejects unknown role values at the schema layer', () => {
+    const { conn } = makeDeps({ users: [], callerRole: 'admin' });
+    const tool = getTool(conn, 'bot.update_user_role');
+    expect(() => tool.schema.parse({ slack_user_id: 'U_target', role: 'wizard' })).toThrow();
   });
 });

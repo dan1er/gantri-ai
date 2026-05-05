@@ -35,6 +35,59 @@ describe('AuthorizedUsersRepo', () => {
     const repo = new AuthorizedUsersRepo(client);
     expect(await repo.isAuthorized('U_unknown')).toBe(false);
   });
+
+  describe('updateRole', () => {
+    it('returns null when target user does not exist', async () => {
+      const update = vi.fn();
+      const client = clientWithTable({
+        authorized_users: {
+          select: () => ({
+            eq: () => ({ maybeSingle: () => Promise.resolve({ data: null, error: null }) }),
+          }),
+          update,
+        },
+      });
+      const repo = new AuthorizedUsersRepo(client);
+      const r = await repo.updateRole('U_MISSING', 'marketing');
+      expect(r).toBeNull();
+      // No update should be issued when the user doesn't exist.
+      expect(update).not.toHaveBeenCalled();
+    });
+
+    it('returns previous role and updates row when user exists', async () => {
+      const update = vi.fn().mockReturnValue({
+        eq: () => Promise.resolve({ data: null, error: null }),
+      });
+      const client = clientWithTable({
+        authorized_users: {
+          select: () => ({
+            eq: () => ({ maybeSingle: () => Promise.resolve({ data: { role: 'user' }, error: null }) }),
+          }),
+          update,
+        },
+      });
+      const repo = new AuthorizedUsersRepo(client);
+      const r = await repo.updateRole('U1', 'marketing');
+      expect(r).toEqual({ previousRole: 'user' });
+      expect(update).toHaveBeenCalledWith({ role: 'marketing' });
+    });
+
+    it('throws when update returns a Supabase error', async () => {
+      const update = vi.fn().mockReturnValue({
+        eq: () => Promise.resolve({ data: null, error: { message: 'permission denied' } }),
+      });
+      const client = clientWithTable({
+        authorized_users: {
+          select: () => ({
+            eq: () => ({ maybeSingle: () => Promise.resolve({ data: { role: 'user' }, error: null }) }),
+          }),
+          update,
+        },
+      });
+      const repo = new AuthorizedUsersRepo(client);
+      await expect(repo.updateRole('U1', 'admin')).rejects.toThrow(/permission denied/);
+    });
+  });
 });
 
 describe('ConversationsRepo', () => {

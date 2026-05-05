@@ -49,6 +49,31 @@ export class AuthorizedUsersRepo {
    * `created` true when this call inserted a new row, false when the row was
    * already present (and was updated with any changed fields).
    */
+  /**
+   * Update an existing user's role in-place. Returns `{ previousRole }` on
+   * success, or `null` if no row matches `slackUserId` (caller should fall back
+   * to `bot.add_user` to enable an unknown user). Distinct from `upsertUser` so
+   * callers who only want to change a role don't have to re-supply email etc.
+   */
+  async updateRole(
+    slackUserId: string,
+    role: 'admin' | 'marketing' | 'user',
+  ): Promise<{ previousRole: string | null } | null> {
+    const prev = await this.client
+      .from('authorized_users')
+      .select('role')
+      .eq('slack_user_id', slackUserId)
+      .maybeSingle();
+    if (prev.error) throw new Error(`authorized_users read failed: ${prev.error.message}`);
+    if (!prev.data) return null;
+    const { error } = await this.client
+      .from('authorized_users')
+      .update({ role })
+      .eq('slack_user_id', slackUserId);
+    if (error) throw new Error(`authorized_users update failed: ${error.message}`);
+    return { previousRole: ((prev.data as { role?: string | null }).role) ?? null };
+  }
+
   async upsertUser(input: {
     slackUserId: string;
     slackWorkspaceId?: string | null;

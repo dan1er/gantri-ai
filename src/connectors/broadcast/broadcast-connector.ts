@@ -18,10 +18,16 @@ type BroadcastArgs = z.infer<typeof BroadcastArgs>;
 const AddUserArgs = z.object({
   email: z.string().email().optional().describe('Email of the person to enable. The connector resolves their Slack user ID via users.lookupByEmail.'),
   slackUserId: z.string().optional().describe('Direct Slack user ID (alternative to email).'),
-  role: z.enum(['user', 'admin']).default('user').describe('"user" (default) or "admin". Admins can call broadcast and add_user themselves.'),
+  role: z.enum(['user', 'admin', 'marketing']).default('user').describe('"user" (default), "admin" (broadcast + add_user + update_user_role), or "marketing" (Klaviyo write tools — import_profiles, delete_profiles).'),
   sendIntro: z.boolean().default(true).describe('Whether to DM the new user the standard intro message after enabling. Default true.'),
 }).refine((v) => Boolean(v.email || v.slackUserId), { message: 'Provide email or slackUserId.' });
 type AddUserArgs = z.infer<typeof AddUserArgs>;
+
+const UpdateUserRoleArgs = z.object({
+  slack_user_id: z.string().describe('Slack user id of the existing authorized user (e.g. "U086PLKBEBT").'),
+  role: z.enum(['admin', 'marketing', 'user']).describe('New role to set. "admin" = broadcast + add_user + update_user_role. "marketing" = Klaviyo write tools. "user" = read-only.'),
+});
+type UpdateUserRoleArgs = z.infer<typeof UpdateUserRoleArgs>;
 
 export interface BroadcastConnectorDeps {
   slackClient: WebClient;
@@ -66,16 +72,56 @@ export class BroadcastConnector implements Connector {
         'Enable a new user on the bot — inserts them into the allowlist (`authorized_users`) and (by default) DMs them the standard intro message so they can start using the bot immediately.',
         'ADMIN-ONLY (gated by role="admin").',
         'Identify the user by EITHER `email` (preferred — I\'ll resolve the Slack ID via Slack\'s users.lookupByEmail) OR `slackUserId` (e.g. `U086PLKBEBT`).',
-        'Optional `role` (default "user", set to "admin" to also grant broadcast/add-user privileges).',
+        'Optional `role` (default "user"). "admin" grants broadcast/add_user/update_user_role; "marketing" grants Klaviyo write tools (import_profiles, delete_profiles).',
         'Optional `sendIntro` (default true). Set to false if the user already knows the bot and just needs allowlist access.',
         'Idempotent — calling on an already-enabled user updates their email/role and (by default) does NOT re-DM the intro. Returns `{created: true|false, alreadyEnabled, user, introSent}`.',
-        'Use when the operator says: "give X access to the bot", "add lana@gantri.com to the bot", "enable Ian", "habilita a Pedro", "add as admin".',
+        'Use when the operator says: "give X access to the bot", "add lana@gantri.com to the bot", "enable Ian", "habilita a Pedro", "add as admin", "agrega a Lana como marketing".',
       ].join(' '),
       schema: AddUserArgs as z.ZodType<AddUserArgs>,
       jsonSchema: zodToJsonSchema(AddUserArgs),
       execute: (args) => this.addUser(args),
     };
-    return [broadcast, addUser];
+    const updateRole: ToolDef<UpdateUserRoleArgs> = {
+      name: 'bot.update_user_role',
+      description: [
+        'Change an existing authorized user\'s role.',
+        'ADMIN-ONLY (gated by role="admin" on the caller).',
+        'Roles: "admin" (full powers — broadcast, add_user, update_user_role), "marketing" (Klaviyo write tools), "user" (read-only).',
+        'Use when the operator says: "make Lana marketing", "give Pedro admin access", "demote X to user", "haz a Lana marketing".',
+        'Returns `{ok:true, previous_role, new_role}` on success, or `{error:{code,message}}` (codes: NO_ACTOR, FORBIDDEN, USER_NOT_FOUND).',
+        'If the target is not yet authorized, this returns USER_NOT_FOUND — call `bot.add_user` first.',
+      ].join(' '),
+      schema: UpdateUserRoleArgs as z.ZodType<UpdateUserRoleArgs>,
+      jsonSchema: zodToJsonSchema(UpdateUserRoleArgs),
+      execute: (args) => this.updateRole(args),
+    };
+    return [broadcast, addUser, updateRole];
+  }
+
+  private async updateRole(args: UpdateUserRoleArgs) {
+    const actor = this.deps.getActor();
+    if (!actor) {
+      return { error: { code: 'NO_ACTOR', message: 'bot.update_user_role requires an active actor.' } };
+    }
+    const callerRole = await this.deps.usersRepo.getRole(actor.slackUserId);
+    if (callerRole !== 'admin') {
+      logger.warn({ caller: actor.slackUserId, role: callerRole }, 'update_user_role denied: non-admin');
+      return { error: { code: 'FORBIDDEN', message: 'Only role="admin" can change roles.' } };
+    }
+    const result = await this.deps.usersRepo.updateRole(args.slack_user_id, args.role);
+    if (!result) {
+      return {
+        error: {
+          code: 'USER_NOT_FOUND',
+          message: `No authorized user with slack id ${args.slack_user_id}. Run bot.add_user first to enable them.`,
+        },
+      };
+    }
+    logger.info(
+      { caller: actor.slackUserId, target: args.slack_user_id, from: result.previousRole, to: args.role },
+      'bot_role_changed',
+    );
+    return { ok: true as const, previous_role: result.previousRole ?? null, new_role: args.role };
   }
 
   private async addUser(args: AddUserArgs) {

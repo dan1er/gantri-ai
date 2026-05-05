@@ -78,4 +78,40 @@ describe('KlaviyoImportsRepo', () => {
     chain.maybeSingle.mockResolvedValue({ data: null, error: null });
     expect(await repo.getById('xyz')).toBeNull();
   });
+
+  it('rowFromDb maps every column from snake_case to camelCase', async () => {
+    chain.maybeSingle.mockResolvedValue({
+      data: {
+        id: 'u', caller_slack_id: 'U1', caller_email: 'a@b.com',
+        source: 'csv', filename: 'f.csv', storage_path: 'p/f.csv',
+        list_id: 'L1', list_name: 'L', channels: ['email', 'sms'],
+        total_submitted: 10, total_imported: 9, total_invalid_rejected: 1,
+        klaviyo_job_id: 'job', status: 'complete',
+        started_at: '2026-05-05T00:00:00Z', completed_at: '2026-05-05T00:00:30Z',
+        succeeded_count: 8, already_subscribed_count: 1, failed_count: 0,
+        error_summary: null,
+      },
+      error: null,
+    });
+    const r = await repo.getById('u');
+    expect(r).toEqual({
+      id: 'u', callerSlackId: 'U1', callerEmail: 'a@b.com',
+      source: 'csv', filename: 'f.csv', storagePath: 'p/f.csv',
+      listId: 'L1', listName: 'L', channels: ['email', 'sms'],
+      totalSubmitted: 10, totalImported: 9, totalInvalidRejected: 1,
+      klaviyoJobId: 'job', status: 'complete',
+      startedAt: '2026-05-05T00:00:00Z', completedAt: '2026-05-05T00:00:30Z',
+      succeededCount: 8, alreadySubscribedCount: 1, failedCount: 0,
+      errorSummary: null,
+    });
+  });
+
+  it('updateStatus does NOT set completed_at on non-terminal status', async () => {
+    chain.update = vi.fn().mockReturnThis();
+    chain.eq = vi.fn().mockResolvedValue({ data: null, error: null });
+    await repo.updateStatus('abc', { status: 'processing' });
+    const update = (chain.update as any).mock.calls[0][0];
+    expect(update.status).toBe('processing');
+    expect(update.completed_at).toBeUndefined();
+  });
 });

@@ -98,7 +98,8 @@ export class KlaviyoImportsRepo {
       .select('*')
       .single();
     if (error) throw new Error(`klaviyo_imports insert failed: ${error.message}`);
-    return rowFromDb(data!);
+    if (!data) throw new Error('klaviyo_imports insert returned no row (check RLS/select policy)');
+    return rowFromDb(data);
   }
 
   async updateStatus(id: string, patch: UpdateStatusInput): Promise<void> {

@@ -36,6 +36,7 @@ import { buildImpactConnector } from './connectors/impact/connector.js';
 import { KlaviyoConnector } from './connectors/klaviyo/connector.js';
 import { KlaviyoApiClient } from './connectors/klaviyo/client.js';
 import { KlaviyoImportsRepo } from './storage/repositories/klaviyo-imports.js';
+import { KlaviyoDeletionsRepo } from './storage/repositories/klaviyo-deletions.js';
 import { PendingConfirmationsRepo } from './storage/repositories/pending-confirmations.js';
 import { PipedriveConnector } from './connectors/pipedrive/connector.js';
 import { PipedriveApiClient } from './connectors/pipedrive/client.js';
@@ -165,11 +166,13 @@ async function main() {
   if (klaviyoApiKey) {
     const klaviyoClient = new KlaviyoApiClient({ apiKey: klaviyoApiKey });
     const klaviyoImportsRepo = new KlaviyoImportsRepo(supabase);
+    const klaviyoDeletionsRepo = new KlaviyoDeletionsRepo(supabase);
     const klaviyoPendingRepo = new PendingConfirmationsRepo(supabase);
     const klaviyoUsersRepo = new AuthorizedUsersRepo(supabase);
     registry.register(new KlaviyoConnector({
       client: klaviyoClient,
       importsRepo: klaviyoImportsRepo,
+      deletionsRepo: klaviyoDeletionsRepo,
       pendingRepo: klaviyoPendingRepo,
       usersRepo: klaviyoUsersRepo,
       getActor: () => getActiveActor(),

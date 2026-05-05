@@ -66,6 +66,7 @@ function makeStub(opts: {
 // None of the existing tests below touch these — they exercise read-only tools.
 const STUB_EXTRA_DEPS = {
   importsRepo: {} as any,
+  deletionsRepo: {} as any,
   pendingRepo: {} as any,
   usersRepo: {} as any,
   getActor: () => undefined,

@@ -10,6 +10,7 @@ import {
 } from './client.js';
 import { validateBatch, type RawProfile } from './validation.js';
 import type { KlaviyoImportsRepo } from '../../storage/repositories/klaviyo-imports.js';
+import type { KlaviyoDeletionsRepo } from '../../storage/repositories/klaviyo-deletions.js';
 import type { PendingConfirmationsRepo } from '../../storage/repositories/pending-confirmations.js';
 import type { AuthorizedUsersRepo } from '../../storage/repositories/authorized-users.js';
 import type { ActorContext, ThreadContext } from '../../orchestrator/orchestrator.js';
@@ -36,6 +37,7 @@ import type { ActorContext, ThreadContext } from '../../orchestrator/orchestrato
 export interface KlaviyoConnectorDeps {
   client: KlaviyoApiClient;
   importsRepo: KlaviyoImportsRepo;
+  deletionsRepo: KlaviyoDeletionsRepo;
   pendingRepo: PendingConfirmationsRepo;
   usersRepo: AuthorizedUsersRepo;
   getActor: () => ActorContext | undefined;
@@ -121,6 +123,12 @@ const ImportProfilesArgs = z.object({
   profiles: z.array(ImportProfileRow).min(1).max(1000),
 });
 type ImportProfilesArgs = z.infer<typeof ImportProfilesArgs>;
+
+const DeleteProfilesArgs = z.object({
+  emails: z.array(z.string().email()).min(1).max(50)
+    .describe('Emails of profiles to delete (≤50). Deduplicated case-insensitively before lookup.'),
+});
+type DeleteProfilesArgs = z.infer<typeof DeleteProfilesArgs>;
 
 export class KlaviyoConnector implements Connector {
   readonly name = 'klaviyo';
@@ -418,7 +426,91 @@ export class KlaviyoConnector implements Connector {
         jsonSchema: zodToJsonSchema(ImportProfilesArgs),
         execute: (args) => this.runImport(args as ImportProfilesArgs),
       } as ToolDef<ImportProfilesArgs>,
+      {
+        name: 'klaviyo.delete_profiles',
+        description: [
+          'Permanently delete Klaviyo profiles by email (Klaviyo Data Privacy API).',
+          'ADMIN or MARKETING role only — fails with FORBIDDEN otherwise.',
+          'ALWAYS asks for confirmation — never auto-executes. Returns kind:"awaiting_confirmation" with a per-email preview; caller replies "yes" to proceed or "cancel" to abort.',
+          'When 0 emails resolve to a Klaviyo profile, returns kind:"nothing_found" with no DB write.',
+          'Up to 50 emails per call. Deletion is destructive and cannot be undone (Klaviyo provides no public undelete endpoint).',
+          'Use ONLY when the user explicitly asks to "delete", "remove", "purge", "borrar", "eliminar".',
+        ].join(' '),
+        schema: DeleteProfilesArgs as z.ZodType<DeleteProfilesArgs>,
+        jsonSchema: zodToJsonSchema(DeleteProfilesArgs),
+        execute: (args) => this.runDelete(args as DeleteProfilesArgs),
+      } as ToolDef<DeleteProfilesArgs>,
     ];
+  }
+
+  private async runDelete(args: DeleteProfilesArgs) {
+    const actor = this.deps.getActor();
+    if (!actor) return { error: { code: 'NO_ACTOR', message: 'klaviyo.delete_profiles requires an active actor.' } };
+    const role = await this.deps.usersRepo.getRole(actor.slackUserId);
+    if (role !== 'admin' && role !== 'marketing') {
+      logger.warn({ caller: actor.slackUserId, role }, 'klaviyo_delete_denied');
+      return { error: { code: 'FORBIDDEN', message: 'Klaviyo delete tools require role=admin or role=marketing.' } };
+    }
+
+    const [deletesInHour, pending] = await Promise.all([
+      this.deps.deletionsRepo.countInLastHour(actor.slackUserId),
+      this.deps.pendingRepo.countOutstanding(actor.slackUserId),
+    ]);
+    if (deletesInHour >= 5) return { error: { code: 'RATE_LIMITED', message: '5 deletes in the last hour; cool down.', details: { reason: 'deletes_per_hour' } } };
+    if (pending >= 3) return { error: { code: 'PENDING_LIMIT', message: '3 pending confirmations outstanding; resolve them first.' } };
+
+    const seen = new Set<string>();
+    const dedupedOriginal: string[] = [];
+    for (const e of args.emails) {
+      const lower = e.toLowerCase();
+      if (!seen.has(lower)) { seen.add(lower); dedupedOriginal.push(e); }
+    }
+
+    const lookups = await Promise.all(
+      dedupedOriginal.map(async (email) => {
+        try {
+          const p = await this.deps.client.findProfileByEmail(email);
+          return { email, profile: p };
+        } catch (err: any) {
+          return { email, profile: null as any, lookupError: String(err?.message ?? err) };
+        }
+      }),
+    );
+
+    const found = lookups
+      .filter((l) => !!l.profile)
+      .map((l) => ({
+        email: l.email,
+        profile_id: l.profile!.id,
+        created_at: l.profile!.created_at,
+        lists: l.profile!.lists,
+      }));
+    const not_found = lookups.filter((l) => !l.profile && !(l as any).lookupError).map((l) => l.email);
+
+    if (found.length === 0) {
+      return {
+        kind: 'nothing_found' as const,
+        requested_count: dedupedOriginal.length,
+        message: `None of the ${dedupedOriginal.length} email${dedupedOriginal.length === 1 ? '' : 's'} matched a Klaviyo profile. Nothing to delete.`,
+      };
+    }
+
+    const thread = this.deps.getActiveThread();
+    const pendingRow = await this.deps.pendingRepo.insert({
+      callerSlackId: actor.slackUserId,
+      channelId: thread?.channelId ?? actor.slackChannelId ?? '',
+      threadTs: thread?.threadTs ?? '',
+      kind: 'klaviyo_delete',
+      payload: { found, not_found, requested: dedupedOriginal },
+    });
+
+    return {
+      kind: 'awaiting_confirmation' as const,
+      confirmation_token: pendingRow.confirmationToken,
+      requested_count: dedupedOriginal.length,
+      found, not_found,
+      message: `Delete ${found.length} profile${found.length === 1 ? '' : 's'}? Reply "yes" to proceed or "cancel" to abort. This cannot be undone.`,
+    };
   }
 
   private async runImport(args: ImportProfilesArgs) {

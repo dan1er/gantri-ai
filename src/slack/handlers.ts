@@ -5,6 +5,7 @@ import type { ReportAttachment } from '../connectors/reports/reports-connector.j
 import { markdownToSlackBlocks } from '../orchestrator/formatter.js';
 import { logger } from '../logger.js';
 import { loadEnv } from '../config/env.js';
+import { parseCsv } from '../connectors/klaviyo/csv-parser.js';
 
 /**
  * Upload a text file to a Slack channel using the external-upload API (three
@@ -324,4 +325,133 @@ export function createMentionHandler() {
         "Hi! For privacy, I only answer in DMs. Open a direct message with me and ask there.",
     });
   };
+}
+
+export interface FileSharedEvent {
+  channel_id: string;
+  user_id: string;
+  file_id: string;
+}
+
+export interface FileSharedDeps {
+  usersRepo: { getRole(slackUserId: string): Promise<string | null> };
+  slack: {
+    filesInfo(fileId: string): Promise<{
+      ok: boolean;
+      file?: {
+        id: string; name: string; filetype: string; mimetype: string;
+        size: number; url_private_download: string;
+      };
+    }>;
+    downloadFile(url: string): Promise<Buffer>;
+    postMessage(channel: string, text: string, threadTs?: string): Promise<void>;
+  };
+  orchestrator: {
+    runTool(
+      name: string,
+      args: unknown,
+      actor: { slackUserId: string; channelId: string; threadTs?: string; role?: string },
+    ): Promise<unknown>;
+  };
+  storage: {
+    upload(path: string, body: Buffer | string, contentType: string): Promise<{ path: string }>;
+  };
+}
+
+const MAX_BYTES = 1_000_000;
+const ALLOWED_MIME = new Set(['text/csv', 'application/csv', 'text/plain']);
+
+export async function handleFileShared(input: { event: FileSharedEvent; deps: FileSharedDeps }) {
+  const { event, deps } = input;
+  if (!event.channel_id.startsWith('D')) return;
+
+  const role = await deps.usersRepo.getRole(event.user_id);
+  if (!['admin', 'marketing'].includes(role ?? '')) {
+    await deps.slack.postMessage(
+      event.channel_id,
+      'Sorry — uploading CSVs to Klaviyo requires the admin or marketing role.',
+      undefined,
+    );
+    logger.warn({ user: event.user_id, role }, 'klaviyo_write_denied_csv');
+    return;
+  }
+
+  const info = await deps.slack.filesInfo(event.file_id);
+  const file = info.file;
+  if (!file) return;
+
+  if (file.size > MAX_BYTES) {
+    await deps.slack.postMessage(
+      event.channel_id,
+      `That CSV is ${(file.size / 1024).toFixed(0)} KB; max is ${(MAX_BYTES / 1024).toFixed(0)} KB. Split into smaller files.`,
+      undefined,
+    );
+    return;
+  }
+
+  const okExt = file.filetype === 'csv' || file.name.toLowerCase().endsWith('.csv');
+  const okMime = ALLOWED_MIME.has(file.mimetype);
+  if (!okExt && !okMime) return;
+
+  let buf: Buffer;
+  try {
+    buf = await deps.slack.downloadFile(file.url_private_download);
+  } catch (err: any) {
+    logger.warn({ err: String(err?.message ?? err), fileId: file.id }, 'klaviyo_csv_download_failed');
+    await deps.slack.postMessage(
+      event.channel_id,
+      `Couldn't download your file (${String(err?.message ?? err)}). Try re-sharing.`,
+      undefined,
+    );
+    return;
+  }
+
+  let parsed;
+  try {
+    parsed = parseCsv(buf.toString('utf8'));
+  } catch (err: any) {
+    await deps.slack.postMessage(
+      event.channel_id,
+      `Couldn't parse the CSV: ${String(err?.message ?? err)}. Make sure it has a header row and is comma-delimited.`,
+      undefined,
+    );
+    return;
+  }
+
+  const upload = await deps.storage
+    .upload(`klaviyo-imports/${file.id}-${Date.now()}.csv`, buf, 'text/csv')
+    .catch(() => ({ path: null as any }));
+
+  if (parsed.warnings.length > 0) {
+    await deps.slack.postMessage(event.channel_id, parsed.warnings.join('\n'), undefined);
+  }
+
+  const args = {
+    source: 'csv' as const,
+    storage_path: upload.path ?? undefined,
+    filename: file.name,
+    profiles: parsed.rows.map(({ rowIndex: _i, ...rest }) => rest),
+    channels: ['email'] as const,
+  };
+  const result: any = await deps.orchestrator.runTool('klaviyo.import_profiles', args, {
+    slackUserId: event.user_id,
+    channelId: event.channel_id,
+    role: role!,
+  });
+  await deps.slack.postMessage(event.channel_id, formatImportReply(result), undefined);
+}
+
+function formatImportReply(r: any): string {
+  if (r?.kind === 'imported_directly') {
+    return `Queued ${r.total_imported} profile${r.total_imported === 1 ? '' : 's'} (audit \`${r.audit_id}\`). I'll DM when it's done.`;
+  }
+  if (r?.kind === 'awaiting_confirmation') return r.message;
+  if (r?.kind === 'all_invalid') {
+    return `All ${r.invalid_count} rows failed validation. Examples: ${(r.invalid_rows || [])
+      .slice(0, 3)
+      .map((x: any) => `row ${x.rowIndex}: ${x.reason}`)
+      .join(' | ')}`;
+  }
+  if (r?.error) return `Error (${r.error.code}): ${r.error.message}`;
+  return 'Done.';
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { createDmHandler } from '../../../src/slack/handlers.js';
+import { createDmHandler, handleFileShared } from '../../../src/slack/handlers.js';
 
 function makeContext(isAuthorized: boolean) {
   const runSpy = vi.fn(async () => ({
@@ -143,5 +143,137 @@ describe('createDmHandler', () => {
     expect(call.tool_calls[0]).toHaveProperty('args');
     // Cleanup for other tests
     delete process.env.DEBUG_FULL_LOGS;
+  });
+});
+
+describe('handleFileShared', () => {
+  function makeDeps(opts: any = {}) {
+    return {
+      usersRepo: { getRole: vi.fn().mockResolvedValue(opts.role ?? 'admin') },
+      slack: {
+        filesInfo: vi.fn().mockResolvedValue(opts.filesInfoResult ?? {
+          ok: true,
+          file: {
+            id: 'F1', filetype: 'csv', mimetype: 'text/csv', size: 200,
+            url_private_download: 'https://files.slack.com/F1', name: 'leads.csv',
+          },
+        }),
+        postMessage: vi.fn().mockResolvedValue(undefined),
+        downloadFile: opts.downloadFile ?? vi.fn().mockResolvedValue(Buffer.from('email,first_name\na@x.com,A\nb@y.com,B')),
+      },
+      orchestrator: {
+        runTool: opts.runTool ?? vi.fn().mockResolvedValue({
+          kind: 'imported_directly', audit_id: 'a1', klaviyo_job_id: 'j1', total_imported: 2,
+        }),
+      },
+      storage: {
+        upload: vi.fn().mockResolvedValue({ path: 'klaviyo-imports/F1-123.csv' }),
+      },
+    };
+  }
+
+  it('happy path: DM + admin + CSV → calls klaviyo.import_profiles', async () => {
+    const deps = makeDeps();
+    await handleFileShared({
+      event: { channel_id: 'D1', user_id: 'U1', file_id: 'F1' },
+      deps: deps as any,
+    });
+    expect(deps.orchestrator.runTool).toHaveBeenCalledWith(
+      'klaviyo.import_profiles',
+      expect.objectContaining({
+        source: 'csv',
+        profiles: expect.any(Array),
+        storage_path: 'klaviyo-imports/F1-123.csv',
+        filename: 'leads.csv',
+      }),
+      expect.objectContaining({ slackUserId: 'U1', channelId: 'D1' }),
+    );
+    expect(deps.slack.postMessage).toHaveBeenCalled();
+  });
+
+  it('skips when not a DM channel', async () => {
+    const deps = makeDeps();
+    await handleFileShared({
+      event: { channel_id: 'C1', user_id: 'U1', file_id: 'F1' },
+      deps: deps as any,
+    });
+    expect(deps.slack.filesInfo).not.toHaveBeenCalled();
+    expect(deps.orchestrator.runTool).not.toHaveBeenCalled();
+  });
+
+  it('rejects role=user with friendly DM', async () => {
+    const deps = makeDeps({ role: 'user' });
+    await handleFileShared({
+      event: { channel_id: 'D1', user_id: 'U1', file_id: 'F1' },
+      deps: deps as any,
+    });
+    expect(deps.slack.filesInfo).not.toHaveBeenCalled();
+    expect(deps.slack.postMessage).toHaveBeenCalledWith('D1', expect.stringContaining('admin or marketing'), undefined);
+    expect(deps.orchestrator.runTool).not.toHaveBeenCalled();
+  });
+
+  it('allows marketing role', async () => {
+    const deps = makeDeps({ role: 'marketing' });
+    await handleFileShared({
+      event: { channel_id: 'D1', user_id: 'U1', file_id: 'F1' },
+      deps: deps as any,
+    });
+    expect(deps.orchestrator.runTool).toHaveBeenCalled();
+  });
+
+  it('rejects non-CSV files', async () => {
+    const deps = makeDeps({
+      filesInfoResult: {
+        ok: true,
+        file: { id: 'F1', filetype: 'png', mimetype: 'image/png', size: 100, url_private_download: '', name: 'a.png' },
+      },
+    });
+    await handleFileShared({
+      event: { channel_id: 'D1', user_id: 'U1', file_id: 'F1' },
+      deps: deps as any,
+    });
+    expect(deps.orchestrator.runTool).not.toHaveBeenCalled();
+  });
+
+  it('rejects files >1 MB with helpful message', async () => {
+    const deps = makeDeps({
+      filesInfoResult: {
+        ok: true,
+        file: { id: 'F1', filetype: 'csv', mimetype: 'text/csv', size: 2_000_000, url_private_download: 'x', name: 'big.csv' },
+      },
+    });
+    await handleFileShared({
+      event: { channel_id: 'D1', user_id: 'U1', file_id: 'F1' },
+      deps: deps as any,
+    });
+    expect(deps.orchestrator.runTool).not.toHaveBeenCalled();
+    expect(deps.slack.postMessage).toHaveBeenCalledWith('D1', expect.stringContaining('max'), undefined);
+  });
+
+  it('reports CSV parse failure', async () => {
+    const deps = makeDeps({
+      downloadFile: vi.fn().mockResolvedValue(Buffer.from('this is not csv\nheader-not-found')),
+    });
+    deps.orchestrator.runTool = vi.fn();
+    await handleFileShared({
+      event: { channel_id: 'D1', user_id: 'U1', file_id: 'F1' },
+      deps: deps as any,
+    });
+    expect(deps.orchestrator.runTool).not.toHaveBeenCalled();
+    const args = (deps.slack.postMessage as any).mock.calls.map((c: any[]) => c[1]).join(' | ');
+    expect(args).toMatch(/parse|email column|header/i);
+  });
+
+  it('handles download failure with retry-friendly message', async () => {
+    const deps = makeDeps({
+      downloadFile: vi.fn().mockRejectedValue(new Error('HTTP 403')),
+    });
+    deps.orchestrator.runTool = vi.fn();
+    await handleFileShared({
+      event: { channel_id: 'D1', user_id: 'U1', file_id: 'F1' },
+      deps: deps as any,
+    });
+    expect(deps.orchestrator.runTool).not.toHaveBeenCalled();
+    expect(deps.slack.postMessage).toHaveBeenCalledWith('D1', expect.stringContaining("download"), undefined);
   });
 });

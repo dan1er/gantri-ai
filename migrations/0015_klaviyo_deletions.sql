@@ -1,15 +1,19 @@
-CREATE TABLE klaviyo_deletions (
-  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  caller_slack_id     TEXT NOT NULL,
-  caller_email        TEXT,
-  requested_emails    JSONB NOT NULL,
-  found_count         INTEGER NOT NULL,
-  deleted_count       INTEGER NOT NULL,
-  failed_count        INTEGER NOT NULL,
-  failed_details      JSONB NOT NULL DEFAULT '[]',
-  status              TEXT NOT NULL CHECK (status IN ('submitted')),
-  started_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-  completed_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+-- Audit table for klaviyo.delete_profiles. One row per executed deletion batch
+-- (not including cancelled confirmations). No FK on caller_slack_id →
+-- authorized_users: audit history must survive caller revocation, and the role
+-- gate already enforces that callers were authorized at deletion time.
+create table if not exists klaviyo_deletions (
+  id                  uuid primary key default gen_random_uuid(),
+  caller_slack_id     text not null,
+  caller_email        text,
+  requested_emails    jsonb not null,
+  found_count         integer not null,
+  deleted_count       integer not null,
+  failed_count        integer not null,
+  failed_details      jsonb not null default '[]',
+  status              text not null check (status in ('submitted')),
+  started_at          timestamptz not null default now(),
+  completed_at        timestamptz not null default now()
 );
 
-CREATE INDEX idx_klaviyo_deletions_caller ON klaviyo_deletions(caller_slack_id, started_at DESC);
+create index if not exists klaviyo_deletions_caller_idx on klaviyo_deletions(caller_slack_id, started_at desc);

@@ -479,6 +479,30 @@ export const TOOL_OUTPUT_SHAPES: Record<string, ToolOutputSample> = {
     expectedTopLevelKeys: ['period', 'granularity', 'rows', 'note'],
     expectedArrayElementKeys: { rows: ['key', 'count'] },
   },
+  'klaviyo.import_status': {
+    summary: 'Klaviyo profile-import audit row for a given audit_id or klaviyo_job_id. { audit_id, klaviyo_job_id, status: queued|processing|complete|failed, list?: {id, name}, channels: [email|sms], total_submitted, total_imported, total_invalid_rejected, succeeded_count?, already_subscribed_count?, failed_count?, error_summary?, started_at, completed_at? }. Read-only — write tools (klaviyo.import_profiles / klaviyo.delete_profiles) are NOT whitelisted.',
+    example: {
+      audit_id: '00000000-0000-0000-0000-000000000000',
+      klaviyo_job_id: 'job-abc',
+      status: 'complete' as const,
+      list: { id: 'L1', name: 'Trade Customers' },
+      channels: ['email'],
+      total_submitted: 5,
+      total_imported: 5,
+      total_invalid_rejected: 0,
+      succeeded_count: 5,
+      already_subscribed_count: 0,
+      failed_count: 0,
+      started_at: '2026-05-05T10:00:00Z',
+      completed_at: '2026-05-05T10:01:00Z',
+    },
+    expectedTopLevelKeys: [
+      'audit_id', 'klaviyo_job_id', 'status', 'list', 'channels',
+      'total_submitted', 'total_imported', 'total_invalid_rejected',
+      'succeeded_count', 'already_subscribed_count', 'failed_count',
+      'started_at', 'completed_at',
+    ],
+  },
 
   // ---------- Google Search Console (SEO) ----------
   'gsc.list_sites': {

@@ -38,6 +38,10 @@ import { KlaviyoApiClient } from './connectors/klaviyo/client.js';
 import { KlaviyoImportsRepo } from './storage/repositories/klaviyo-imports.js';
 import { KlaviyoDeletionsRepo } from './storage/repositories/klaviyo-deletions.js';
 import { PendingConfirmationsRepo } from './storage/repositories/pending-confirmations.js';
+import { KlaviyoImportPollerJob } from './connectors/klaviyo/import-poller.js';
+import { ConfirmationHandler } from './orchestrator/confirmation-handler.js';
+import type { FileSharedDeps } from './slack/handlers.js';
+import type { App as SlackApp } from '@slack/bolt';
 import { PipedriveConnector } from './connectors/pipedrive/connector.js';
 import { PipedriveApiClient } from './connectors/pipedrive/client.js';
 import { buildSearchConsoleConnector } from './connectors/gsc/connector.js';
@@ -163,6 +167,18 @@ async function main() {
     logger.warn('impact not configured (IMPACT_ACCOUNT_SID and/or IMPACT_AUTH_TOKEN missing) — skipping registration');
   }
 
+  // The confirmation handler, file-shared deps, and import poller all need
+  // `app.client` for outbound Slack calls — but `app` is created by
+  // `buildSlackApp` further down (chicken-and-egg). We resolve this with a
+  // closure-captured `appRef` thunk: the adapters below dereference
+  // `appRef!.client` lazily, and we assign `appRef = app` immediately after
+  // `buildSlackApp`. The poller's `start()` is deferred until after that
+  // assignment, so the first DM goes through a fully-initialized client.
+  let appRef: SlackApp | undefined;
+  let klaviyoConfirmationHandler: ConfirmationHandler | undefined;
+  let klaviyoFileSharedDeps: FileSharedDeps | undefined;
+  let klaviyoImportPoller: KlaviyoImportPollerJob | undefined;
+
   if (klaviyoApiKey) {
     const klaviyoClient = new KlaviyoApiClient({ apiKey: klaviyoApiKey });
     const klaviyoImportsRepo = new KlaviyoImportsRepo(supabase);
@@ -179,6 +195,87 @@ async function main() {
       getActiveThread: () => getActiveThread(),
     }));
     logger.info('klaviyo connector registered');
+
+    // Slack adapter shared by the confirmation handler, the poller, and the
+    // file_shared deps. Reads `appRef` lazily so it's safe to construct here
+    // before `buildSlackApp` runs.
+    const klaviyoSlackAdapter = {
+      async postMessage(channel: string, text: string, threadTs?: string) {
+        await appRef!.client.chat.postMessage({ channel, text, thread_ts: threadTs });
+      },
+    };
+
+    klaviyoConfirmationHandler = new ConfirmationHandler({
+      pendingRepo: klaviyoPendingRepo,
+      importsRepo: klaviyoImportsRepo,
+      deletionsRepo: klaviyoDeletionsRepo,
+      client: klaviyoClient,
+      slack: klaviyoSlackAdapter,
+    });
+
+    klaviyoImportPoller = new KlaviyoImportPollerJob({
+      importsRepo: klaviyoImportsRepo,
+      pendingRepo: klaviyoPendingRepo,
+      client: klaviyoClient,
+      slack: klaviyoSlackAdapter,
+      callerLookup: {
+        async resolve(slackUserId: string) {
+          // Resolve a caller's DM channel id by opening (idempotent) the IM
+          // conversation. Used by the poller to DM the caller when their
+          // import job completes / fails.
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const im: any = await appRef!.client.conversations.open({ users: slackUserId });
+          const ch = im?.channel?.id as string | undefined;
+          return ch ? { slackUserId, dmChannelId: ch } : null;
+        },
+      },
+    });
+
+    // Storage adapter for file_shared CSV uploads. Persists the raw CSV in
+    // the `klaviyo-imports` Supabase Storage bucket so we have a forensic
+    // copy even after the import completes.
+    const klaviyoStorageAdapter = {
+      async upload(p: string, body: Buffer | string, contentType: string) {
+        const objectPath = p.replace(/^klaviyo-imports\//, '');
+        const { data, error } = await supabase.storage
+          .from('klaviyo-imports')
+          .upload(objectPath, body, { contentType, upsert: false });
+        if (error) throw error;
+        return { path: `klaviyo-imports/${data.path}` };
+      },
+    };
+
+    klaviyoFileSharedDeps = {
+      usersRepo: klaviyoUsersRepo,
+      slack: {
+        async filesInfo(fileId: string) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          return (await appRef!.client.files.info({ file: fileId })) as any;
+        },
+        async downloadFile(url: string) {
+          const res = await fetch(url, { headers: { Authorization: `Bearer ${env.SLACK_BOT_TOKEN}` } });
+          if (!res.ok) throw new Error(`download HTTP ${res.status}`);
+          return Buffer.from(await res.arrayBuffer());
+        },
+        async postMessage(channel: string, text: string, threadTs?: string) {
+          await appRef!.client.chat.postMessage({ channel, text, thread_ts: threadTs });
+        },
+      },
+      orchestrator: {
+        async runTool(name, args, actor) {
+          // Route the CSV upload directly to klaviyo.import_profiles — no LLM
+          // dispatch. The actor's role is stamped on the call so the tool's
+          // role check passes (file_shared already verified admin/marketing).
+          return await orchestrator.runToolDirect({
+            toolName: name,
+            args,
+            actor: { slackUserId: actor.slackUserId, slackChannelId: actor.channelId },
+            thread: { channelId: actor.channelId, threadTs: actor.threadTs ?? '' },
+          });
+        },
+      },
+      storage: klaviyoStorageAdapter,
+    };
   } else {
     logger.warn('klaviyo not configured (KLAVIYO_API_KEY missing) — skipping registration');
   }
@@ -234,7 +331,37 @@ async function main() {
   const usersRepo = new AuthorizedUsersRepo(supabase);
   const conversationsRepo = new ConversationsRepo(supabase);
 
-  const { app, receiver } = buildSlackApp({ orchestrator, usersRepo, conversationsRepo });
+  // No-op fallbacks for environments where Klaviyo isn't configured. The bot
+  // still boots and responds to DMs; only the Klaviyo write paths are dead.
+  const noopConfirmationHandler = {
+    tryHandle: async () => false,
+    // The handler.tryHandle() is the only method called from the message
+    // handler, but we cast to ConfirmationHandler so the structural shape
+    // satisfies HandlerDeps.confirmationHandler.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  } as unknown as ConfirmationHandler;
+  const noopFileSharedDeps: FileSharedDeps = {
+    usersRepo: { getRole: async () => null },
+    slack: {
+      filesInfo: async () => ({ ok: false }),
+      downloadFile: async () => Buffer.alloc(0),
+      postMessage: async () => {},
+    },
+    orchestrator: { runTool: async () => ({}) },
+    storage: { upload: async () => ({ path: '' }) },
+  };
+
+  const { app, receiver } = buildSlackApp({
+    orchestrator,
+    usersRepo,
+    conversationsRepo,
+    confirmationHandler: klaviyoConfirmationHandler ?? noopConfirmationHandler,
+    fileSharedDeps: klaviyoFileSharedDeps ?? noopFileSharedDeps,
+  });
+  // Adapters above capture this `appRef` thunk lazily — they were constructed
+  // before `app` existed. Assigning here makes them functional immediately
+  // (the first DM the bot receives goes through a fully-initialized client).
+  appRef = app;
 
   // ReportsConnector hooks Slack's canvases API + the per-run actor context,
   // so it can only be built once `app.client` exists. The actor closure
@@ -386,6 +513,14 @@ async function main() {
   logger.info({ port: env.PORT }, 'gantri-ai-bot listening');
 
   reportsRunner.start();
+
+  // Start the Klaviyo import-status poller now that the Slack client is live
+  // (its `slack` adapter dereferences `appRef!.client`). Skipped entirely
+  // when KLAVIYO_API_KEY isn't configured.
+  if (klaviyoImportPoller) {
+    klaviyoImportPoller.start();
+    logger.info('klaviyo import poller started');
+  }
 
   // RollupRefreshJob is no longer started — sales numbers now come live from
   // Grafana via SalesReportConnector. The rollup table + refresh code stay in

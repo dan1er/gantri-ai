@@ -1,6 +1,7 @@
 import type { AuthorizedUsersRepo } from '../storage/repositories/authorized-users.js';
 import type { ConversationsRepo } from '../storage/repositories/conversations.js';
 import type { Orchestrator } from '../orchestrator/orchestrator.js';
+import type { ConfirmationHandler } from '../orchestrator/confirmation-handler.js';
 import type { ReportAttachment } from '../connectors/reports/reports-connector.js';
 import { markdownToSlackBlocks } from '../orchestrator/formatter.js';
 import { logger } from '../logger.js';
@@ -67,6 +68,10 @@ export interface HandlerDeps {
   orchestrator: Orchestrator;
   usersRepo: AuthorizedUsersRepo;
   conversationsRepo: ConversationsRepo;
+  /** Intercepts "yes"/"cancel" replies for pending Klaviyo write confirmations
+   *  BEFORE the LLM dispatch — a literal "yes" must execute the queued
+   *  import/delete instead of being interpreted as a fresh request. */
+  confirmationHandler: ConfirmationHandler;
 }
 
 /**
@@ -111,6 +116,18 @@ export function createDmHandler(deps: HandlerDeps) {
     if (!event.text || !event.user) return;
 
     const threadTs = event.thread_ts ?? event.ts;
+
+    // Confirmation flow: if this is a "yes"/"cancel" reply in a thread that
+    // has a pending row, the handler runs the queued import/delete and
+    // consumes the message — so the LLM doesn't try to interpret a literal
+    // "yes" as a fresh request. Returns true when consumed.
+    const consumed = await deps.confirmationHandler.tryHandle({
+      slackUserId: event.user,
+      channelId: event.channel,
+      threadTs,
+      text: event.text,
+    });
+    if (consumed) return;
 
     if (!(await deps.usersRepo.isAuthorized(event.user))) {
       await client.chat.postMessage({

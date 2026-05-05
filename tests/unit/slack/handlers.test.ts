@@ -15,12 +15,17 @@ function makeContext(isAuthorized: boolean) {
   const loadSpy = vi.fn(async () => []);
   const postMessage = vi.fn(async () => ({ ts: '1234.5678' }));
   const update = vi.fn(async () => ({}));
+  // Stub confirmation handler that always reports "not consumed" so the
+  // existing flow (LLM dispatch) continues unchanged. Tests for the
+  // confirmation flow itself live in tests/unit/orchestrator/.
+  const tryHandleSpy = vi.fn(async () => false);
   return {
-    spies: { runSpy, insertSpy, postMessage, update, loadSpy },
+    spies: { runSpy, insertSpy, postMessage, update, loadSpy, tryHandleSpy },
     deps: {
       orchestrator: { run: runSpy },
       usersRepo: { isAuthorized: vi.fn(async () => isAuthorized) },
       conversationsRepo: { insert: insertSpy, loadRecentByThread: loadSpy },
+      confirmationHandler: { tryHandle: tryHandleSpy },
     },
     event: {
       channel_type: 'im',

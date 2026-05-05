@@ -112,6 +112,32 @@ export class Orchestrator {
     (this as unknown as { opts: { registry: ConnectorRegistry } }).opts.registry = registry;
   }
 
+  /**
+   * Execute a single tool directly with explicit actor/thread context, bypassing
+   * the LLM dispatch loop. Used by the Slack `file_shared` handler to route a
+   * CSV upload straight to `klaviyo.import_profiles` without making the LLM
+   * "decide" — the user's intent is unambiguous when they share a CSV in DM.
+   *
+   * Wraps the registry execute call in `runWithContext(...)` so connector tools
+   * see the correct ActorContext / ThreadContext via `getActiveActor()` /
+   * `getActiveThread()`.
+   */
+  async runToolDirect(input: {
+    toolName: string;
+    args: unknown;
+    actor: ActorContext;
+    thread: ThreadContext;
+  }): Promise<unknown> {
+    return runWithContext({ actor: input.actor, thread: input.thread }, async () => {
+      const result = await this.opts.registry.execute(input.toolName, input.args);
+      if (result.ok) return result.data;
+      // Surface the error in the same shape the underlying tool would have
+      // returned for the LLM (the file_shared handler's formatImportReply
+      // expects { error: { code, message } } for failure cases).
+      return { error: result.error ?? { code: 'TOOL_EXEC_FAILED', message: 'unknown' } };
+    });
+  }
+
   async run(input: OrchestratorInput): Promise<OrchestratorOutput> {
     return runWithContext({ actor: input.actor, thread: input.thread }, async () => {
       const tools = this.opts.registry.getAllTools();

@@ -130,6 +130,14 @@ const DeleteProfilesArgs = z.object({
 });
 type DeleteProfilesArgs = z.infer<typeof DeleteProfilesArgs>;
 
+const ImportStatusArgs = z.object({
+  audit_id: z.string().uuid().optional(),
+  klaviyo_job_id: z.string().optional(),
+}).refine((d) => d.audit_id || d.klaviyo_job_id, {
+  message: 'Provide audit_id or klaviyo_job_id',
+});
+type ImportStatusArgs = z.infer<typeof ImportStatusArgs>;
+
 export class KlaviyoConnector implements Connector {
   readonly name = 'klaviyo';
   readonly tools: readonly ToolDef[];
@@ -440,7 +448,42 @@ export class KlaviyoConnector implements Connector {
         jsonSchema: zodToJsonSchema(DeleteProfilesArgs),
         execute: (args) => this.runDelete(args as DeleteProfilesArgs),
       } as ToolDef<DeleteProfilesArgs>,
+      {
+        name: 'klaviyo.import_status',
+        description: [
+          'Look up the status of a previously-queued Klaviyo import.',
+          'Open to ALL authorized users (read-only).',
+          'Pass either audit_id (the UUID returned by klaviyo.import_profiles) or klaviyo_job_id (the Klaviyo-side job id from the same response).',
+          'Returns the audit row with current status, counts, and list info.',
+        ].join(' '),
+        schema: ImportStatusArgs as z.ZodType<ImportStatusArgs>,
+        jsonSchema: zodToJsonSchema(ImportStatusArgs),
+        execute: (args) => this.runImportStatus(args as ImportStatusArgs),
+      } as ToolDef<ImportStatusArgs>,
     ];
+  }
+
+  private async runImportStatus(args: ImportStatusArgs) {
+    const row = args.audit_id
+      ? await this.deps.importsRepo.getById(args.audit_id)
+      : await this.deps.importsRepo.getByJobId(args.klaviyo_job_id!);
+    if (!row) return { error: { code: 'NOT_FOUND', message: 'No import found with that id.' } };
+    return {
+      audit_id: row.id,
+      klaviyo_job_id: row.klaviyoJobId,
+      status: row.status,
+      list: row.listId ? { id: row.listId, name: row.listName! } : null,
+      channels: row.channels,
+      total_submitted: row.totalSubmitted,
+      total_imported: row.totalImported,
+      total_invalid_rejected: row.totalInvalidRejected,
+      succeeded_count: row.succeededCount ?? undefined,
+      already_subscribed_count: row.alreadySubscribedCount ?? undefined,
+      failed_count: row.failedCount ?? undefined,
+      error_summary: row.errorSummary ?? undefined,
+      started_at: row.startedAt,
+      completed_at: row.completedAt ?? undefined,
+    };
   }
 
   private async runDelete(args: DeleteProfilesArgs) {

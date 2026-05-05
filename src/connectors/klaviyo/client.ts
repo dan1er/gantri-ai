@@ -119,6 +119,36 @@ export type KlaviyoTimeframe =
   | { key: string }
   | { start: string; end: string };
 
+export interface KlaviyoProfileInput {
+  email: string;
+  phone_number?: string;
+  first_name?: string;
+  last_name?: string;
+  custom_source?: string;
+  consented_at?: string;
+}
+
+export interface BulkSubscribeOptions {
+  profiles: KlaviyoProfileInput[];
+  listId?: string;
+  channels: Array<'email' | 'sms'>;
+  consentedAt?: string;
+  defaultConsentSource?: string;
+}
+
+export interface BulkSubscribeResult {
+  job_id: string;
+}
+
+export interface BulkImportJobStatus {
+  jobId: string;
+  status: 'queued' | 'processing' | 'complete' | 'failed';
+  totalCount?: number;
+  completedCount?: number;
+  failedCount?: number;
+  errors?: Array<{ detail: string }>;
+}
+
 export class KlaviyoApiClient {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
@@ -404,6 +434,53 @@ export class KlaviyoApiClient {
     const dates = resp.data?.attributes?.dates ?? [];
     const counts = resp.data?.attributes?.data?.[0]?.measurements?.count ?? [];
     return { dates, counts };
+  }
+
+  /** POST /profile-subscription-bulk-create-jobs — kicks off an async job that
+   *  subscribes a batch of profiles to email and/or sms marketing, optionally
+   *  adding them to a list. Returns the Klaviyo job id; poll status via
+   *  `getBulkImportJobStatus`. `defaultConsentSource` is the per-batch fallback
+   *  custom_source applied when a row doesn't carry its own. */
+  async bulkSubscribeProfiles(opts: BulkSubscribeOptions): Promise<BulkSubscribeResult> {
+    const subscriptions: Record<string, unknown> = {};
+    if (opts.channels.includes('email')) subscriptions.email = { marketing: { consent: 'SUBSCRIBED' } };
+    if (opts.channels.includes('sms')) subscriptions.sms = { marketing: { consent: 'SUBSCRIBED' } };
+
+    const profiles = opts.profiles.map((p) => {
+      const out: Record<string, unknown> = { email: p.email };
+      if (p.phone_number) out.phone_number = p.phone_number;
+      if (p.first_name) out.first_name = p.first_name;
+      if (p.last_name) out.last_name = p.last_name;
+      if (p.custom_source) out.custom_source = p.custom_source;
+      else if (opts.defaultConsentSource) out.custom_source = opts.defaultConsentSource;
+      if (p.consented_at) out.consented_at = p.consented_at;
+      else if (opts.consentedAt) out.consented_at = opts.consentedAt;
+      out.subscriptions = subscriptions;
+      return out;
+    });
+
+    const attributes: Record<string, unknown> = { profiles, historical_import: false };
+    if (opts.listId) attributes.list_id = opts.listId;
+
+    const body = { data: { type: 'profile-subscription-bulk-create-job', attributes } };
+    const resp = await this.post<{ data: { id: string } }>('/profile-subscription-bulk-create-jobs', body);
+    if (!resp?.data?.id) throw new KlaviyoApiError('Klaviyo returned no job_id', 502, resp);
+    return { job_id: resp.data.id };
+  }
+
+  /** GET /profile-bulk-import-jobs/:id — poll status of a bulk subscribe job
+   *  kicked off by `bulkSubscribeProfiles`. Returns parsed status + counts. */
+  async getBulkImportJobStatus(jobId: string): Promise<BulkImportJobStatus> {
+    const resp = await this.get<{ data: { id: string; attributes: any } }>(`/profile-bulk-import-jobs/${encodeURIComponent(jobId)}`);
+    const a = resp?.data?.attributes ?? {};
+    return {
+      jobId: resp.data.id,
+      status: a.status,
+      totalCount: a.total_count,
+      completedCount: a.completed_count,
+      failedCount: a.failed_count,
+      errors: a.errors,
+    };
   }
 }
 

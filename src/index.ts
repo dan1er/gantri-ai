@@ -35,6 +35,8 @@ import { Ga4Connector } from './connectors/ga4/connector.js';
 import { buildImpactConnector } from './connectors/impact/connector.js';
 import { KlaviyoConnector } from './connectors/klaviyo/connector.js';
 import { KlaviyoApiClient } from './connectors/klaviyo/client.js';
+import { KlaviyoImportsRepo } from './storage/repositories/klaviyo-imports.js';
+import { PendingConfirmationsRepo } from './storage/repositories/pending-confirmations.js';
 import { PipedriveConnector } from './connectors/pipedrive/connector.js';
 import { PipedriveApiClient } from './connectors/pipedrive/client.js';
 import { buildSearchConsoleConnector } from './connectors/gsc/connector.js';
@@ -162,7 +164,17 @@ async function main() {
 
   if (klaviyoApiKey) {
     const klaviyoClient = new KlaviyoApiClient({ apiKey: klaviyoApiKey });
-    registry.register(new KlaviyoConnector({ client: klaviyoClient }));
+    const klaviyoImportsRepo = new KlaviyoImportsRepo(supabase);
+    const klaviyoPendingRepo = new PendingConfirmationsRepo(supabase);
+    const klaviyoUsersRepo = new AuthorizedUsersRepo(supabase);
+    registry.register(new KlaviyoConnector({
+      client: klaviyoClient,
+      importsRepo: klaviyoImportsRepo,
+      pendingRepo: klaviyoPendingRepo,
+      usersRepo: klaviyoUsersRepo,
+      getActor: () => getActiveActor(),
+      getActiveThread: () => getActiveThread(),
+    }));
     logger.info('klaviyo connector registered');
   } else {
     logger.warn('klaviyo not configured (KLAVIYO_API_KEY missing) — skipping registration');

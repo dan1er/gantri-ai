@@ -8,6 +8,11 @@ import {
   KlaviyoApiError,
   type KlaviyoTimeframe,
 } from './client.js';
+import { validateBatch, type RawProfile } from './validation.js';
+import type { KlaviyoImportsRepo } from '../../storage/repositories/klaviyo-imports.js';
+import type { PendingConfirmationsRepo } from '../../storage/repositories/pending-confirmations.js';
+import type { AuthorizedUsersRepo } from '../../storage/repositories/authorized-users.js';
+import type { ActorContext, ThreadContext } from '../../orchestrator/orchestrator.js';
 
 /**
  * Klaviyo email/SMS analytics connector — read-only. Mirrors the surface
@@ -30,6 +35,11 @@ import {
 
 export interface KlaviyoConnectorDeps {
   client: KlaviyoApiClient;
+  importsRepo: KlaviyoImportsRepo;
+  pendingRepo: PendingConfirmationsRepo;
+  usersRepo: AuthorizedUsersRepo;
+  getActor: () => ActorContext | undefined;
+  getActiveThread: () => ThreadContext | undefined;
 }
 
 const Channel = z.enum(['email', 'sms', 'mobile_push']).default('email')
@@ -87,6 +97,31 @@ const ConsentedSignupsArgs = z.object({
 });
 type ConsentedSignupsArgs = z.infer<typeof ConsentedSignupsArgs>;
 
+const ImportProfileRow = z.object({
+  email: z.string().email(),
+  first_name: z.string().max(100).optional(),
+  last_name: z.string().max(100).optional(),
+  phone: z.string().optional(),
+  consent_source: z.string().max(200).optional(),
+  consented_at: z.string().datetime().optional(),
+});
+
+const ImportProfilesArgs = z.object({
+  list: z.string().optional()
+    .describe('Klaviyo list id (alphanumeric ≥6 chars) or exact case-insensitive list name. If omitted, profiles are created/subscribed without being added to a list.'),
+  channels: z.array(z.enum(['email', 'sms'])).min(1).max(2).default(['email'])
+    .describe('Subscription channels to set to SUBSCRIBED for every row in the batch. Whole-batch, not per-row.'),
+  default_consent_source: z.string().max(200).optional()
+    .describe("Default custom_source for rows that don't carry one. Falls back to 'Slack import — <list_name> (<YYYY-MM-DD>)'."),
+  source: z.enum(['inline', 'csv']).default('inline'),
+  storage_path: z.string().optional()
+    .describe("Set by the file_shared handler when source='csv'. Internal — the LLM should not pass this directly."),
+  filename: z.string().optional()
+    .describe("Set by the file_shared handler when source='csv'. Internal."),
+  profiles: z.array(ImportProfileRow).min(1).max(1000),
+});
+type ImportProfilesArgs = z.infer<typeof ImportProfilesArgs>;
+
 export class KlaviyoConnector implements Connector {
   readonly name = 'klaviyo';
   readonly tools: readonly ToolDef[];
@@ -94,7 +129,7 @@ export class KlaviyoConnector implements Connector {
   private placedOrderMetricId: string | null = null;
   private metricDiscoveryAttempted = false;
 
-  constructor(deps: KlaviyoConnectorDeps) {
+  constructor(private readonly deps: KlaviyoConnectorDeps) {
     this.client = deps.client;
     this.tools = this.buildTools();
   }
@@ -369,7 +404,129 @@ export class KlaviyoConnector implements Connector {
           };
         },
       },
+      {
+        name: 'klaviyo.import_profiles',
+        description: [
+          'Bulk-create Klaviyo profiles + subscribe them to email/sms with consent.',
+          'ADMIN or MARKETING role only — fails with FORBIDDEN otherwise.',
+          'Up to 20 profiles inline; up to 1000 via attached CSV (set source="csv" + storage_path).',
+          'When ≥1 row is invalid, returns kind:"awaiting_confirmation" — caller replies "yes" to import the valid subset or "cancel" to abort.',
+          'When 0 invalid, imports directly and returns kind:"imported_directly" with audit_id and klaviyo_job_id; the caller will receive a DM when the job completes.',
+          'Use ONLY when the user explicitly asks to "import", "add", "upload", "subscribe", "agregar a Klaviyo".',
+        ].join(' '),
+        schema: ImportProfilesArgs as z.ZodType<ImportProfilesArgs>,
+        jsonSchema: zodToJsonSchema(ImportProfilesArgs),
+        execute: (args) => this.runImport(args as ImportProfilesArgs),
+      } as ToolDef<ImportProfilesArgs>,
     ];
+  }
+
+  private async runImport(args: ImportProfilesArgs) {
+    const actor = this.deps.getActor();
+    if (!actor) return { error: { code: 'NO_ACTOR', message: 'klaviyo.import_profiles requires an active actor.' } };
+    const role = await this.deps.usersRepo.getRole(actor.slackUserId);
+    if (role !== 'admin' && role !== 'marketing') {
+      logger.warn({ caller: actor.slackUserId, role }, 'klaviyo_write_denied');
+      return { error: { code: 'FORBIDDEN', message: 'Klaviyo write tools require role=admin or role=marketing.' } };
+    }
+
+    const [inFlight, inHour, pending] = await Promise.all([
+      this.deps.importsRepo.countInFlight(actor.slackUserId),
+      this.deps.importsRepo.countInLastHour(actor.slackUserId),
+      this.deps.pendingRepo.countOutstanding(actor.slackUserId),
+    ]);
+    if (inFlight >= 5) return { error: { code: 'RATE_LIMITED', message: '5 imports already in flight; wait for them to finish.', details: { reason: 'in_flight_imports' } } };
+    if (inHour >= 20) return { error: { code: 'RATE_LIMITED', message: '20 imports in the last hour; cool down.', details: { reason: 'imports_per_hour' } } };
+    if (pending >= 3) return { error: { code: 'PENDING_LIMIT', message: '3 pending confirmations outstanding; resolve them first.' } };
+
+    let listId: string | null = null;
+    let listName: string | null = null;
+    if (args.list) {
+      const lists = await this.deps.client.listLists();
+      const exactById = lists.find((l) => l.id === args.list);
+      const byName = exactById ?? lists.find((l) => l.name.toLowerCase() === args.list!.toLowerCase());
+      if (!byName) {
+        const needle = args.list.toLowerCase();
+        const top5 = lists
+          .filter((l) => l.name.toLowerCase().includes(needle))
+          .slice(0, 5)
+          .map(({ id, name }) => ({ id, name }));
+        return { error: { code: 'LIST_NOT_FOUND', message: `No list matched "${args.list}".`, details: { suggestions: top5 } } };
+      }
+      listId = byName.id;
+      listName = byName.name;
+    }
+
+    const raws: RawProfile[] = args.profiles.map((p, i) => ({
+      rowIndex: i + 1, email: p.email, first_name: p.first_name, last_name: p.last_name,
+      phone: p.phone, consent_source: p.consent_source, consented_at: p.consented_at,
+    }));
+    const v = validateBatch(raws, { channels: args.channels });
+
+    if (v.valid.length === 0) {
+      return {
+        kind: 'all_invalid' as const,
+        total_submitted: raws.length,
+        invalid_count: v.invalid.length,
+        invalid_rows: v.invalid,
+        message: `All ${v.invalid.length} row${v.invalid.length === 1 ? '' : 's'} failed validation. Fix and re-submit.`,
+      };
+    }
+
+    if (v.invalid.length === 0) {
+      const consentedAt = new Date().toISOString();
+      const result = await this.deps.client.bulkSubscribeProfiles({
+        profiles: v.valid.map((p) => ({
+          email: p.email,
+          phone_number: p.phone_e164,
+          first_name: p.first_name,
+          last_name: p.last_name,
+          custom_source: p.consent_source ?? args.default_consent_source ?? `Slack import — ${listName ?? 'no list'} (${consentedAt.slice(0, 10)})`,
+          consented_at: p.consented_at ?? consentedAt,
+        })),
+        listId: listId ?? undefined,
+        channels: args.channels,
+      });
+      const audit = await this.deps.importsRepo.insert({
+        callerSlackId: actor.slackUserId, callerEmail: null,
+        source: args.source, filename: args.filename ?? null, storagePath: args.storage_path ?? null,
+        listId, listName, channels: args.channels,
+        totalSubmitted: raws.length, totalImported: v.valid.length, totalInvalidRejected: 0,
+        klaviyoJobId: result.job_id, status: 'queued',
+      });
+      logger.info({ auditId: audit.id, jobId: result.job_id, valid: v.valid.length }, 'klaviyo_import_queued');
+      return {
+        kind: 'imported_directly' as const,
+        audit_id: audit.id, klaviyo_job_id: result.job_id, status: 'queued' as const,
+        list: listId ? { id: listId, name: listName! } : null,
+        channels: args.channels,
+        total_submitted: raws.length, total_imported: v.valid.length, total_invalid_rejected: 0,
+        message: `Queued ${v.valid.length} profile${v.valid.length === 1 ? '' : 's'} to Klaviyo${listName ? ` (list: ${listName})` : ''}. I'll DM when it's done.`,
+      };
+    }
+
+    const thread = this.deps.getActiveThread();
+    const pendingRow = await this.deps.pendingRepo.insert({
+      callerSlackId: actor.slackUserId,
+      channelId: thread?.channelId ?? actor.slackChannelId ?? '',
+      threadTs: thread?.threadTs ?? '',
+      kind: 'klaviyo_import',
+      payload: {
+        valid: v.valid, listId, listName, channels: args.channels,
+        source: args.source, filename: args.filename ?? null, storagePath: args.storage_path ?? null,
+        totalSubmitted: raws.length, totalInvalidRejected: v.invalid.length,
+        defaultConsentSource: args.default_consent_source ?? null,
+      },
+    });
+    return {
+      kind: 'awaiting_confirmation' as const,
+      confirmation_token: pendingRow.confirmationToken,
+      total_submitted: raws.length, valid_count: v.valid.length, invalid_count: v.invalid.length,
+      invalid_rows_preview: v.invalid.slice(0, 20),
+      list: listId ? { id: listId, name: listName! } : null,
+      channels: args.channels,
+      message: `Found ${v.invalid.length} invalid row${v.invalid.length === 1 ? '' : 's'} out of ${raws.length}. Reply "yes" to import the ${v.valid.length} valid one${v.valid.length === 1 ? '' : 's'}, or "cancel" to abort.`,
+    };
   }
 }
 

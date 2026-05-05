@@ -62,9 +62,20 @@ function makeStub(opts: {
   } as unknown as KlaviyoApiClient;
 }
 
+// Stub deps for the import/delete-related fields added to KlaviyoConnectorDeps.
+// None of the existing tests below touch these — they exercise read-only tools.
+const STUB_EXTRA_DEPS = {
+  importsRepo: {} as any,
+  pendingRepo: {} as any,
+  usersRepo: {} as any,
+  getActor: () => undefined,
+  getActiveThread: () => undefined,
+};
+
 describe('klaviyo.list_campaigns', () => {
   it('returns campaigns with totalAcrossAccount + filter by search', async () => {
     const c = new KlaviyoConnector({
+      ...STUB_EXTRA_DEPS,
       client: makeStub({
         campaigns: [campaign({ id: 'A', attributes: { name: 'Spring Launch' } as any }), campaign({ id: 'B', attributes: { name: 'Black Friday' } as any })],
       }),
@@ -86,6 +97,7 @@ describe('klaviyo.list_segments', () => {
 
   it('joins directory + segment-values-report, sorts by total_members, applies minProfileCount', async () => {
     const c = new KlaviyoConnector({
+      ...STUB_EXTRA_DEPS,
       client: makeStub({
         segments: [segment('s1', 'Tiny test', 0), segment('s2', 'Engaged 90d', 0), segment('s3', 'All Subs', 0)],
         segmentReportRows: [segReport('s1', 5), segReport('s2', 41210, 100, 80), segReport('s3', 124530, 200, 50)],
@@ -103,7 +115,7 @@ describe('klaviyo.list_segments', () => {
   it('returns segments with null counts if segment-values-report fails (degrades gracefully)', async () => {
     const stub = makeStub({ segments: [segment('s1', 'Foo', 0)] });
     (stub.segmentValuesReport as any).mockRejectedValueOnce(new Error('rate limited'));
-    const c = new KlaviyoConnector({ client: stub });
+    const c = new KlaviyoConnector({ ...STUB_EXTRA_DEPS, client: stub });
     const tool = c.tools.find((t) => t.name === 'klaviyo.list_segments')!;
     const r = await tool.execute({ limit: 100 }) as any;
     expect(r.ok).toBe(true);
@@ -115,6 +127,7 @@ describe('klaviyo.list_segments', () => {
 describe('klaviyo.campaign_performance', () => {
   it('returns rows with campaign_name resolved + totals over summable metrics', async () => {
     const c = new KlaviyoConnector({
+      ...STUB_EXTRA_DEPS,
       client: makeStub({
         campaigns: [campaign({ id: 'A', attributes: { name: 'Big Send' } as any }), campaign({ id: 'B', attributes: { name: 'Small Send' } as any })],
         campaignReportRows: [
@@ -140,7 +153,7 @@ describe('klaviyo.campaign_performance', () => {
   });
 
   it('returns ok:false when Placed Order metric is not in account', async () => {
-    const c = new KlaviyoConnector({ client: makeStub({ metrics: [] }) });
+    const c = new KlaviyoConnector({ ...STUB_EXTRA_DEPS, client: makeStub({ metrics: [] }) });
     const tool = c.tools.find((t) => t.name === 'klaviyo.campaign_performance')!;
     const r = await tool.execute({
       dateRange: 'last_7_days', channel: 'email',
@@ -152,6 +165,7 @@ describe('klaviyo.campaign_performance', () => {
 
   it('accepts $REPORT_RANGE preset string (live-reports path)', async () => {
     const c = new KlaviyoConnector({
+      ...STUB_EXTRA_DEPS,
       client: makeStub({
         campaignReportRows: [reportRow({ groupings: { campaign_id: 'A' } as any, statistics: { recipients: 100, conversion_value: 50 } })],
       }),
@@ -169,6 +183,7 @@ describe('klaviyo.campaign_performance', () => {
 describe('klaviyo.flow_performance', () => {
   it('aggregates rows by flow with name resolution', async () => {
     const c = new KlaviyoConnector({
+      ...STUB_EXTRA_DEPS,
       client: makeStub({
         flows: [{ type: 'flow', id: 'PJh', attributes: { name: 'Welcome Series', status: 'live', archived: false } as any }],
         flowReportRows: [
@@ -191,7 +206,7 @@ describe('klaviyo.flow_performance', () => {
 
   it('omits send_channel filter when channel=all', async () => {
     const stub = makeStub({ flowReportRows: [] });
-    const c = new KlaviyoConnector({ client: stub });
+    const c = new KlaviyoConnector({ ...STUB_EXTRA_DEPS, client: stub });
     const tool = c.tools.find((t) => t.name === 'klaviyo.flow_performance')!;
     await tool.execute({
       dateRange: 'last_7_days', channel: 'all',
@@ -219,7 +234,7 @@ describe('klaviyo.consented_signups', () => {
         counts: [929, 504, 475],
       }),
     } as any;
-    const conn = new KlaviyoConnector({ client });
+    const conn = new KlaviyoConnector({ ...STUB_EXTRA_DEPS, client });
     const tool = conn.tools.find((t) => t.name === 'klaviyo.consented_signups')!;
     const out = await tool.execute({ dateRange: { startDate: '2026-01-01', endDate: '2026-03-31' }, granularity: 'monthly' }) as any;
     expect(out.rows).toEqual([
@@ -237,7 +252,7 @@ describe('klaviyo.consented_signups', () => {
       findMetricIdByName: vi.fn(), campaignValuesReport: vi.fn(), flowValuesReport: vi.fn(), segmentValuesReport: vi.fn(),
       metricAggregateByName: vi.fn().mockResolvedValue({ dates: ['2026-01-15T08:00:00+00:00'], counts: [42] }),
     } as any;
-    const conn = new KlaviyoConnector({ client });
+    const conn = new KlaviyoConnector({ ...STUB_EXTRA_DEPS, client });
     const tool = conn.tools.find((t) => t.name === 'klaviyo.consented_signups')!;
     await tool.execute({ dateRange: { startDate: '2026-01-15', endDate: '2026-01-15' }, granularity: 'daily' });
     expect(client.metricAggregateByName).toHaveBeenCalledWith(expect.objectContaining({ interval: 'day' }));
@@ -249,7 +264,7 @@ describe('klaviyo.consented_signups', () => {
       findMetricIdByName: vi.fn(), campaignValuesReport: vi.fn(), flowValuesReport: vi.fn(), segmentValuesReport: vi.fn(),
       metricAggregateByName: vi.fn().mockResolvedValue({ dates: [], counts: [] }),
     } as any;
-    const conn = new KlaviyoConnector({ client });
+    const conn = new KlaviyoConnector({ ...STUB_EXTRA_DEPS, client });
     const tool = conn.tools.find((t) => t.name === 'klaviyo.consented_signups')!;
     await tool.execute({ dateRange: { startDate: '2026-01-01', endDate: '2026-01-31' }, granularity: 'weekly' });
     expect(client.metricAggregateByName).toHaveBeenCalledWith(expect.objectContaining({ interval: 'week' }));
@@ -261,7 +276,7 @@ describe('klaviyo.consented_signups', () => {
       findMetricIdByName: vi.fn(), campaignValuesReport: vi.fn(), flowValuesReport: vi.fn(), segmentValuesReport: vi.fn(),
       metricAggregateByName: vi.fn().mockResolvedValue({ dates: [], counts: [] }),
     } as any;
-    const conn = new KlaviyoConnector({ client });
+    const conn = new KlaviyoConnector({ ...STUB_EXTRA_DEPS, client });
     const tool = conn.tools.find((t) => t.name === 'klaviyo.consented_signups')!;
     await expect(tool.execute({ dateRange: 'last_30_days', granularity: 'monthly' })).resolves.toBeDefined();
   });
@@ -272,7 +287,7 @@ describe('klaviyo.consented_signups', () => {
       findMetricIdByName: vi.fn(), campaignValuesReport: vi.fn(), flowValuesReport: vi.fn(), segmentValuesReport: vi.fn(),
       metricAggregateByName: vi.fn().mockResolvedValue({ dates: [], counts: [] }),
     } as any;
-    const conn = new KlaviyoConnector({ client });
+    const conn = new KlaviyoConnector({ ...STUB_EXTRA_DEPS, client });
     const tool = conn.tools.find((t) => t.name === 'klaviyo.consented_signups')!;
     const out = await tool.execute({ dateRange: { startDate: '2030-01-01', endDate: '2030-12-31' }, granularity: 'monthly' }) as any;
     expect(out.rows).toEqual([]);

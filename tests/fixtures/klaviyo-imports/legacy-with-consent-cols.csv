@@ -1,0 +1,3 @@
+email,first_name,consent_email,consent_sms
+alice@x.com,Alice,true,false
+bob@y.com,Bob,true,true

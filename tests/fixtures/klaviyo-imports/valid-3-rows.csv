@@ -1,0 +1,4 @@
+email,first_name,last_name,phone,consent_source,consented_at
+alice@x.com,Alice,Smith,+1 415 555 0100,BDNY booth 2026,2026-04-30T14:00:00Z
+bob@y.com,Bob,Jones,,BDNY booth 2026,2026-04-30T14:05:00Z
+carol@z.com,Carol,,,,

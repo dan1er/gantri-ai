@@ -119,3 +119,138 @@ describe('KlaviyoApiClient.getBulkImportJobStatus', () => {
     expect(r.errors).toEqual([{ detail: 'malformed payload' }]);
   });
 });
+
+describe('KlaviyoApiClient.findProfileByEmail', () => {
+  it('returns null when data is empty', async () => {
+    const fetchImpl = fakeFetch(async () => ({ status: 200, body: { data: [] } }));
+    const client = new KlaviyoApiClient({ apiKey: 'pk_test', fetchImpl });
+    const r = await client.findProfileByEmail('nope@x.com');
+    expect(r).toBeNull();
+  });
+
+  it('returns profile + lists', async () => {
+    const fetchImpl = fakeFetch(async (url) => {
+      expect(url).toContain('filter=');
+      expect(decodeURIComponent(url)).toContain('equals(email,"a@x.com")');
+      return {
+        status: 200,
+        body: {
+          data: [{
+            id: 'pid1',
+            attributes: { email: 'a@x.com', created: '2024-08-12T19:03:45+00:00' },
+            relationships: { lists: { data: [{ id: 'L1' }] } },
+          }],
+          included: [{ type: 'list', id: 'L1', attributes: { name: 'Trade Customers' } }],
+        },
+      };
+    });
+    const client = new KlaviyoApiClient({ apiKey: 'pk_test', fetchImpl });
+    const r = await client.findProfileByEmail('a@x.com');
+    expect(r).toEqual({ id: 'pid1', created_at: '2024-08-12T19:03:45+00:00', lists: ['Trade Customers'] });
+  });
+
+  it('falls back to created_at attribute name when present', async () => {
+    const fetchImpl = fakeFetch(async () => ({
+      status: 200,
+      body: {
+        data: [{
+          id: 'pid1',
+          attributes: { email: 'a@x.com', created_at: '2024-08-12T19:03:45+00:00' },
+          relationships: { lists: { data: [] } },
+        }],
+        included: [],
+      },
+    }));
+    const client = new KlaviyoApiClient({ apiKey: 'pk_test', fetchImpl });
+    const r = await client.findProfileByEmail('a@x.com');
+    expect(r?.created_at).toBe('2024-08-12T19:03:45+00:00');
+    expect(r?.lists).toEqual([]);
+  });
+
+  it('returns list id when included entry is missing', async () => {
+    const fetchImpl = fakeFetch(async () => ({
+      status: 200,
+      body: {
+        data: [{
+          id: 'pid1',
+          attributes: { email: 'a@x.com', created: '2024-01-01T00:00:00Z' },
+          relationships: { lists: { data: [{ id: 'L1' }, { id: 'L2' }] } },
+        }],
+        included: [{ type: 'list', id: 'L1', attributes: { name: 'Trade' } }],
+      },
+    }));
+    const client = new KlaviyoApiClient({ apiKey: 'pk_test', fetchImpl });
+    const r = await client.findProfileByEmail('a@x.com');
+    expect(r?.lists).toEqual(['Trade', 'L2']);
+  });
+});
+
+describe('KlaviyoApiClient.requestProfileDeletion', () => {
+  it('builds correct JSON:API body for email identifier', async () => {
+    let captured: any = null;
+    const fetchImpl = fakeFetch(async (url, init) => {
+      captured = { url, body: JSON.parse(init.body) };
+      return { status: 202, body: { data: { id: 'del-1' } } };
+    });
+    const client = new KlaviyoApiClient({ apiKey: 'pk_test', fetchImpl });
+    const r = await client.requestProfileDeletion({ email: 'junk@x.com' });
+    expect(r.deletion_job_id).toBe('del-1');
+    expect(captured.url).toBe('https://a.klaviyo.com/api/data-privacy-deletion-jobs');
+    expect(captured.body.data.type).toBe('data-privacy-deletion-job');
+    expect(captured.body.data.attributes.profile.data.attributes.email).toBe('junk@x.com');
+  });
+
+  it('uses profile_id when no email passed', async () => {
+    let captured: any = null;
+    const fetchImpl = fakeFetch(async (_u, init) => {
+      captured = JSON.parse(init.body);
+      return { status: 202, body: { data: { id: 'del-2' } } };
+    });
+    const client = new KlaviyoApiClient({ apiKey: 'pk_test', fetchImpl });
+    await client.requestProfileDeletion({ profile_id: 'pid-123' });
+    expect(captured.data.attributes.profile.data.attributes.id).toBe('pid-123');
+    expect(captured.data.attributes.profile.data.attributes.email).toBeUndefined();
+  });
+
+  it('throws when no identifier provided', async () => {
+    const client = new KlaviyoApiClient({ apiKey: 'pk_test', fetchImpl: fakeFetch(async () => ({ status: 200, body: {} })) });
+    await expect(client.requestProfileDeletion({} as any)).rejects.toThrow();
+  });
+
+  it('throws on 4xx', async () => {
+    const fetchImpl = fakeFetch(async () => ({ status: 400, body: { errors: [{ detail: 'bad' }] } }));
+    const client = new KlaviyoApiClient({ apiKey: 'pk_test', fetchImpl });
+    await expect(client.requestProfileDeletion({ email: 'x@y.com' })).rejects.toThrow();
+  });
+});
+
+describe('KlaviyoApiClient.listLists', () => {
+  it('returns id+name pairs', async () => {
+    const fetchImpl = fakeFetch(async (url) => {
+      expect(url).toContain('/api/lists');
+      return {
+        status: 200,
+        body: {
+          data: [
+            { id: 'L1', attributes: { name: 'Trade Customers' } },
+            { id: 'L2', attributes: { name: 'BDNY Booth 2026' } },
+          ],
+          links: {},
+        },
+      };
+    });
+    const client = new KlaviyoApiClient({ apiKey: 'pk_test', fetchImpl });
+    const r = await client.listLists();
+    expect(r).toEqual([
+      { id: 'L1', name: 'Trade Customers' },
+      { id: 'L2', name: 'BDNY Booth 2026' },
+    ]);
+  });
+
+  it('handles empty list response', async () => {
+    const fetchImpl = fakeFetch(async () => ({ status: 200, body: { data: [] } }));
+    const client = new KlaviyoApiClient({ apiKey: 'pk_test', fetchImpl });
+    const r = await client.listLists();
+    expect(r).toEqual([]);
+  });
+});

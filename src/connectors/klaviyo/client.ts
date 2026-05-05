@@ -482,6 +482,67 @@ export class KlaviyoApiClient {
       errors: a.errors,
     };
   }
+
+  /** GET /profiles?filter=equals(email,"...")&include=lists — single-profile
+   *  lookup by email used by the delete-preview path. Returns null when the
+   *  email isn't on file. `created_at` is normalized across the two attribute
+   *  names Klaviyo has used historically (`created` and `created_at`). List
+   *  names are resolved from the `included` block when present, falling back
+   *  to the bare list id so callers always get a stable string array. */
+  async findProfileByEmail(email: string): Promise<{ id: string; created_at: string; lists: string[] } | null> {
+    const filter = `equals(email,"${email.replace(/"/g, '\\"')}")`;
+    const path = `/profiles?filter=${encodeURIComponent(filter)}&include=lists&fields[profile]=email,created`;
+    const resp = await this.get<{ data: any[]; included?: any[] }>(path);
+    const profile = resp?.data?.[0];
+    if (!profile) return null;
+    const listIds: string[] = (profile.relationships?.lists?.data ?? []).map((d: any) => d.id);
+    const listNames = listIds.map((lid) => {
+      const l = (resp.included ?? []).find((x: any) => x.type === 'list' && x.id === lid);
+      return l?.attributes?.name ?? lid;
+    });
+    return {
+      id: profile.id,
+      created_at: profile.attributes?.created ?? profile.attributes?.created_at,
+      lists: listNames,
+    };
+  }
+
+  /** POST /data-privacy-deletion-jobs — kicks off the GDPR/CCPA-compliant
+   *  async profile deletion job (NOT the soft "suppress" path — this purges
+   *  the profile and all associated events). Klaviyo accepts exactly one
+   *  identifier on the inner profile attributes block; we prefer email,
+   *  then phone_number, then profile_id. Returns the job id, which surfaces
+   *  back to the user as a "submitted, processing within 30 days" receipt. */
+  async requestProfileDeletion(opts: { email?: string; profile_id?: string; phone_number?: string }): Promise<{ deletion_job_id: string }> {
+    if (!opts.email && !opts.profile_id && !opts.phone_number) {
+      throw new Error('requestProfileDeletion requires email, profile_id, or phone_number');
+    }
+    const profileAttributes: Record<string, unknown> = {};
+    if (opts.email) profileAttributes.email = opts.email;
+    else if (opts.phone_number) profileAttributes.phone_number = opts.phone_number;
+    else if (opts.profile_id) profileAttributes.id = opts.profile_id;
+
+    const body = {
+      data: {
+        type: 'data-privacy-deletion-job',
+        attributes: {
+          profile: { data: { type: 'profile', attributes: profileAttributes } },
+        },
+      },
+    };
+    const resp = await this.post<{ data: { id: string } }>('/data-privacy-deletion-jobs', body);
+    if (!resp?.data?.id) throw new KlaviyoApiError('Klaviyo returned no deletion_job_id', 502, resp);
+    return { deletion_job_id: resp.data.id };
+  }
+
+  /** GET /lists — flat id+name directory used by `klaviyo.import_profiles`
+   *  to resolve a human-readable list name to the list id required by the
+   *  bulk-subscribe job. Capped at 100 lists per page; if an account ever
+   *  exceeds that, switch to the paginate helper. */
+  async listLists(): Promise<Array<{ id: string; name: string }>> {
+    const resp = await this.get<{ data: any[] }>('/lists?fields[list]=name&page[size]=100');
+    return (resp?.data ?? []).map((l: any) => ({ id: l.id, name: l.attributes?.name ?? l.id }));
+  }
 }
 
 /** Add `n` days to a YMD-format string and return the result in YMD format,

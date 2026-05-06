@@ -688,18 +688,38 @@ export class KlaviyoConnector implements Connector {
     let listName: string | null = null;
     if (args.list) {
       const lists = await this.deps.client.listLists();
+      const needle = args.list.trim().toLowerCase();
       const exactById = lists.find((l) => l.id === args.list);
-      const byName = exactById ?? lists.find((l) => l.name.toLowerCase() === args.list!.toLowerCase());
-      if (!byName) {
-        const needle = args.list.toLowerCase();
+      const exactByName = exactById ?? lists.find((l) => l.name.toLowerCase() === needle);
+      let resolved = exactByName;
+      // Natural-language extraction: when the user typed a phrase like
+      // "subelos a lista de prueba" instead of just the bare list name,
+      // we look for any list whose name appears as a substring of the
+      // user's input. If there's exactly one such list, auto-resolve to
+      // it. Multiple → ask the user to disambiguate. Zero matches →
+      // fall back to the existing "list name appears in the user input"
+      // suggestions (which can be empty for entirely-novel names).
+      if (!resolved) {
+        const containedInInput = lists
+          .filter((l) => l.name.length >= 2 && needle.includes(l.name.toLowerCase()))
+          // longer name matches first (more specific wins)
+          .sort((a, b) => b.name.length - a.name.length);
+        if (containedInInput.length === 1) {
+          resolved = containedInInput[0];
+        } else if (containedInInput.length > 1) {
+          const top5 = containedInInput.slice(0, 5).map(({ id, name }) => ({ id, name }));
+          return { error: { code: 'LIST_NOT_FOUND', message: `Multiple lists could match "${args.list}".`, details: { suggestions: top5 } } };
+        }
+      }
+      if (!resolved) {
         const top5 = lists
           .filter((l) => l.name.toLowerCase().includes(needle))
           .slice(0, 5)
           .map(({ id, name }) => ({ id, name }));
         return { error: { code: 'LIST_NOT_FOUND', message: `No list matched "${args.list}".`, details: { suggestions: top5 } } };
       }
-      listId = byName.id;
-      listName = byName.name;
+      listId = resolved.id;
+      listName = resolved.name;
     }
 
     const raws: RawProfile[] = args.profiles.map((p, i) => ({

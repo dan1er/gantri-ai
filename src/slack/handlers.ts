@@ -367,6 +367,13 @@ export interface FileSharedDeps {
       file?: {
         id: string; name: string; filetype: string; mimetype: string;
         size: number; url_private_download: string;
+        // Slack delivers a `shares` map indexed by channel — each entry has the
+        // file's parent message ts (the ts of the message the user sent when
+        // they uploaded). Used to thread the bot's reply under the upload.
+        shares?: {
+          public?: Record<string, Array<{ ts?: string; thread_ts?: string }>>;
+          private?: Record<string, Array<{ ts?: string; thread_ts?: string }>>;
+        };
       };
     }>;
     downloadFile(url: string): Promise<Buffer>;
@@ -458,26 +465,37 @@ export async function handleFileShared(input: { event: FileSharedEvent; deps: Fi
     .upload(`klaviyo-imports/${file.id}-${Date.now()}.csv`, buf, 'text/csv')
     .catch(() => ({ path: null as any }));
 
-  if (parsed.warnings.length > 0) {
-    await deps.slack.postMessage(event.channel_id, parsed.warnings.join('\n'), undefined);
-  }
+  // Find the ts of the message that uploaded this file, so the bot's ack
+  // (and every subsequent commit reply) can thread under it instead of
+  // landing in the main DM. Slack's files.info returns a `shares` map per
+  // channel; we pick the first entry for the channel where the upload
+  // happened. Falls back to undefined (main channel reply) if absent.
+  const shareTs =
+    file.shares?.public?.[event.channel_id]?.[0]?.thread_ts ??
+    file.shares?.public?.[event.channel_id]?.[0]?.ts ??
+    file.shares?.private?.[event.channel_id]?.[0]?.thread_ts ??
+    file.shares?.private?.[event.channel_id]?.[0]?.ts;
 
   // Klaviyo's bulk-subscribe endpoint silently drops profiles when no list is
   // attached (returns 202 OK but no work is done), so we CANNOT auto-import a
   // CSV upload without first confirming the target list. Stash the parsed
-  // rows in pending_confirmations and prompt the user — the LLM picks up the
-  // reply and calls klaviyo.commit_pending_csv_import with the chosen list.
+  // rows in pending_confirmations and prompt the user — the confirmation
+  // handler picks up the reply and calls klaviyo.commit_pending_csv_import.
   const profiles = parsed.rows.map(({ rowIndex: _i, ...rest }) => rest);
   const pending = await deps.pendingRepo.insert({
     callerSlackId: event.user_id,
     channelId: event.channel_id,
-    threadTs: event.channel_id, // DM, no thread — use channel as the thread key
+    // Use the file-share ts as the thread key when present; this matches the
+    // ts the user's text reply will carry (Slack auto-sets thread_ts for replies
+    // in a thread). Fallback to channel_id for DMs that don't return a share ts.
+    threadTs: shareTs ?? event.channel_id,
     kind: 'klaviyo_csv_pending',
     payload: {
       profiles,
       filename: file.name,
       storagePath: upload.path ?? null,
       channels: ['email'],
+      replyThreadTs: shareTs ?? null,
     },
   });
 
@@ -488,7 +506,7 @@ export async function handleFileShared(input: { event: FileSharedEvent; deps: Fi
     `Which Klaviyo list should I import them to? Reply with the list name (or "no list" to create profiles without list-membership, or "cancel" to abort).`,
     `_Pending import token: \`${pending.confirmationToken}\` — expires in 30 minutes._`,
   );
-  await deps.slack.postMessage(event.channel_id, lines.join('\n'), undefined);
+  await deps.slack.postMessage(event.channel_id, lines.join('\n'), shareTs);
   logger.info(
     { pendingId: pending.id, fileId: file.id, profiles: profiles.length, caller: event.user_id },
     'klaviyo_csv_pending_created',

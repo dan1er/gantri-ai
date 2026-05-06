@@ -41,6 +41,22 @@ function rowFromDb(r: Record<string, any>): PendingConfirmationRow {
 export class PendingConfirmationsRepo {
   constructor(private readonly client: SupabaseClient) {}
 
+  /** Patch the payload jsonb on an existing row. Used by the CSV-pending
+   *  flow to remember "user previously named list X that doesn't exist yet"
+   *  so a subsequent "yes" reply can create + import in one step. */
+  async updatePayload(id: string, patch: Record<string, unknown>): Promise<void> {
+    const { data: existing, error: readErr } = await this.client
+      .from('pending_confirmations')
+      .select('payload')
+      .eq('id', id)
+      .maybeSingle();
+    if (readErr) throw new Error(`pending_confirmations updatePayload read failed: ${readErr.message}`);
+    if (!existing) throw new Error('pending_confirmations updatePayload: row not found');
+    const merged = { ...((existing as any).payload ?? {}), ...patch };
+    const { error } = await this.client.from('pending_confirmations').update({ payload: merged }).eq('id', id);
+    if (error) throw new Error(`pending_confirmations updatePayload write failed: ${error.message}`);
+  }
+
   async insert(input: InsertPendingInput): Promise<PendingConfirmationRow> {
     const ttl = input.ttlMinutes ?? 30;
     const expiresAt = new Date(Date.now() + ttl * 60 * 1000).toISOString();

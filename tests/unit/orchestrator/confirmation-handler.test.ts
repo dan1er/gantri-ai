@@ -6,6 +6,7 @@ function makeHandler(opts: any = {}) {
     pendingRepo: opts.pendingRepo ?? {
       lookupByThread: vi.fn().mockResolvedValue(null),
       deleteById: vi.fn().mockResolvedValue(undefined),
+      updatePayload: vi.fn().mockResolvedValue(undefined),
     },
     importsRepo: opts.importsRepo ?? { insert: vi.fn() },
     deletionsRepo: opts.deletionsRepo ?? { insert: vi.fn() },
@@ -49,7 +50,7 @@ describe('ConfirmationHandler.tryHandle', () => {
         channelId: 'D1', threadTs: 'D1',
         payload: { profiles: [{ email: 'a@x.com' }], filename: 'f.csv', storagePath: null, channels: ['email'] },
       }),
-      deleteById: vi.fn(),
+      deleteById: vi.fn(), updatePayload: vi.fn().mockResolvedValue(undefined),
     };
     const runTool = vi.fn().mockResolvedValue({
       kind: 'imported_directly', total_imported: 1, list: { id: 'L1', name: 'Trade Show Leads' },
@@ -73,7 +74,7 @@ describe('ConfirmationHandler.tryHandle', () => {
         channelId: 'D1', threadTs: 'D1',
         payload: { profiles: [{ email: 'a@x.com' }], filename: 'f.csv', storagePath: null, channels: ['email'] },
       }),
-      deleteById: vi.fn(),
+      deleteById: vi.fn(), updatePayload: vi.fn().mockResolvedValue(undefined),
     };
     const runTool = vi.fn().mockResolvedValue({
       error: { code: 'LIST_NOT_FOUND', details: { suggestions: [{ id: 'L1', name: 'Trade Show Leads' }] } },
@@ -228,7 +229,7 @@ describe('ConfirmationHandler.tryHandle', () => {
       lookupByThread: vi.fn().mockResolvedValue({
         id: 'p1', kind: 'klaviyo_import', callerSlackId: 'OTHER', payload: {},
       }),
-      deleteById: vi.fn(),
+      deleteById: vi.fn(), updatePayload: vi.fn().mockResolvedValue(undefined),
     };
     const handler = makeHandler({ pendingRepo });
     const r = await handler.tryHandle({ slackUserId: 'U1', channelId: 'D1', threadTs: 't0', text: 'yes' });

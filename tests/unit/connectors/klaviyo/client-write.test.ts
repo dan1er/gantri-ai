@@ -350,7 +350,8 @@ describe('KlaviyoApiClient.createList', () => {
     expect(captured.url).toBe('https://a.klaviyo.com/api/lists');
     expect(captured.body.data.type).toBe('list');
     expect(captured.body.data.attributes.name).toBe('BDNY 2026');
-    expect(captured.body.data.attributes.opt_in_process).toBeUndefined();
+    // Defaults to single_opt_in (NOT Klaviyo's double_opt_in default) so imports actually land in the list.
+    expect(captured.body.data.attributes.opt_in_process).toBe('single_opt_in');
   });
 
   it('passes opt_in_process when provided', async () => {

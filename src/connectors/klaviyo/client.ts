@@ -583,11 +583,20 @@ export class KlaviyoApiClient {
     return { deletion_job_id: `local-deletion-${randomUUID()}` };
   }
 
-  /** Create a new Klaviyo list. opt_in_process defaults to 'double_opt_in' (Klaviyo's default).
+  /** Create a new Klaviyo list. **Defaults to `single_opt_in`** (NOT Klaviyo's
+   *  default of `double_opt_in`). Reasoning: in our import flow, the operator
+   *  (admin/marketing user) is curating a list of contacts who already gave
+   *  consent — the audit row is the consent record, not a Klaviyo confirmation
+   *  email. If we default to double_opt_in, every imported profile would just
+   *  sit pending until they click an email Klaviyo sends, and the list would
+   *  appear empty (we hit this in production smoke). Override with
+   *  optInProcess: 'double_opt_in' if the caller really needs that flow.
    *  Returns { id, name }. Throws KlaviyoApiError on 4xx (e.g. duplicate name). */
   async createList(opts: { name: string; optInProcess?: 'single_opt_in' | 'double_opt_in' }): Promise<{ id: string; name: string }> {
-    const attributes: Record<string, unknown> = { name: opts.name };
-    if (opts.optInProcess) attributes.opt_in_process = opts.optInProcess;
+    const attributes: Record<string, unknown> = {
+      name: opts.name,
+      opt_in_process: opts.optInProcess ?? 'single_opt_in',
+    };
     const body = { data: { type: 'list', attributes } };
     const resp = await this.post<{ data: { id: string; attributes: { name: string } } }>('/lists', body);
     if (!resp?.data?.id) throw new KlaviyoApiError('Klaviyo returned no list id', 502, resp);

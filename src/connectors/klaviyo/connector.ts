@@ -689,79 +689,14 @@ export class KlaviyoConnector implements Connector {
     if (args.list) {
       const lists = await this.deps.client.listLists();
       const rawNeedle = args.list.trim().toLowerCase();
-      // Strip leading "verb + preposition" filler so "let's use lista de prueba"
-      // collapses to "lista de prueba". This runs ONCE per resolution; if the
-      // user's input is already a plain name, the regex doesn't match and the
-      // needle is unchanged. Order: longest patterns first so longer multi-word
-      // prefixes are stripped before shorter sub-prefixes.
-      // Conservative prefix stripping — patterns must require an article /
-      // preposition / verb before the list-language word to avoid eating the
-      // user's actual list name (e.g., a list named "lista de prueba" must
-      // NOT be reduced to "de prueba" by a `^lista\s+` rule). Order matters:
-      // longer / more specific patterns first.
-      // 'create'/'crear' intentionally excluded — they have dedicated
-      // 'create a list called X' patterns later in the array; including them
-      // here would let the bare-verb rule strip just 'create ' first.
-      const VERBS_EN = '(use|do|make|try|pick|choose|go\\s+with|import|send|push|add|put|upload|select|do\\s+it\\s+with)';
-      const VERBS_ES = '(usar|hacer|subir|elegir|escoger|seleccionar|probar|importar)';
-      const stripPrefixes: RegExp[] = [
-        // English filler verbs after "let's" / "lets". Dedicated patterns
-        // (create / crear) come BEFORE the generic verb stripper so the more
-        // specific rule wins.
-        /^let'?s\s+create\s+(a\s+|the\s+)?list\s+(called\s+)?/i,
-        /^let'?s\s+(create|make)\s+/i,
-        // Only strip "lista" inside this Spanish phrase if there's an
-        // unambiguous "llamada" / "que se llama" indicator. Otherwise the
-        // user typed "vamos a crear lista de prueba" intending the list
-        // name to literally be "lista de prueba" — not just "de prueba".
-        /^vamos\s+a\s+(crear|hacer)\s+(la\s+lista\s+(llamada\s+|que\s+se\s+llama\s+))?/i,
-        new RegExp(`^let'?s\\s+${VERBS_EN}\\s+(the\\s+list\\s+(called\\s+)?)?`, 'i'),
-        new RegExp(`^${VERBS_EN}\\s+the\\s+list\\s+(called\\s+)?`, 'i'),
-        new RegExp(`^${VERBS_EN}\\s+`, 'i'),
-        // Spanish "vamos a + verbo"
-        new RegExp(`^vamos\\s+a\\s+${VERBS_ES}\\s+(la\\s+lista\\s+(llamada\\s+|que\\s+se\\s+llama\\s+)?)?`, 'i'),
-        new RegExp(`^${VERBS_ES}\\s+(la\\s+lista\\s+(llamada\\s+|que\\s+se\\s+llama\\s+)?)?`, 'i'),
-        /^create\s+(a\s+|the\s+)?list\s+(called\s+)?/i,
-        /^call\s+it\s+/i,
-        /^name\s+it\s+/i,
-        /^the\s+name\s+is\s+/i,
-        // English: "(send/import/add/put) (them) (in)to (the) list (called) X"
-        /^(send|push|import|add|put)\s+(them?\s+)?(in)?to\s+(the\s+)?(list\s+(called\s+)?)?/i,
-        /^(send|push)\s+(them?\s+)?to\s+/i,
-        /^to\s+the\s+list\s+(called\s+)?/i,
-        /^to\s+list:?\s+/i,
-        /^to\s+/i,
-        /^name:?\s+/i,
-        // Spanish: "subelos (a la lista) X" / "subelos (a) X"
-        /^sub[ie]+los?\s+(a\s+(la\s+lista\s+(llamada\s+|que\s+se\s+llama\s+)?)?)?/i,
-        /^sub[ie]+lo\s+(a\s+(la\s+lista\s+(llamada\s+|que\s+se\s+llama\s+)?)?)?/i,
-        // Spanish: "a la lista (llamada) X" / "en la lista (llamada) X" — REQUIRES "la"
-        /^a\s+la\s+lista\s+(llamada\s+|que\s+se\s+llama\s+)?/i,
-        /^en\s+la\s+lista\s+(llamada\s+|que\s+se\s+llama\s+)?/i,
-        /^la\s+lista\s+es\s+/i,
-        /^lista\s+es\s+/i,
-        // Generic colon prefix: "list: X" — but NOT bare "list X" or "lista X"
-        // to avoid eating list names that start with those words.
-        /^list:\s+/i,
-        /^lista:\s+/i,
-      ];
       let normalizedRaw = args.list.trim();
-      let changed = true;
-      // iterate up to 3 times so e.g. "let's use the list called X" peels
-      // multiple stacked prefixes
-      for (let i = 0; i < 3 && changed; i++) {
-        changed = false;
-        for (const re of stripPrefixes) {
-          const next = normalizedRaw.replace(re, '');
-          if (next.length < normalizedRaw.length && next.length >= 1) {
-            normalizedRaw = next.trim();
-            changed = true;
-            break;
-          }
-        }
-      }
-      // Also strip trailing punctuation / surrounding quotes.
-      normalizedRaw = normalizedRaw.replace(/^["'`«»“”‘’]+|["'`«»“”‘’]+$/g, '').replace(/[.,;:!?]+$/g, '').trim();
+      // Strip wrapping quotes + trailing punctuation only. The LLM is responsible
+      // for extracting the list name from natural-language phrases before calling
+      // this tool — we no longer try to peel filler prefixes here. (The pending-CSV
+      // reply path injects a system note instructing the LLM to do the extraction.)
+      // Strip trailing punctuation first, then wrapping quotes, so e.g.
+      // `"lista de prueba".` → `"lista de prueba"` → `lista de prueba`.
+      normalizedRaw = normalizedRaw.replace(/[.,;:!?]+$/g, '').replace(/^["'`«»“”‘’]+|["'`«»“”‘’]+$/g, '').trim();
       const needle = (normalizedRaw || rawNeedle).toLowerCase();
       const exactById = lists.find((l) => l.id === args.list);
       const exactByName = exactById ?? lists.find((l) => l.name.toLowerCase() === needle);

@@ -159,6 +159,32 @@ describe('klaviyo.import_profiles', () => {
     expect(subscribeCall.listId).toBe('L_PRUEBA');
   });
 
+  it('returns LIST_NOT_FOUND with the raw input when no whole-word match (no prefix stripping)', async () => {
+    const deps = makeDeps({ listLists: [{ id: 'L_OTHER', name: 'Some Other List' }] });
+    const tool = getTool(deps);
+    const r = await tool.execute({
+      profiles: [{ email: 'a@x.com' }],
+      channels: ['email'],
+      list: "let's use lista de prueba", // no list named "lista de prueba" exists
+    });
+    expect((r as any).error?.code).toBe('LIST_NOT_FOUND');
+    // After dropping stripPrefixes, normalizedName is the trimmed raw input
+    // (we still strip wrapping quotes + trailing punctuation, nothing else).
+    expect((r as any).error.details.normalizedName).toBe("let's use lista de prueba");
+  });
+
+  it('strips wrapping quotes and trailing punctuation only', async () => {
+    const deps = makeDeps({ listLists: [{ id: 'L_OTHER', name: 'Some Other List' }] });
+    const tool = getTool(deps);
+    const r = await tool.execute({
+      profiles: [{ email: 'a@x.com' }],
+      channels: ['email'],
+      list: '"lista de prueba".',
+    });
+    expect((r as any).error?.code).toBe('LIST_NOT_FOUND');
+    expect((r as any).error.details.normalizedName).toBe('lista de prueba');
+  });
+
   it('does NOT false-match a short list name ("PR") inside a longer word ("prueba") — regression', async () => {
     const deps = makeDeps({ listLists: [
       { id: 'L_PR', name: 'PR' },
@@ -175,47 +201,6 @@ describe('klaviyo.import_profiles', () => {
     // MUST resolve to the exact-name match (lista de prueba), NOT the
     // accidentally-substring-matching "PR" inside "**pr**ueba".
     expect(subscribeCall.listId).toBe('L_PRUEBA');
-  });
-
-  it.each([
-    ["let's use lista de prueba", 'lista de prueba'],
-    ["let's do lista de prueba", 'lista de prueba'],
-    ["let's make lista de prueba", 'lista de prueba'],
-    ["let's try lista de prueba", 'lista de prueba'],
-    ["let's pick lista de prueba", 'lista de prueba'],
-    ["let's go with lista de prueba", 'lista de prueba'],
-    ["lets use lista de prueba", 'lista de prueba'], // missing apostrophe
-    ['vamos a usar lista de prueba', 'lista de prueba'],
-    ['vamos a crear lista de prueba', 'lista de prueba'],
-    ['probar lista de prueba', 'lista de prueba'],
-    ['select lista de prueba', 'lista de prueba'],
-    ['upload to lista de prueba', 'lista de prueba'],
-    ['use lista de prueba', 'lista de prueba'],
-    ['use the list lista de prueba', 'lista de prueba'],
-    ['use the list called lista de prueba', 'lista de prueba'],
-    ['create a list called BDNY 2026', 'BDNY 2026'],
-    ['call it BDNY 2026', 'BDNY 2026'],
-    ['name it BDNY 2026', 'BDNY 2026'],
-    ['the name is lista de prueba', 'lista de prueba'],
-    ['subelos a lista de prueba', 'lista de prueba'],
-    ['subelos a la lista lista de prueba', 'lista de prueba'],
-    ['en la lista lista de prueba', 'lista de prueba'],
-    ['la lista es lista de prueba', 'lista de prueba'],
-    ['to list lista de prueba', 'lista de prueba'],
-    ['to lista de prueba', 'lista de prueba'],
-    ['list: lista de prueba', 'lista de prueba'],
-    ['"lista de prueba"', 'lista de prueba'],
-    ['lista de prueba.', 'lista de prueba'],
-  ])('strips filler prefix from %j → normalizes to %j (proposed for create)', async (rawInput, expectedNormalized) => {
-    const deps = makeDeps({ listLists: [{ id: 'L_OTHER', name: 'Some Other List' }] });
-    const tool = getTool(deps);
-    const r = await tool.execute({
-      profiles: [{ email: 'a@x.com' }],
-      channels: ['email'],
-      list: rawInput,
-    });
-    expect((r as any).error?.code).toBe('LIST_NOT_FOUND');
-    expect((r as any).error.details.normalizedName.toLowerCase()).toBe(expectedNormalized.toLowerCase());
   });
 
   it('multiple natural-language matches → LIST_NOT_FOUND with both as suggestions', async () => {

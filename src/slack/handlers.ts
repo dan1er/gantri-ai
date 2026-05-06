@@ -115,7 +115,11 @@ export function createDmHandler(deps: HandlerDeps) {
     if (event.subtype) return;
     if (!event.text || !event.user) return;
 
-    const threadTs = event.thread_ts ?? event.ts;
+    // For DMs we treat the entire channel as a single "thread" — Slack DMs are
+    // flat by default, and pending_confirmations rows from file_shared use
+    // channel_id as the key. Without this, a CSV upload's pending row (keyed
+    // by channel_id) wouldn't match the user's text-reply (keyed by event.ts).
+    const threadTs = event.thread_ts ?? event.channel;
 
     // Confirmation flow: if this is a "yes"/"cancel" reply in a thread that
     // has a pending row, the handler runs the queued import/delete and

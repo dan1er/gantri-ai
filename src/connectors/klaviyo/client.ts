@@ -537,11 +537,12 @@ export class KlaviyoApiClient {
 
   /** GET /lists — flat id+name directory used by `klaviyo.import_profiles`
    *  to resolve a human-readable list name to the list id required by the
-   *  bulk-subscribe job. Capped at 100 lists per page; if an account ever
-   *  exceeds that, switch to the paginate helper. */
+   *  bulk-subscribe job. Klaviyo's `/api/lists` endpoint caps page size at 10
+   *  (NOT 100 like other endpoints — sending `page[size]=100` returns 400).
+   *  We use the shared `paginate` helper to follow `links.next`. */
   async listLists(): Promise<Array<{ id: string; name: string }>> {
-    const resp = await this.get<{ data: any[] }>('/lists?fields[list]=name&page[size]=100');
-    return (resp?.data ?? []).map((l: any) => ({ id: l.id, name: l.attributes?.name ?? l.id }));
+    const rows = await this.paginate<{ name: string }>('/lists', { 'fields[list]': 'name', 'page[size]': '10' });
+    return rows.map((l) => ({ id: l.id, name: l.attributes?.name ?? l.id }));
   }
 }
 

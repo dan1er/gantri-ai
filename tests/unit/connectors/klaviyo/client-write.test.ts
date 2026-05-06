@@ -225,8 +225,10 @@ describe('KlaviyoApiClient.requestProfileDeletion', () => {
 });
 
 describe('KlaviyoApiClient.listLists', () => {
-  it('returns id+name pairs', async () => {
+  it('returns id+name pairs and uses page[size]=10 (Klaviyo /api/lists cap)', async () => {
+    let capturedUrl: string | null = null;
     const fetchImpl = fakeFetch(async (url) => {
+      capturedUrl = url;
       expect(url).toContain('/api/lists');
       return {
         status: 200,
@@ -245,6 +247,36 @@ describe('KlaviyoApiClient.listLists', () => {
       { id: 'L1', name: 'Trade Customers' },
       { id: 'L2', name: 'BDNY Booth 2026' },
     ]);
+    // Klaviyo's /api/lists endpoint caps page[size] at 10 (sending 100 returns 400).
+    expect(capturedUrl).toContain('page%5Bsize%5D=10');
+    expect(capturedUrl).not.toContain('page%5Bsize%5D=100');
+  });
+
+  it('paginates via links.next when account has more than 10 lists', async () => {
+    let callCount = 0;
+    const fetchImpl = fakeFetch(async () => {
+      callCount++;
+      if (callCount === 1) {
+        return {
+          status: 200,
+          body: {
+            data: Array.from({ length: 10 }, (_, i) => ({ id: `L${i}`, attributes: { name: `List ${i}` } })),
+            links: { next: 'https://a.klaviyo.com/api/lists?page%5Bcursor%5D=cursor1' },
+          },
+        };
+      }
+      return {
+        status: 200,
+        body: {
+          data: [{ id: 'L10', attributes: { name: 'List 10' } }],
+          links: {},
+        },
+      };
+    });
+    const client = new KlaviyoApiClient({ apiKey: 'pk_test', fetchImpl });
+    const r = await client.listLists();
+    expect(r.length).toBe(11);
+    expect(callCount).toBe(2);
   });
 
   it('handles empty list response', async () => {

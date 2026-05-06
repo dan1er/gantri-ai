@@ -59,6 +59,7 @@ export const WHITELISTED_TOOLS = new Set<string>([
   'klaviyo.flow_performance',
   'klaviyo.import_status',
   'klaviyo.list_campaigns',
+  'klaviyo.list_lists',
   'klaviyo.list_segments',
   // Google Search Console (SEO)
   'gsc.list_sites',

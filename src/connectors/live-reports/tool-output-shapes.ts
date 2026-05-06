@@ -419,6 +419,18 @@ export const TOOL_OUTPUT_SHAPES: Record<string, ToolOutputSample> = {
     expectedTopLevelKeys: ['channel', 'count', 'totalAcrossAccount', 'campaigns'],
     expectedArrayElementKeys: { campaigns: ['id', 'name', 'status', 'channel', 'archived', 'scheduled_at', 'send_time', 'created_at'] },
   },
+  'klaviyo.list_lists': {
+    summary: 'Every Klaviyo list (id + name). Args: {} (none). Lists are static audiences (vs. segments which are dynamic queries). { count, lists: [{ id, name }] }.',
+    example: {
+      count: 2,
+      lists: [
+        { id: 'XgtjkS', name: 'Trade Customers' },
+        { id: 'AbCd12', name: 'BDNY Booth 2026' },
+      ],
+    },
+    expectedTopLevelKeys: ['count', 'lists'],
+    expectedArrayElementKeys: { lists: ['id', 'name'] },
+  },
   'klaviyo.list_segments': {
     summary: 'Klaviyo segments with current member counts + 30-day churn, sorted by `profile_count` desc. { count, totalAcrossAccount, segments: [{ id, name, profile_count, members_added_30d, members_removed_30d, is_active, is_processing, created, updated }] }. `profile_count` and the churn fields may be null if Klaviyo\'s segment-values-report endpoint was rate-limited at fetch time.',
     example: {

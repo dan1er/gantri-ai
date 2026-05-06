@@ -449,6 +449,21 @@ export class KlaviyoConnector implements Connector {
         execute: (args) => this.runDelete(args as DeleteProfilesArgs),
       } as ToolDef<DeleteProfilesArgs>,
       {
+        name: 'klaviyo.list_lists',
+        description: [
+          'Enumerate all Klaviyo lists (id + name).',
+          'Open to ALL authorized users (read-only).',
+          'Use BEFORE klaviyo.import_profiles to show the user the available lists when they didn\'t specify one. Also useful for "what lists do we have in Klaviyo?".',
+          'Klaviyo lists are static audiences (NOT segments — segments are dynamic queries). For segment listing use klaviyo.list_segments.',
+        ].join(' '),
+        schema: z.object({}) as z.ZodType<Record<string, never>>,
+        jsonSchema: zodToJsonSchema(z.object({})),
+        execute: async () => {
+          const lists = await this.client.listLists();
+          return { count: lists.length, lists };
+        },
+      } as ToolDef<Record<string, never>>,
+      {
         name: 'klaviyo.import_status',
         description: [
           'Look up the status of a previously-queued Klaviyo import.',

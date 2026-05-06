@@ -11,6 +11,13 @@ export interface ConfirmationHandlerDeps {
   client: Pick<KlaviyoApiClient, 'bulkSubscribeProfiles' | 'requestProfileDeletion'>;
   slack: { postMessage(channel: string, text: string, threadTs?: string): Promise<void> };
   sleep?: (ms: number) => Promise<void>;
+  /** Optional tool dispatcher used to run klaviyo.commit_pending_csv_import.
+   *  When omitted (or in tests), CSV-pending dispatch is skipped. */
+  runTool?: (
+    name: string,
+    args: unknown,
+    actor: { slackUserId: string; channelId: string; threadTs?: string },
+  ) => Promise<unknown>;
 }
 
 export interface IncomingMessage {
@@ -34,8 +41,7 @@ export class ConfirmationHandler {
 
   /** Returns true if this message was consumed by the handler (do not pass to LLM). */
   async tryHandle(msg: IncomingMessage): Promise<boolean> {
-    const decision = decisionOf(msg.text);
-    if (!decision) return false;
+    // Look up any pending row first so we can dispatch by kind.
     const pending = await this.deps.pendingRepo.lookupByThread(msg.slackUserId, msg.channelId, msg.threadTs);
     if (!pending) return false;
     if (pending.callerSlackId !== msg.slackUserId) {
@@ -45,6 +51,36 @@ export class ConfirmationHandler {
       );
       return false;
     }
+
+    // CSV-list-pending uses ANY non-empty text as the list selection (deterministic
+    // — we don't want the LLM to misinterpret "prueba nueva" as a help request).
+    // Only special-case 'cancel'/'no'/'cancelar' to abort.
+    if (pending.kind === 'klaviyo_csv_pending') {
+      const text = msg.text.trim();
+      const isCancel = /^(cancel|cancelar|abort|no)$/i.test(text);
+      if (isCancel) {
+        await this.deps.pendingRepo.deleteById(pending.id);
+        await this.deps.slack.postMessage(msg.channelId, 'Cancelled. CSV import not submitted.', msg.threadTs);
+        logger.info({ pendingId: pending.id, caller: pending.callerSlackId }, 'klaviyo_csv_cancelled');
+        return true;
+      }
+      if (!text) return false;
+      try {
+        await this.executeCsvImport(pending, msg, text);
+      } catch (err: any) {
+        logger.error({ pendingId: pending.id, err: String(err?.message ?? err) }, 'klaviyo_csv_exec_failed');
+        await this.deps.slack.postMessage(
+          msg.channelId,
+          `Couldn't run the CSV import: ${String(err?.message ?? err)}`,
+          msg.threadTs,
+        );
+      }
+      return true;
+    }
+
+    // klaviyo_import / klaviyo_delete: yes/cancel only.
+    const decision = decisionOf(msg.text);
+    if (!decision) return false;
 
     if (decision === 'cancel') {
       await this.deps.pendingRepo.deleteById(pending.id);
@@ -70,6 +106,54 @@ export class ConfirmationHandler {
       await this.deps.pendingRepo.deleteById(pending.id).catch(() => {});
     }
     return true;
+  }
+
+  private async executeCsvImport(pending: PendingConfirmationRow, msg: IncomingMessage, listInput: string) {
+    if (!this.deps.runTool) {
+      await this.deps.slack.postMessage(msg.channelId, 'Internal: CSV commit handler is not wired up.', msg.threadTs);
+      return;
+    }
+    const result: any = await this.deps.runTool(
+      'klaviyo.commit_pending_csv_import',
+      { list: listInput },
+      { slackUserId: pending.callerSlackId, channelId: pending.channelId, threadTs: pending.threadTs },
+    );
+
+    if (result?.error?.code === 'LIST_NOT_FOUND') {
+      const sugg = result.error.details?.suggestions ?? [];
+      const lines: string[] = [];
+      if (sugg.length === 0) {
+        lines.push(`There's no list called *${listInput}*. Want me to create it? Reply "yes, create it" or pick another list name.`);
+      } else if (sugg.length === 1) {
+        lines.push(`Did you mean *${sugg[0].name}*? Reply with the exact name or "no" to pick something else.`);
+      } else {
+        lines.push(
+          `I see a few lists that could match: ${sugg.map((s: any) => `*${s.name}*`).join(', ')} — which one? Reply with the exact name.`,
+        );
+      }
+      await this.deps.slack.postMessage(msg.channelId, lines.join('\n'), msg.threadTs);
+      return;
+    }
+    if (result?.error) {
+      await this.deps.slack.postMessage(msg.channelId, `Couldn't import: ${result.error.message}`, msg.threadTs);
+      return;
+    }
+    if (result?.kind === 'imported_directly') {
+      await this.deps.slack.postMessage(
+        msg.channelId,
+        `Submitted ${result.total_imported} profile${result.total_imported === 1 ? '' : 's'} to Klaviyo${result.list ? ` (list: ${result.list.name})` : ''}. They typically appear within ~1 minute.`,
+        msg.threadTs,
+      );
+      return;
+    }
+    if (result?.kind === 'awaiting_confirmation') {
+      await this.deps.slack.postMessage(msg.channelId, result.message, msg.threadTs);
+      return;
+    }
+    if (result?.kind === 'all_invalid') {
+      await this.deps.slack.postMessage(msg.channelId, `All ${result.invalid_count} rows failed validation.`, msg.threadTs);
+      return;
+    }
   }
 
   private async executeImport(pending: PendingConfirmationRow, msg: IncomingMessage) {

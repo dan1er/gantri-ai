@@ -475,8 +475,8 @@ export async function handleFileShared(input: { event: FileSharedEvent; deps: Fi
   const lines: string[] = [];
   if (parsed.warnings.length > 0) lines.push(parsed.warnings.join('\n'), '');
   lines.push(
-    `Got *${profiles.length} row${profiles.length === 1 ? '' : 's'}* from \`${file.name}\`.`,
-    `Which Klaviyo list should I import them to? Reply with the list name (or "no list" to create profiles without list-membership).`,
+    `Got *${profiles.length} row${profiles.length === 1 ? '' : 's'}* from \`${file.name}\`. I'm assuming this is for a *Klaviyo import* — that's the only CSV flow I handle right now.`,
+    `Which Klaviyo list should I import them to? Reply with the list name (or "no list" to create profiles without list-membership, or "cancel" to abort).`,
     `_Pending import token: \`${pending.confirmationToken}\` — expires in 30 minutes._`,
   );
   await deps.slack.postMessage(event.channel_id, lines.join('\n'), undefined);

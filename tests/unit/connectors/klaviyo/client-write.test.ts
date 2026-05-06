@@ -46,9 +46,13 @@ describe('KlaviyoApiClient.bulkSubscribeProfiles', () => {
     expect(p0.last_name).toBeUndefined();
     expect(p0.custom_source).toBeUndefined();
     expect(p0.properties).toBeUndefined();
-    // custom_source + consented_at go at JOB level
+    // custom_source goes at JOB level
     expect(data.attributes.custom_source).toBe('BDNY 2026');
-    expect(data.attributes.consented_at).toBe('2026-05-05T10:00:00Z');
+    // consented_at is dropped entirely — Klaviyo only accepts it for
+    // historical imports inside subscriptions.email.marketing, not at the
+    // job level. Live imports use "now" automatically.
+    expect(data.attributes.consented_at).toBeUndefined();
+    expect(data.attributes.profiles.data[0].attributes.consented_at).toBeUndefined();
     expect(data.attributes.historical_import).toBe(false);
   });
 

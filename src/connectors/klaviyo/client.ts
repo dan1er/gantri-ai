@@ -472,13 +472,13 @@ export class KlaviyoApiClient {
       opts.profiles.find((p) => p.custom_source)?.custom_source ??
       undefined;
     if (jobCustomSource) jobAttributes.custom_source = jobCustomSource;
-    // consented_at is also rejected at the profile level; if any per-row
-    // consented_at was supplied or a batch-level one, set it at job level.
-    const jobConsentedAt =
-      opts.consentedAt ??
-      opts.profiles.find((p) => p.consented_at)?.consented_at ??
-      undefined;
-    if (jobConsentedAt) jobAttributes.consented_at = jobConsentedAt;
+    // NOTE: consented_at is rejected at the profile-resource level AND at the
+    // job level. It only works if you pass it INSIDE subscriptions.email.marketing
+    // AND set historical_import: true. For normal live imports we always want
+    // current-time consent — Klaviyo records "now" automatically. If we ever
+    // need to record a backdated consent (e.g., migrating from another tool),
+    // we'd add a `historical: true` opt + place consented_at inside the
+    // subscription. For the v1 import flow we just drop it.
 
     const body: Record<string, unknown> = {
       data: {

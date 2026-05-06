@@ -202,13 +202,15 @@ export class ConfirmationHandler {
 
     if (result?.error?.code === 'LIST_NOT_FOUND') {
       const sugg = result.error.details?.suggestions ?? [];
+      // The tool strips filler prefixes ("let's use", "to list", "subelos a")
+      // and returns the cleaned name in details.normalizedName. Prefer that
+      // over the raw user input — both for the user-facing prompt AND for
+      // what the pending row remembers as the "would-create" name.
+      const candidateName: string = result.error.details?.normalizedName?.trim?.() || listInput;
       const lines: string[] = [];
       if (sugg.length === 0) {
-        // No similar lists. Offer to create a new one with the user's input.
-        // Stash the candidate name in the pending row so a follow-up "yes"
-        // creates THIS list (instead of a list literally named "yes").
-        await this.deps.pendingRepo.updatePayload(pending.id, { awaitingCreateForName: listInput }).catch(() => {});
-        lines.push(`There's no list called *${listInput}*. Want me to create it? Reply *yes* (creates "${listInput}") or pick a different list name.`);
+        await this.deps.pendingRepo.updatePayload(pending.id, { awaitingCreateForName: candidateName }).catch(() => {});
+        lines.push(`There's no list called *${candidateName}*. Want me to create it? Reply *yes* (creates "${candidateName}") or pick a different list name.`);
       } else if (sugg.length === 1) {
         lines.push(`Did you mean *${sugg[0].name}*? Reply with the exact name or "no" to pick something else.`);
       } else {

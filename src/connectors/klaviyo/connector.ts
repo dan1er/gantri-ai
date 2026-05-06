@@ -688,7 +688,65 @@ export class KlaviyoConnector implements Connector {
     let listName: string | null = null;
     if (args.list) {
       const lists = await this.deps.client.listLists();
-      const needle = args.list.trim().toLowerCase();
+      const rawNeedle = args.list.trim().toLowerCase();
+      // Strip leading "verb + preposition" filler so "let's use lista de prueba"
+      // collapses to "lista de prueba". This runs ONCE per resolution; if the
+      // user's input is already a plain name, the regex doesn't match and the
+      // needle is unchanged. Order: longest patterns first so longer multi-word
+      // prefixes are stripped before shorter sub-prefixes.
+      // Conservative prefix stripping — patterns must require an article /
+      // preposition / verb before the list-language word to avoid eating the
+      // user's actual list name (e.g., a list named "lista de prueba" must
+      // NOT be reduced to "de prueba" by a `^lista\s+` rule). Order matters:
+      // longer / more specific patterns first.
+      const stripPrefixes: RegExp[] = [
+        // English filler verbs
+        /^let'?s\s+use\s+(the\s+list\s+(called\s+)?)?/i,
+        /^let'?s\s+(create|make|do)\s+a\s+list\s+called\s+/i,
+        /^use\s+the\s+list\s+(called\s+)?/i,
+        /^use\s+/i,
+        /^create\s+(a\s+|the\s+)?list\s+(called\s+)?/i,
+        /^call\s+it\s+/i,
+        /^name\s+it\s+/i,
+        /^the\s+name\s+is\s+/i,
+        // English: "send/import/add/put (them) (in)to (the) list (called) X"
+        /^(send|push|import|add|put)\s+(them?\s+)?(in)?to\s+(the\s+)?(list\s+(called\s+)?)?/i,
+        /^(send|push)\s+(them?\s+)?to\s+/i,
+        /^to\s+the\s+list\s+(called\s+)?/i,
+        /^to\s+list:?\s+/i,
+        /^to\s+/i,
+        /^name:?\s+/i,
+        // Spanish: "subelos (a la lista) X" / "subelos (a) X"
+        /^sub[ie]+los?\s+(a\s+(la\s+lista\s+(llamada\s+|que\s+se\s+llama\s+)?)?)?/i,
+        /^sub[ie]+lo\s+(a\s+(la\s+lista\s+(llamada\s+|que\s+se\s+llama\s+)?)?)?/i,
+        // Spanish: "a la lista (llamada) X" / "en la lista (llamada) X" — REQUIRES "la"
+        /^a\s+la\s+lista\s+(llamada\s+|que\s+se\s+llama\s+)?/i,
+        /^en\s+la\s+lista\s+(llamada\s+|que\s+se\s+llama\s+)?/i,
+        /^la\s+lista\s+es\s+/i,
+        /^lista\s+es\s+/i,
+        // Generic colon prefix: "list: X" — but NOT bare "list X" or "lista X"
+        // to avoid eating list names that start with those words.
+        /^list:\s+/i,
+        /^lista:\s+/i,
+      ];
+      let normalizedRaw = args.list.trim();
+      let changed = true;
+      // iterate up to 3 times so e.g. "let's use the list called X" peels
+      // multiple stacked prefixes
+      for (let i = 0; i < 3 && changed; i++) {
+        changed = false;
+        for (const re of stripPrefixes) {
+          const next = normalizedRaw.replace(re, '');
+          if (next.length < normalizedRaw.length && next.length >= 1) {
+            normalizedRaw = next.trim();
+            changed = true;
+            break;
+          }
+        }
+      }
+      // Also strip trailing punctuation / surrounding quotes.
+      normalizedRaw = normalizedRaw.replace(/^["'`«»“”‘’]+|["'`«»“”‘’]+$/g, '').replace(/[.,;:!?]+$/g, '').trim();
+      const needle = (normalizedRaw || rawNeedle).toLowerCase();
       const exactById = lists.find((l) => l.id === args.list);
       const exactByName = exactById ?? lists.find((l) => l.name.toLowerCase() === needle);
       let resolved = exactByName;
@@ -728,7 +786,7 @@ export class KlaviyoConnector implements Connector {
         } else if (filtered.length > 1) {
           // Multiple comparable-length matches → ask the user which one.
           const top5 = filtered.slice(0, 5).map(({ id, name }) => ({ id, name }));
-          return { error: { code: 'LIST_NOT_FOUND', message: `Multiple lists could match "${args.list}".`, details: { suggestions: top5 } } };
+          return { error: { code: 'LIST_NOT_FOUND', message: `Multiple lists could match "${args.list}".`, details: { suggestions: top5, normalizedName: normalizedRaw } } };
         }
         void paddedNeedle; // currently unused; keeping the variable name for future debugging
       }
@@ -737,7 +795,7 @@ export class KlaviyoConnector implements Connector {
           .filter((l) => l.name.toLowerCase().includes(needle))
           .slice(0, 5)
           .map(({ id, name }) => ({ id, name }));
-        return { error: { code: 'LIST_NOT_FOUND', message: `No list matched "${args.list}".`, details: { suggestions: top5 } } };
+        return { error: { code: 'LIST_NOT_FOUND', message: `No list matched "${normalizedRaw}".`, details: { suggestions: top5, normalizedName: normalizedRaw } } };
       }
       listId = resolved.id;
       listName = resolved.name;

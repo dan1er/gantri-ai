@@ -177,6 +177,36 @@ describe('klaviyo.import_profiles', () => {
     expect(subscribeCall.listId).toBe('L_PRUEBA');
   });
 
+  it.each([
+    ["let's use lista de prueba", 'lista de prueba'],
+    ['use lista de prueba', 'lista de prueba'],
+    ['use the list lista de prueba', 'lista de prueba'],
+    ['use the list called lista de prueba', 'lista de prueba'],
+    ['create a list called BDNY 2026', 'BDNY 2026'],
+    ['call it BDNY 2026', 'BDNY 2026'],
+    ['name it BDNY 2026', 'BDNY 2026'],
+    ['the name is lista de prueba', 'lista de prueba'],
+    ['subelos a lista de prueba', 'lista de prueba'],
+    ['subelos a la lista lista de prueba', 'lista de prueba'],
+    ['en la lista lista de prueba', 'lista de prueba'],
+    ['la lista es lista de prueba', 'lista de prueba'],
+    ['to list lista de prueba', 'lista de prueba'],
+    ['to lista de prueba', 'lista de prueba'],
+    ['list: lista de prueba', 'lista de prueba'],
+    ['"lista de prueba"', 'lista de prueba'],
+    ['lista de prueba.', 'lista de prueba'],
+  ])('strips filler prefix from %j → normalizes to %j (proposed for create)', async (rawInput, expectedNormalized) => {
+    const deps = makeDeps({ listLists: [{ id: 'L_OTHER', name: 'Some Other List' }] });
+    const tool = getTool(deps);
+    const r = await tool.execute({
+      profiles: [{ email: 'a@x.com' }],
+      channels: ['email'],
+      list: rawInput,
+    });
+    expect((r as any).error?.code).toBe('LIST_NOT_FOUND');
+    expect((r as any).error.details.normalizedName.toLowerCase()).toBe(expectedNormalized.toLowerCase());
+  });
+
   it('multiple natural-language matches → LIST_NOT_FOUND with both as suggestions', async () => {
     const deps = makeDeps({ listLists: [
       { id: 'L_A', name: 'lista de prueba' },

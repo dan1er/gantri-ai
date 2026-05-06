@@ -680,17 +680,17 @@ export class KlaviyoConnector implements Connector {
         channels: args.channels,
       });
       // Klaviyo's bulk-subscribe returns 202 with no body and no job_id, so
-      // there's nothing to poll. We mark the audit row 'complete' immediately
-      // and trust Klaviyo to process the submission. If verification is needed,
-      // the user can ask "did smoke3+test@gantri.com get added?" and we look it
-      // up via findProfileByEmail.
+      // there's nothing to poll. The DB CHECK constraint forbids inserting with
+      // status='complete' AND completed_at=null in a single statement, so we
+      // ALWAYS insert as 'queued' first, then for local-jobs immediately
+      // updateStatus to 'complete' (which sets completed_at on the same row).
       const isLocalJob = result.job_id.startsWith('local-');
       const audit = await this.deps.importsRepo.insert({
         callerSlackId: actor.slackUserId, callerEmail: null,
         source: args.source, filename: args.filename ?? null, storagePath: args.storage_path ?? null,
         listId, listName, channels: args.channels,
         totalSubmitted: raws.length, totalImported: v.valid.length, totalInvalidRejected: 0,
-        klaviyoJobId: result.job_id, status: isLocalJob ? 'complete' : 'queued',
+        klaviyoJobId: result.job_id, status: 'queued',
       });
       if (isLocalJob) {
         await this.deps.importsRepo.updateStatus(audit.id, {

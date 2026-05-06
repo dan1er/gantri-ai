@@ -88,15 +88,17 @@ export class ConfirmationHandler {
       channels: p.channels,
     });
     // Klaviyo's bulk-subscribe returns 202 with no body, so there's no
-    // real job to poll. The client returns a synthetic `local-` job_id; we
-    // mark the audit complete immediately for those.
+    // real job to poll. The DB CHECK constraint forbids inserting with
+    // status='complete' AND completed_at=null in a single statement, so we
+    // insert as 'queued' first then updateStatus to 'complete' which sets
+    // completed_at automatically.
     const isLocalJob = result.job_id.startsWith('local-');
     const audit = await this.deps.importsRepo.insert({
       callerSlackId: pending.callerSlackId, callerEmail: null,
       source: p.source, filename: p.filename, storagePath: p.storagePath,
       listId: p.listId, listName: p.listName, channels: p.channels,
       totalSubmitted: p.totalSubmitted, totalImported: p.valid.length, totalInvalidRejected: p.totalInvalidRejected,
-      klaviyoJobId: result.job_id, status: isLocalJob ? 'complete' : 'queued',
+      klaviyoJobId: result.job_id, status: 'queued',
     });
     if (isLocalJob) {
       await this.deps.importsRepo.updateStatus(audit.id, {

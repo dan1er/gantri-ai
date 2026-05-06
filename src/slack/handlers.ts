@@ -373,6 +373,16 @@ export interface FileSharedDeps {
   storage: {
     upload(path: string, body: Buffer | string, contentType: string): Promise<{ path: string }>;
   };
+  pendingRepo: {
+    insert(input: {
+      callerSlackId: string;
+      channelId: string;
+      threadTs: string;
+      kind: 'klaviyo_csv_pending';
+      payload: unknown;
+      ttlMinutes?: number;
+    }): Promise<{ id: string; confirmationToken: string }>;
+  };
 }
 
 const MAX_BYTES = 1_000_000;
@@ -443,32 +453,41 @@ export async function handleFileShared(input: { event: FileSharedEvent; deps: Fi
     await deps.slack.postMessage(event.channel_id, parsed.warnings.join('\n'), undefined);
   }
 
-  const args = {
-    source: 'csv' as const,
-    storage_path: upload.path ?? undefined,
-    filename: file.name,
-    profiles: parsed.rows.map(({ rowIndex: _i, ...rest }) => rest),
-    channels: ['email'] as const,
-  };
-  const result: any = await deps.orchestrator.runTool('klaviyo.import_profiles', args, {
-    slackUserId: event.user_id,
+  // Klaviyo's bulk-subscribe endpoint silently drops profiles when no list is
+  // attached (returns 202 OK but no work is done), so we CANNOT auto-import a
+  // CSV upload without first confirming the target list. Stash the parsed
+  // rows in pending_confirmations and prompt the user — the LLM picks up the
+  // reply and calls klaviyo.commit_pending_csv_import with the chosen list.
+  const profiles = parsed.rows.map(({ rowIndex: _i, ...rest }) => rest);
+  const pending = await deps.pendingRepo.insert({
+    callerSlackId: event.user_id,
     channelId: event.channel_id,
-    role: role!,
+    threadTs: event.channel_id, // DM, no thread — use channel as the thread key
+    kind: 'klaviyo_csv_pending',
+    payload: {
+      profiles,
+      filename: file.name,
+      storagePath: upload.path ?? null,
+      channels: ['email'],
+    },
   });
-  await deps.slack.postMessage(event.channel_id, formatImportReply(result), undefined);
+
+  const lines: string[] = [];
+  if (parsed.warnings.length > 0) lines.push(parsed.warnings.join('\n'), '');
+  lines.push(
+    `Got *${profiles.length} row${profiles.length === 1 ? '' : 's'}* from \`${file.name}\`.`,
+    `Which Klaviyo list should I import them to? Reply with the list name (or "no list" to create profiles without list-membership).`,
+    `_Pending import token: \`${pending.confirmationToken}\` — expires in 30 minutes._`,
+  );
+  await deps.slack.postMessage(event.channel_id, lines.join('\n'), undefined);
+  logger.info(
+    { pendingId: pending.id, fileId: file.id, profiles: profiles.length, caller: event.user_id },
+    'klaviyo_csv_pending_created',
+  );
 }
 
-function formatImportReply(r: any): string {
-  if (r?.kind === 'imported_directly') {
-    return `Queued ${r.total_imported} profile${r.total_imported === 1 ? '' : 's'} (audit \`${r.audit_id}\`). I'll DM when it's done.`;
-  }
-  if (r?.kind === 'awaiting_confirmation') return r.message;
-  if (r?.kind === 'all_invalid') {
-    return `All ${r.invalid_count} rows failed validation. Examples: ${(r.invalid_rows || [])
-      .slice(0, 3)
-      .map((x: any) => `row ${x.rowIndex}: ${x.reason}`)
-      .join(' | ')}`;
-  }
-  if (r?.error) return `Error (${r.error.code}): ${r.error.message}`;
-  return 'Done.';
-}
+// formatImportReply was used when the file_shared handler auto-submitted to
+// klaviyo.import_profiles. The handler now stages the rows in
+// pending_confirmations and asks the LLM to commit when the user picks a
+// list, so this formatter is no longer needed.
+

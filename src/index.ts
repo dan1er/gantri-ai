@@ -275,6 +275,7 @@ async function main() {
         },
       },
       storage: klaviyoStorageAdapter,
+      pendingRepo: klaviyoPendingRepo,
     };
   } else {
     logger.warn('klaviyo not configured (KLAVIYO_API_KEY missing) — skipping registration');
@@ -349,6 +350,7 @@ async function main() {
     },
     orchestrator: { runTool: async () => ({}) },
     storage: { upload: async () => ({ path: '' }) },
+    pendingRepo: { insert: async () => ({ id: '', confirmationToken: '' }) },
   };
 
   const { app, receiver } = buildSlackApp({

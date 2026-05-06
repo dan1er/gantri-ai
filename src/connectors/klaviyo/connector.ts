@@ -494,7 +494,60 @@ export class KlaviyoConnector implements Connector {
         jsonSchema: zodToJsonSchema(ImportStatusArgs),
         execute: (args) => this.runImportStatus(args as ImportStatusArgs),
       } as ToolDef<ImportStatusArgs>,
+      {
+        name: 'klaviyo.commit_pending_csv_import',
+        description: [
+          'Finalize a CSV upload that is waiting for a list selection.',
+          'ADMIN or MARKETING role only.',
+          'When a user uploads a CSV via Slack file_shared, the bot stashes the parsed rows in pending_confirmations and asks the user which list. Call THIS tool when the user picks a list — it loads the cached profiles + dispatches them to klaviyo.import_profiles internally.',
+          'Args: { list: string } — the list name (or id, or "no list" / "none" / "skip" to import without a list).',
+          'Looks up the pending row by the current actor + thread; the bot DM is the thread.',
+        ].join(' '),
+        schema: z.object({
+          list: z.string().min(1).describe('List name, id, or "no list"/"none"/"skip" to omit list membership.'),
+        }) as z.ZodType<{ list: string }>,
+        jsonSchema: zodToJsonSchema(z.object({ list: z.string().min(1) })),
+        execute: (args) => this.runCommitPendingCsv(args as { list: string }),
+      } as ToolDef<{ list: string }>,
     ];
+  }
+
+  private async runCommitPendingCsv(args: { list: string }) {
+    const actor = this.deps.getActor();
+    if (!actor) return { error: { code: 'NO_ACTOR', message: 'klaviyo.commit_pending_csv_import requires an active actor.' } };
+    const role = await this.deps.usersRepo.getRole(actor.slackUserId);
+    if (role !== 'admin' && role !== 'marketing') {
+      logger.warn({ caller: actor.slackUserId, role }, 'klaviyo_csv_commit_denied');
+      return { error: { code: 'FORBIDDEN', message: 'Klaviyo write tools require role=admin or role=marketing.' } };
+    }
+    const thread = this.deps.getActiveThread();
+    const channelId = thread?.channelId ?? actor.slackChannelId ?? '';
+    const threadTs = thread?.threadTs ?? channelId; // file_shared handler stores threadTs=channelId for DM replies
+    const pending = await this.deps.pendingRepo.lookupByThread(actor.slackUserId, channelId, threadTs);
+    if (!pending || pending.kind !== 'klaviyo_csv_pending') {
+      return { error: { code: 'NO_PENDING_CSV', message: 'No pending CSV import found in this thread. Re-upload the CSV and pick a list.' } };
+    }
+    const payload = pending.payload as { profiles: any[]; filename: string; storagePath: string | null; channels: string[] };
+
+    const skipList = /^(no\s*list|none|skip|sin\s*lista)$/i.test(args.list.trim());
+    const result = await this.runImport({
+      profiles: payload.profiles,
+      list: skipList ? undefined : args.list,
+      channels: (payload.channels as ('email' | 'sms')[]) ?? ['email'],
+      source: 'csv',
+      storage_path: payload.storagePath ?? undefined,
+      filename: payload.filename,
+    } as ImportProfilesArgs);
+
+    // Clean up the pending row only if the import advanced past validation; if it
+    // returned LIST_NOT_FOUND we leave the pending row so the user can re-pick a
+    // valid list without re-uploading the CSV.
+    const isError = (result as any)?.error?.code;
+    const advancedPastList = !isError || isError !== 'LIST_NOT_FOUND';
+    if (advancedPastList) {
+      await this.deps.pendingRepo.deleteById(pending.id).catch(() => {});
+    }
+    return result;
   }
 
   private async runImportStatus(args: ImportStatusArgs) {

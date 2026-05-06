@@ -174,26 +174,38 @@ describe('handleFileShared', () => {
       storage: {
         upload: vi.fn().mockResolvedValue({ path: 'klaviyo-imports/F1-123.csv' }),
       },
+      pendingRepo: {
+        insert: vi.fn().mockResolvedValue({ id: 'p1', confirmationToken: 'tok-csv-1' }),
+      },
     };
   }
 
-  it('happy path: DM + admin + CSV → calls klaviyo.import_profiles', async () => {
+  it('happy path: DM + admin + CSV → stages pending row + asks for list (does NOT auto-import)', async () => {
     const deps = makeDeps();
     await handleFileShared({
       event: { channel_id: 'D1', user_id: 'U1', file_id: 'F1' },
       deps: deps as any,
     });
-    expect(deps.orchestrator.runTool).toHaveBeenCalledWith(
-      'klaviyo.import_profiles',
-      expect.objectContaining({
-        source: 'csv',
-        profiles: expect.any(Array),
-        storage_path: 'klaviyo-imports/F1-123.csv',
+    // Bug fix: Klaviyo's bulk-subscribe silently drops profiles when no list is
+    // attached. The handler now stages the parsed rows in pending_confirmations
+    // and asks the user which list, instead of auto-submitting.
+    expect(deps.orchestrator.runTool).not.toHaveBeenCalled();
+    expect(deps.pendingRepo.insert).toHaveBeenCalledWith(expect.objectContaining({
+      callerSlackId: 'U1',
+      channelId: 'D1',
+      kind: 'klaviyo_csv_pending',
+      payload: expect.objectContaining({
         filename: 'leads.csv',
+        profiles: expect.any(Array),
+        storagePath: 'klaviyo-imports/F1-123.csv',
+        channels: ['email'],
       }),
-      expect.objectContaining({ slackUserId: 'U1', channelId: 'D1' }),
-    );
+    }));
     expect(deps.slack.postMessage).toHaveBeenCalled();
+    const replyText = (deps.slack.postMessage as any).mock.calls[0][1];
+    expect(replyText).toContain('leads.csv');
+    expect(replyText).toMatch(/which.*list/i);
+    expect(replyText).toContain('tok-csv-1');
   });
 
   it('skips when not a DM channel', async () => {
@@ -217,13 +229,14 @@ describe('handleFileShared', () => {
     expect(deps.orchestrator.runTool).not.toHaveBeenCalled();
   });
 
-  it('allows marketing role', async () => {
+  it('allows marketing role (stages pending CSV, asks for list)', async () => {
     const deps = makeDeps({ role: 'marketing' });
     await handleFileShared({
       event: { channel_id: 'D1', user_id: 'U1', file_id: 'F1' },
       deps: deps as any,
     });
-    expect(deps.orchestrator.runTool).toHaveBeenCalled();
+    expect(deps.pendingRepo.insert).toHaveBeenCalled();
+    expect(deps.orchestrator.runTool).not.toHaveBeenCalled();
   });
 
   it('rejects non-CSV files', async () => {

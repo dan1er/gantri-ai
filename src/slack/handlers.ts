@@ -1,8 +1,10 @@
 import type { AuthorizedUsersRepo } from '../storage/repositories/authorized-users.js';
 import type { ConversationsRepo } from '../storage/repositories/conversations.js';
-import type { Orchestrator } from '../orchestrator/orchestrator.js';
+import type { Orchestrator, OrchestratorPendingCsvContext } from '../orchestrator/orchestrator.js';
 import type { ConfirmationHandler } from '../orchestrator/confirmation-handler.js';
 import type { ReportAttachment } from '../connectors/reports/reports-connector.js';
+import type { PendingConfirmationsRepo } from '../storage/repositories/pending-confirmations.js';
+import type { KlaviyoApiClient } from '../connectors/klaviyo/client.js';
 import { markdownToSlackBlocks } from '../orchestrator/formatter.js';
 import { logger } from '../logger.js';
 import { loadEnv } from '../config/env.js';
@@ -72,6 +74,13 @@ export interface HandlerDeps {
    *  BEFORE the LLM dispatch — a literal "yes" must execute the queued
    *  import/delete instead of being interpreted as a fresh request. */
   confirmationHandler: ConfirmationHandler;
+  /** Used to detect klaviyo_csv_pending rows after `confirmationHandler.tryHandle`
+   *  returned false, so we can build OrchestratorPendingCsvContext for the LLM. */
+  pendingRepo: Pick<PendingConfirmationsRepo, 'lookupByThread'>;
+  /** Used to fetch the Klaviyo list directory once when assembling
+   *  pendingContext. Optional: if the call fails, the handler proceeds with
+   *  availableLists=[] and lets the LLM call klaviyo.list_lists itself. */
+  klaviyoClient: Pick<KlaviyoApiClient, 'listLists'>;
 }
 
 /**
@@ -137,6 +146,38 @@ export function createDmHandler(deps: HandlerDeps) {
       text: event.text,
     });
     if (consumed) return;
+
+    // Pending CSV context: when a klaviyo_csv_pending row is alive in this
+    // thread for this caller, build a non-cached system note for the LLM with
+    // the row count + Klaviyo list directory so the user's reply (e.g. a list
+    // name) is interpreted as a list selection instead of a fresh request.
+    // The Klaviyo `listLists()` call is best-effort — failures degrade
+    // gracefully to availableLists=[], letting the LLM call klaviyo.list_lists
+    // on its own if it needs the directory.
+    let pendingContext: OrchestratorPendingCsvContext | undefined;
+    {
+      const pending = await deps.pendingRepo.lookupByThread(event.user, event.channel, pendingThreadKey);
+      if (pending && pending.kind === 'klaviyo_csv_pending' && pending.callerSlackId === event.user) {
+        const payload = pending.payload as { profiles: Array<unknown>; filename: string; channels?: string[] };
+        let availableLists: Array<{ id: string; name: string }> = [];
+        try {
+          const lists = await deps.klaviyoClient.listLists();
+          availableLists = lists.map((l) => ({ id: l.id, name: l.name }));
+        } catch (err) {
+          logger.warn(
+            { err: err instanceof Error ? err.message : String(err) },
+            'klaviyo_listLists_failed_for_pending_context',
+          );
+        }
+        pendingContext = {
+          kind: 'klaviyo_csv_pending',
+          filename: payload.filename,
+          rowCount: payload.profiles.length,
+          channels: ((payload.channels as ('email' | 'sms')[] | undefined) ?? ['email']),
+          availableLists,
+        };
+      }
+    }
 
     if (!(await deps.usersRepo.isAuthorized(event.user))) {
       await client.chat.postMessage({
@@ -263,6 +304,7 @@ export function createDmHandler(deps: HandlerDeps) {
         thread: { channelId: event.channel, threadTs },
         onToolCall,
         onToolFinish,
+        pendingContext,
       });
       if (pendingUpdate) {
         clearTimeout(pendingUpdate);

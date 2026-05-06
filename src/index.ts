@@ -178,6 +178,11 @@ async function main() {
   let klaviyoConfirmationHandler: ConfirmationHandler | undefined;
   let klaviyoFileSharedDeps: FileSharedDeps | undefined;
   let klaviyoImportPoller: KlaviyoImportPollerJob | undefined;
+  // Hoisted so `buildSlackApp` below can wire them into `createDmHandler` for
+  // pending-CSV context lookups. When Klaviyo isn't configured we fall back to
+  // no-op stubs (see the buildSlackApp call site).
+  let klaviyoClientRef: KlaviyoApiClient | undefined;
+  let klaviyoPendingRepoRef: PendingConfirmationsRepo | undefined;
 
   if (klaviyoApiKey) {
     const klaviyoClient = new KlaviyoApiClient({ apiKey: klaviyoApiKey });
@@ -185,6 +190,8 @@ async function main() {
     const klaviyoDeletionsRepo = new KlaviyoDeletionsRepo(supabase);
     const klaviyoPendingRepo = new PendingConfirmationsRepo(supabase);
     const klaviyoUsersRepo = new AuthorizedUsersRepo(supabase);
+    klaviyoClientRef = klaviyoClient;
+    klaviyoPendingRepoRef = klaviyoPendingRepo;
     registry.register(new KlaviyoConnector({
       client: klaviyoClient,
       importsRepo: klaviyoImportsRepo,
@@ -359,6 +366,10 @@ async function main() {
     conversationsRepo,
     confirmationHandler: klaviyoConfirmationHandler ?? noopConfirmationHandler,
     fileSharedDeps: klaviyoFileSharedDeps ?? noopFileSharedDeps,
+    // When Klaviyo is disabled we still need structurally-valid stubs so
+    // createDmHandler doesn't crash on the pending-context lookup path.
+    pendingRepo: klaviyoPendingRepoRef ?? { lookupByThread: async () => null },
+    klaviyoClient: klaviyoClientRef ?? { listLists: async () => [] },
   });
   // Adapters above capture this `appRef` thunk lazily — they were constructed
   // before `app` existed. Assigning here makes them functional immediately

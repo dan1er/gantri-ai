@@ -26,6 +26,10 @@ function makeContext(isAuthorized: boolean) {
       usersRepo: { isAuthorized: vi.fn(async () => isAuthorized) },
       conversationsRepo: { insert: insertSpy, loadRecentByThread: loadSpy },
       confirmationHandler: { tryHandle: tryHandleSpy },
+      // Default no-op fakes so the existing tests don't have to care about
+      // pending-context wiring; the dedicated tests below override these.
+      pendingRepo: { lookupByThread: async () => null },
+      klaviyoClient: { listLists: async () => [] },
     },
     event: {
       channel_type: 'im',
@@ -148,6 +152,111 @@ describe('createDmHandler', () => {
     expect(call.tool_calls[0]).toHaveProperty('args');
     // Cleanup for other tests
     delete process.env.DEBUG_FULL_LOGS;
+  });
+
+  it('passes pendingContext to orchestrator.run when a klaviyo_csv_pending row exists in the thread', async () => {
+    const orchestratorRun = vi.fn(async () => ({
+      response: 'ok',
+      model: 'claude-sonnet-4-6',
+      toolCalls: [],
+      tokensInput: 0,
+      tokensOutput: 0,
+      iterations: 1,
+      attachments: [],
+    }));
+    const lookupByThread = vi.fn(async () => ({
+      id: 'pid_1',
+      callerSlackId: 'U1',
+      channelId: 'C1',
+      threadTs: 'C1',
+      kind: 'klaviyo_csv_pending',
+      payload: { profiles: [{ email: 'a@x.com' }, { email: 'b@x.com' }], filename: 'leads.csv', storagePath: null, channels: ['email'] },
+    }));
+    const listLists = vi.fn(async () => [
+      { id: 'L_TRADE', name: 'Trade Show Leads' },
+      { id: 'L_PRUEBA', name: 'lista de prueba' },
+    ]);
+    const tryHandle = vi.fn(async () => false); // not a cancel, defer to orchestrator
+
+    const handler = createDmHandler({
+      orchestrator: { run: orchestratorRun } as any,
+      usersRepo: { isAuthorized: async () => true } as any,
+      conversationsRepo: { loadRecentByThread: async () => [], insert: async () => 'conv-1' } as any,
+      confirmationHandler: { tryHandle } as any,
+      pendingRepo: { lookupByThread } as any,
+      klaviyoClient: { listLists } as any,
+    });
+
+    const fakeClient = {
+      chat: {
+        postMessage: vi.fn(async () => ({ ts: '1.000' })),
+        update: vi.fn(async () => ({})),
+      },
+    };
+    await handler({
+      event: { channel_type: 'im', user: 'U1', channel: 'C1', text: 'lista de prueba', ts: '1.000' },
+      client: fakeClient,
+    });
+
+    expect(orchestratorRun).toHaveBeenCalled();
+    const runArgs = orchestratorRun.mock.calls[0][0] as any;
+    expect(runArgs.pendingContext).toMatchObject({
+      kind: 'klaviyo_csv_pending',
+      filename: 'leads.csv',
+      rowCount: 2,
+      channels: ['email'],
+      availableLists: expect.arrayContaining([
+        expect.objectContaining({ id: 'L_PRUEBA', name: 'lista de prueba' }),
+      ]),
+    });
+  });
+
+  it('omits pendingContext when no pending row exists', async () => {
+    const orchestratorRun = vi.fn(async () => ({
+      response: 'ok', model: 'claude-sonnet-4-6', toolCalls: [],
+      tokensInput: 0, tokensOutput: 0, iterations: 1, attachments: [],
+    }));
+    const handler = createDmHandler({
+      orchestrator: { run: orchestratorRun } as any,
+      usersRepo: { isAuthorized: async () => true } as any,
+      conversationsRepo: { loadRecentByThread: async () => [], insert: async () => 'conv-1' } as any,
+      confirmationHandler: { tryHandle: async () => false } as any,
+      pendingRepo: { lookupByThread: async () => null } as any,
+      klaviyoClient: { listLists: vi.fn() } as any,
+    });
+    const fakeClient = {
+      chat: { postMessage: vi.fn(async () => ({ ts: '1.000' })), update: vi.fn(async () => ({})) },
+    };
+    await handler({ event: { channel_type: 'im', user: 'U1', channel: 'C1', text: 'hi', ts: '1.000' }, client: fakeClient });
+    const runArgs = orchestratorRun.mock.calls[0][0] as any;
+    expect(runArgs.pendingContext).toBeUndefined();
+  });
+
+  it('falls back to empty availableLists when klaviyoClient.listLists() throws', async () => {
+    const orchestratorRun = vi.fn(async () => ({
+      response: 'ok', model: 'claude-sonnet-4-6', toolCalls: [],
+      tokensInput: 0, tokensOutput: 0, iterations: 1, attachments: [],
+    }));
+    const lookupByThread = vi.fn(async () => ({
+      id: 'pid_1', callerSlackId: 'U1', channelId: 'C1', threadTs: 'C1',
+      kind: 'klaviyo_csv_pending',
+      payload: { profiles: [{ email: 'a@x.com' }], filename: 'leads.csv', storagePath: null, channels: ['email'] },
+    }));
+    const listLists = vi.fn(async () => { throw new Error('Klaviyo down'); });
+    const handler = createDmHandler({
+      orchestrator: { run: orchestratorRun } as any,
+      usersRepo: { isAuthorized: async () => true } as any,
+      conversationsRepo: { loadRecentByThread: async () => [], insert: async () => 'conv-1' } as any,
+      confirmationHandler: { tryHandle: async () => false } as any,
+      pendingRepo: { lookupByThread } as any,
+      klaviyoClient: { listLists } as any,
+    });
+    const fakeClient = {
+      chat: { postMessage: vi.fn(async () => ({ ts: '1.000' })), update: vi.fn(async () => ({})) },
+    };
+    await handler({ event: { channel_type: 'im', user: 'U1', channel: 'C1', text: 'lista de prueba', ts: '1.000' }, client: fakeClient });
+    const runArgs = orchestratorRun.mock.calls[0][0] as any;
+    expect(runArgs.pendingContext.availableLists).toEqual([]);
   });
 });
 

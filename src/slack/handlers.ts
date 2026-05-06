@@ -115,20 +115,25 @@ export function createDmHandler(deps: HandlerDeps) {
     if (event.subtype) return;
     if (!event.text || !event.user) return;
 
-    // For DMs we treat the entire channel as a single "thread" — Slack DMs are
-    // flat by default, and pending_confirmations rows from file_shared use
-    // channel_id as the key. Without this, a CSV upload's pending row (keyed
-    // by channel_id) wouldn't match the user's text-reply (keyed by event.ts).
-    const threadTs = event.thread_ts ?? event.channel;
+    // Slack DMs use event.ts as the thread root for the bot's replies (so the
+    // bot's progress messages and any attachments thread under the user's
+    // original message). Used for the bot's outbound `chat.postMessage`s.
+    const threadTs = event.thread_ts ?? event.ts;
 
-    // Confirmation flow: if this is a "yes"/"cancel" reply in a thread that
-    // has a pending row, the handler runs the queued import/delete and
-    // consumes the message — so the LLM doesn't try to interpret a literal
-    // "yes" as a fresh request. Returns true when consumed.
+    // For pending-confirmation lookups, use channel_id as the key when the
+    // user's message is at the DM top level (no thread_ts). The file_shared
+    // handler stashes pending rows keyed by channel_id, so this is the only
+    // way the user's text reply can locate them.
+    const pendingThreadKey = event.thread_ts ?? event.channel;
+
+    // Confirmation flow: if this is a "yes"/"cancel"/list-name reply that
+    // matches a pending row, the handler runs the queued import/delete/csv
+    // and consumes the message — so the LLM doesn't try to interpret a
+    // literal list name as a fresh request. Returns true when consumed.
     const consumed = await deps.confirmationHandler.tryHandle({
       slackUserId: event.user,
       channelId: event.channel,
-      threadTs,
+      threadTs: pendingThreadKey,
       text: event.text,
     });
     if (consumed) return;

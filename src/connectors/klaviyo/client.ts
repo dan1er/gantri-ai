@@ -535,6 +535,17 @@ export class KlaviyoApiClient {
     return { deletion_job_id: resp.data.id };
   }
 
+  /** Create a new Klaviyo list. opt_in_process defaults to 'double_opt_in' (Klaviyo's default).
+   *  Returns { id, name }. Throws KlaviyoApiError on 4xx (e.g. duplicate name). */
+  async createList(opts: { name: string; optInProcess?: 'single_opt_in' | 'double_opt_in' }): Promise<{ id: string; name: string }> {
+    const attributes: Record<string, unknown> = { name: opts.name };
+    if (opts.optInProcess) attributes.opt_in_process = opts.optInProcess;
+    const body = { data: { type: 'list', attributes } };
+    const resp = await this.post<{ data: { id: string; attributes: { name: string } } }>('/lists', body);
+    if (!resp?.data?.id) throw new KlaviyoApiError('Klaviyo returned no list id', 502, resp);
+    return { id: resp.data.id, name: resp.data.attributes.name };
+  }
+
   /** GET /lists — flat id+name directory used by `klaviyo.import_profiles`
    *  to resolve a human-readable list name to the list id required by the
    *  bulk-subscribe job. Klaviyo's `/api/lists` endpoint caps page size at 10

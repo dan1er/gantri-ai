@@ -286,3 +286,37 @@ describe('KlaviyoApiClient.listLists', () => {
     expect(r).toEqual([]);
   });
 });
+
+describe('KlaviyoApiClient.createList', () => {
+  it('builds correct JSON:API body and returns id+name', async () => {
+    let captured: any = null;
+    const fetchImpl = fakeFetch(async (url, init) => {
+      captured = { url, body: JSON.parse(init.body) };
+      return { status: 201, body: { data: { id: 'NEW123', attributes: { name: 'BDNY 2026' } } } };
+    });
+    const client = new KlaviyoApiClient({ apiKey: 'pk_test', fetchImpl });
+    const r = await client.createList({ name: 'BDNY 2026' });
+    expect(r).toEqual({ id: 'NEW123', name: 'BDNY 2026' });
+    expect(captured.url).toBe('https://a.klaviyo.com/api/lists');
+    expect(captured.body.data.type).toBe('list');
+    expect(captured.body.data.attributes.name).toBe('BDNY 2026');
+    expect(captured.body.data.attributes.opt_in_process).toBeUndefined();
+  });
+
+  it('passes opt_in_process when provided', async () => {
+    let captured: any = null;
+    const fetchImpl = fakeFetch(async (_u, init) => {
+      captured = JSON.parse(init.body);
+      return { status: 201, body: { data: { id: 'X', attributes: { name: 'Y' } } } };
+    });
+    const client = new KlaviyoApiClient({ apiKey: 'pk_test', fetchImpl });
+    await client.createList({ name: 'Y', optInProcess: 'single_opt_in' });
+    expect(captured.data.attributes.opt_in_process).toBe('single_opt_in');
+  });
+
+  it('throws KlaviyoApiError on 4xx (e.g. duplicate name)', async () => {
+    const fetchImpl = fakeFetch(async () => ({ status: 400, body: { errors: [{ detail: 'name already exists' }] } }));
+    const client = new KlaviyoApiClient({ apiKey: 'pk_test', fetchImpl });
+    await expect(client.createList({ name: 'dup' })).rejects.toThrow();
+  });
+});

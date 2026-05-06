@@ -138,6 +138,13 @@ const ImportStatusArgs = z.object({
 });
 type ImportStatusArgs = z.infer<typeof ImportStatusArgs>;
 
+const CreateListArgs = z.object({
+  name: z.string().min(1).max(120).describe('Name of the new Klaviyo list. Should be human-readable (e.g., "BDNY 2026 Booth Leads").'),
+  opt_in_process: z.enum(['single_opt_in', 'double_opt_in']).optional()
+    .describe("'single_opt_in' = subscribers go straight to Subscribed; 'double_opt_in' = Klaviyo sends a confirmation email and they only become Subscribed after clicking it. Defaults to Klaviyo's account default (usually double_opt_in)."),
+});
+type CreateListArgs = z.infer<typeof CreateListArgs>;
+
 export class KlaviyoConnector implements Connector {
   readonly name = 'klaviyo';
   readonly tools: readonly ToolDef[];
@@ -435,6 +442,18 @@ export class KlaviyoConnector implements Connector {
         execute: (args) => this.runImport(args as ImportProfilesArgs),
       } as ToolDef<ImportProfilesArgs>,
       {
+        name: 'klaviyo.create_list',
+        description: [
+          'Create a new Klaviyo list (static audience).',
+          'ADMIN or MARKETING role only — fails with FORBIDDEN otherwise.',
+          'Use ONLY when the user explicitly confirms they want to create a new list (e.g., after `klaviyo.import_profiles` returned LIST_NOT_FOUND and the user said "yes, create it"). Do NOT auto-create lists.',
+          'Returns { id, name }. After creation, you can immediately call `klaviyo.import_profiles` with `list: <id>` (or `<name>`) to add profiles.',
+        ].join(' '),
+        schema: CreateListArgs as z.ZodType<CreateListArgs>,
+        jsonSchema: zodToJsonSchema(CreateListArgs),
+        execute: (args) => this.runCreateList(args as CreateListArgs),
+      } as ToolDef<CreateListArgs>,
+      {
         name: 'klaviyo.delete_profiles',
         description: [
           'Permanently delete Klaviyo profiles by email (Klaviyo Data Privacy API).',
@@ -499,6 +518,29 @@ export class KlaviyoConnector implements Connector {
       started_at: row.startedAt,
       completed_at: row.completedAt ?? undefined,
     };
+  }
+
+  private async runCreateList(args: CreateListArgs) {
+    const actor = this.deps.getActor();
+    if (!actor) return { error: { code: 'NO_ACTOR', message: 'klaviyo.create_list requires an active actor.' } };
+    const role = await this.deps.usersRepo.getRole(actor.slackUserId);
+    if (role !== 'admin' && role !== 'marketing') {
+      logger.warn({ caller: actor.slackUserId, role }, 'klaviyo_create_list_denied');
+      return { error: { code: 'FORBIDDEN', message: 'klaviyo.create_list requires role=admin or role=marketing.' } };
+    }
+    try {
+      const list = await this.client.createList({ name: args.name, optInProcess: args.opt_in_process });
+      logger.info({ caller: actor.slackUserId, list_id: list.id, list_name: list.name }, 'klaviyo_list_created');
+      return { ok: true as const, id: list.id, name: list.name, message: `Created Klaviyo list "${list.name}" (id: ${list.id}).` };
+    } catch (err: any) {
+      const status = err?.status as number | undefined;
+      const detail = String(err?.message ?? err);
+      // 400 from Klaviyo when name already exists
+      if (status === 400 && /already exist|duplicate|in use/i.test(detail)) {
+        return { error: { code: 'NAME_TAKEN', message: `A Klaviyo list named "${args.name}" already exists. Use that one instead.` } };
+      }
+      return { error: { code: 'KLAVIYO_ERROR', message: detail, details: { status } } };
+    }
   }
 
   private async runDelete(args: DeleteProfilesArgs) {

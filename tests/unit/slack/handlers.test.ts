@@ -211,18 +211,19 @@ describe('createDmHandler', () => {
     });
   });
 
-  it('omits pendingContext when no pending row exists', async () => {
+  it('omits pendingContext and skips listLists when no pending row exists', async () => {
     const orchestratorRun = vi.fn(async () => ({
       response: 'ok', model: 'claude-sonnet-4-6', toolCalls: [],
       tokensInput: 0, tokensOutput: 0, iterations: 1, attachments: [],
     }));
+    const listLists = vi.fn(async () => []);
     const handler = createDmHandler({
       orchestrator: { run: orchestratorRun } as any,
       usersRepo: { isAuthorized: async () => true } as any,
       conversationsRepo: { loadRecentByThread: async () => [], insert: async () => 'conv-1' } as any,
       confirmationHandler: { tryHandle: async () => false } as any,
       pendingRepo: { lookupByThread: async () => null } as any,
-      klaviyoClient: { listLists: vi.fn() } as any,
+      klaviyoClient: { listLists } as any,
     });
     const fakeClient = {
       chat: { postMessage: vi.fn(async () => ({ ts: '1.000' })), update: vi.fn(async () => ({})) },
@@ -230,6 +231,8 @@ describe('createDmHandler', () => {
     await handler({ event: { channel_type: 'im', user: 'U1', channel: 'C1', text: 'hi', ts: '1.000' }, client: fakeClient });
     const runArgs = orchestratorRun.mock.calls[0][0] as any;
     expect(runArgs.pendingContext).toBeUndefined();
+    // Lock in the "no spurious Klaviyo API call on every DM" invariant.
+    expect(listLists).not.toHaveBeenCalled();
   });
 
   it('falls back to empty availableLists when klaviyoClient.listLists() throws', async () => {

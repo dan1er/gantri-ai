@@ -36,6 +36,17 @@ function decisionOf(text: string): 'yes' | 'cancel' | null {
   return null;
 }
 
+/** Slack rejects thread_ts that isn't a real message timestamp (it expects
+ *  something like "1761234567.000100"). When we use the channel id as a
+ *  pending-lookup key for DM-flat conversations, we must NOT pass it back as
+ *  a thread_ts on chat.postMessage — that returns invalid_thread_ts and
+ *  silently breaks the bot's reply. This filter keeps real ts strings and
+ *  drops anything else. */
+function safeThreadTs(threadTs: string | undefined): string | undefined {
+  if (!threadTs) return undefined;
+  return /^\d+\.\d+$/.test(threadTs) ? threadTs : undefined;
+}
+
 export class ConfirmationHandler {
   constructor(private readonly deps: ConfirmationHandlerDeps) {}
 
@@ -60,7 +71,7 @@ export class ConfirmationHandler {
       const isCancel = /^(cancel|cancelar|abort|no)$/i.test(text);
       if (isCancel) {
         await this.deps.pendingRepo.deleteById(pending.id);
-        await this.deps.slack.postMessage(msg.channelId, 'Cancelled. CSV import not submitted.', msg.threadTs);
+        await this.deps.slack.postMessage(msg.channelId, 'Cancelled. CSV import not submitted.', safeThreadTs(msg.threadTs));
         logger.info({ pendingId: pending.id, caller: pending.callerSlackId }, 'klaviyo_csv_cancelled');
         return true;
       }
@@ -72,7 +83,7 @@ export class ConfirmationHandler {
         await this.deps.slack.postMessage(
           msg.channelId,
           `Couldn't run the CSV import: ${String(err?.message ?? err)}`,
-          msg.threadTs,
+          safeThreadTs(msg.threadTs),
         );
       }
       return true;
@@ -84,7 +95,7 @@ export class ConfirmationHandler {
 
     if (decision === 'cancel') {
       await this.deps.pendingRepo.deleteById(pending.id);
-      await this.deps.slack.postMessage(msg.channelId, 'Cancelled. No Klaviyo write happened.', msg.threadTs);
+      await this.deps.slack.postMessage(msg.channelId, 'Cancelled. No Klaviyo write happened.', safeThreadTs(msg.threadTs));
       logger.info(
         { pendingId: pending.id, kind: pending.kind, caller: pending.callerSlackId },
         'klaviyo_confirmation_cancelled',
@@ -100,7 +111,7 @@ export class ConfirmationHandler {
       await this.deps.slack.postMessage(
         msg.channelId,
         `Sorry — something failed while running the confirmation. (${String(err?.message ?? err)})`,
-        msg.threadTs,
+        safeThreadTs(msg.threadTs),
       );
     } finally {
       await this.deps.pendingRepo.deleteById(pending.id).catch(() => {});
@@ -110,7 +121,7 @@ export class ConfirmationHandler {
 
   private async executeCsvImport(pending: PendingConfirmationRow, msg: IncomingMessage, listInput: string) {
     if (!this.deps.runTool) {
-      await this.deps.slack.postMessage(msg.channelId, 'Internal: CSV commit handler is not wired up.', msg.threadTs);
+      await this.deps.slack.postMessage(msg.channelId, 'Internal: CSV commit handler is not wired up.', safeThreadTs(msg.threadTs));
       return;
     }
     const result: any = await this.deps.runTool(
@@ -131,27 +142,27 @@ export class ConfirmationHandler {
           `I see a few lists that could match: ${sugg.map((s: any) => `*${s.name}*`).join(', ')} — which one? Reply with the exact name.`,
         );
       }
-      await this.deps.slack.postMessage(msg.channelId, lines.join('\n'), msg.threadTs);
+      await this.deps.slack.postMessage(msg.channelId, lines.join('\n'), safeThreadTs(msg.threadTs));
       return;
     }
     if (result?.error) {
-      await this.deps.slack.postMessage(msg.channelId, `Couldn't import: ${result.error.message}`, msg.threadTs);
+      await this.deps.slack.postMessage(msg.channelId, `Couldn't import: ${result.error.message}`, safeThreadTs(msg.threadTs));
       return;
     }
     if (result?.kind === 'imported_directly') {
       await this.deps.slack.postMessage(
         msg.channelId,
         `Submitted ${result.total_imported} profile${result.total_imported === 1 ? '' : 's'} to Klaviyo${result.list ? ` (list: ${result.list.name})` : ''}. They typically appear within ~1 minute.`,
-        msg.threadTs,
+        safeThreadTs(msg.threadTs),
       );
       return;
     }
     if (result?.kind === 'awaiting_confirmation') {
-      await this.deps.slack.postMessage(msg.channelId, result.message, msg.threadTs);
+      await this.deps.slack.postMessage(msg.channelId, result.message, safeThreadTs(msg.threadTs));
       return;
     }
     if (result?.kind === 'all_invalid') {
-      await this.deps.slack.postMessage(msg.channelId, `All ${result.invalid_count} rows failed validation.`, msg.threadTs);
+      await this.deps.slack.postMessage(msg.channelId, `All ${result.invalid_count} rows failed validation.`, safeThreadTs(msg.threadTs));
       return;
     }
   }
@@ -194,7 +205,7 @@ export class ConfirmationHandler {
       isLocalJob
         ? `Submitted ${p.valid.length} profile${p.valid.length === 1 ? '' : 's'} to Klaviyo (audit \`${audit.id}\`). Klaviyo accepted — profiles typically appear within ~1 minute.`
         : `Queued ${p.valid.length} profile${p.valid.length === 1 ? '' : 's'} (audit \`${audit.id}\`, job \`${result.job_id}\`). I'll DM when it's done.`,
-      msg.threadTs,
+      safeThreadTs(msg.threadTs),
     );
     logger.info(
       { auditId: audit.id, jobId: result.job_id, valid: p.valid.length, rejected: p.totalInvalidRejected, immediateComplete: isLocalJob },
@@ -250,7 +261,7 @@ export class ConfirmationHandler {
     await this.deps.slack.postMessage(
       msg.channelId,
       `Submitted ${deletedCount} of ${p.found.length} profile${p.found.length === 1 ? '' : 's'} for deletion (audit \`${audit.id}\`). They'll appear on Klaviyo's "Deleted Profiles" page within ~5 min.${failTail}`,
-      msg.threadTs,
+      safeThreadTs(msg.threadTs),
     );
     logger.info(
       { auditId: audit.id, requested: p.requested.length, found: p.found.length, deleted: deletedCount, failed: failedDetails.length },

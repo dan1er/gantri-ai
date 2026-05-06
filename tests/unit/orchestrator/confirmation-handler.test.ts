@@ -98,7 +98,8 @@ describe('ConfirmationHandler.tryHandle', () => {
     const r = await handler.tryHandle({ slackUserId: 'U1', channelId: 'D1', threadTs: 'D1', text: 'cancel' });
     expect(r).toBe(true);
     expect(pendingRepo.deleteById).toHaveBeenCalledWith('p1');
-    expect(slack.postMessage).toHaveBeenCalledWith('D1', expect.stringContaining('Cancelled'), 'D1');
+    // threadTs 'D1' (channel id) gets filtered to undefined by safeThreadTs to avoid Slack invalid_thread_ts.
+    expect(slack.postMessage).toHaveBeenCalledWith('D1', expect.stringContaining('Cancelled'), undefined);
   });
 
   it('cancel deletes the pending row, DMs cancelled', async () => {

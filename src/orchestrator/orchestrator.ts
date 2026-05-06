@@ -52,6 +52,14 @@ export function runWithContext<T>(ctx: RunContext, fn: () => Promise<T> | T): Pr
   return Promise.resolve(runContextStorage.run(ctx, fn));
 }
 
+export interface OrchestratorPendingCsvContext {
+  kind: 'klaviyo_csv_pending';
+  filename: string;
+  rowCount: number;
+  channels: ('email' | 'sms')[];
+  availableLists: Array<{ id: string; name: string }>;
+}
+
 export interface OrchestratorInput {
   question: string;
   threadHistory: Array<{ question: string; response: string | null }>;
@@ -72,6 +80,11 @@ export interface OrchestratorInput {
    * Lets the Slack handler show "running" vs "done" status per tool.
    */
   onToolFinish?: (toolName: string, ok: boolean, elapsedMs: number) => void | Promise<void>;
+  /** When the user's reply arrives in a thread holding a klaviyo_csv_pending row,
+   *  the slack handler builds this and passes it through. The orchestrator appends
+   *  a non-cached system block describing the pending state + available lists so
+   *  the LLM can interpret the reply as list-selection / creation intent. */
+  pendingContext?: OrchestratorPendingCsvContext;
 }
 
 export interface OrchestratorOutput {
@@ -166,9 +179,14 @@ export class Orchestrator {
         toolNames: tools.map((t) => t.name),
         catalogSummary: describeCatalog(),
       });
-      const system = [
+      const system: any[] = [
         { type: 'text' as const, text: systemText, cache_control: { type: 'ephemeral' as const } },
       ];
+      if (input.pendingContext) {
+        // No cache_control — pending state varies every turn; caching it would
+        // poison the cache for the next conversation.
+        system.push({ type: 'text' as const, text: buildPendingCsvSystemNote(input.pendingContext) });
+      }
 
       const messages: any[] = [];
       for (const turn of input.threadHistory) {
@@ -291,4 +309,27 @@ function extractText(content: any[]): string {
     .map((b) => b.text as string)
     .join('\n')
     .trim();
+}
+
+function buildPendingCsvSystemNote(ctx: OrchestratorPendingCsvContext): string {
+  const listsBlock = ctx.availableLists.length > 0
+    ? ctx.availableLists.map((l) => `  - ${l.id} — ${l.name}`).join('\n')
+    : '  (list directory unavailable — call klaviyo.list_lists if you need it)';
+  return [
+    `The user has a pending Klaviyo CSV import in this thread. Filename: ${ctx.filename}. Rows ready to import: ${ctx.rowCount}. Subscription channels chosen at upload: ${ctx.channels.join(', ')}.`,
+    '',
+    'Interpret the user\'s next message as one of:',
+    '  - A list selection (e.g., "Trade Show Leads", "the welcome list", "no list") → call klaviyo.commit_pending_csv_import with that exact list name. Pass "no list" / "none" / "skip" / "sin lista" verbatim — the tool recognizes them and omits list-membership.',
+    '  - An instruction that names a list AND asks you to create it if missing (e.g., "lista de prueba, créala si no existe") → call klaviyo.create_list({name}) FIRST, then klaviyo.commit_pending_csv_import({list:name}).',
+    '  - A confirmation/decline of a previous question YOU asked (e.g., user replied "yes" after you asked "want me to create it?") → carry out the implied action.',
+    '  - An off-topic message → answer normally; do NOT touch the pending import.',
+    '',
+    'Available Klaviyo lists in this account (id — name):',
+    listsBlock,
+    '',
+    'Hard rules:',
+    '  - DO NOT call klaviyo.import_profiles directly. The CSV rows live only in the pending row; only klaviyo.commit_pending_csv_import can access them.',
+    '  - DO NOT invent list names. If the user named a list, pass that exact string to commit_pending_csv_import.',
+    '  - The cancel verb ("cancel"/"cancelar"/"abort") is handled before you see the message; you will not be invoked for it.',
+  ].join('\n');
 }

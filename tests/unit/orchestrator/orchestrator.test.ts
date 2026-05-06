@@ -99,4 +99,99 @@ describe('Orchestrator', () => {
     const out = await orch.run({ question: 'infinite', threadHistory: [] });
     expect(out.response).toMatch(/didn't converge|iteration limit/i);
   });
+
+  it('appends a non-cached pending CSV system block when pendingContext is provided', async () => {
+    const { registry } = buildRegistry();
+    const create = vi.fn(async () => ({
+      content: [{ type: 'text', text: 'ok' }],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 10, output_tokens: 5 },
+      model: 'claude-sonnet-4-6',
+    }));
+    const orch = new Orchestrator({
+      registry,
+      claude: { messages: { create } } as any,
+      model: 'claude-sonnet-4-6',
+      maxIterations: 3,
+    });
+    await orch.run({
+      question: 'lista de prueba',
+      threadHistory: [],
+      pendingContext: {
+        kind: 'klaviyo_csv_pending',
+        filename: 'leads.csv',
+        rowCount: 5,
+        channels: ['email'],
+        availableLists: [
+          { id: 'L1', name: 'Trade Show Leads' },
+          { id: 'L2', name: 'lista de prueba' },
+        ],
+      },
+    });
+    const callArgs = create.mock.calls[0][0];
+    expect(Array.isArray(callArgs.system)).toBe(true);
+    expect(callArgs.system).toHaveLength(2);
+    // Block 0: base system prompt, cached.
+    expect(callArgs.system[0].cache_control).toEqual({ type: 'ephemeral' });
+    // Block 1: pending CSV note, NOT cached (varies per turn).
+    expect(callArgs.system[1].cache_control).toBeUndefined();
+    const note = callArgs.system[1].text as string;
+    expect(note).toMatch(/leads\.csv/);
+    expect(note).toMatch(/Rows ready to import: 5/);
+    expect(note).toMatch(/Trade Show Leads/);
+    expect(note).toMatch(/lista de prueba/);
+    expect(note).toMatch(/klaviyo\.commit_pending_csv_import/);
+    expect(note).toMatch(/klaviyo\.create_list/);
+    expect(note).toMatch(/DO NOT call klaviyo\.import_profiles/);
+  });
+
+  it('does not append a pending CSV system block when pendingContext is omitted', async () => {
+    const { registry } = buildRegistry();
+    const create = vi.fn(async () => ({
+      content: [{ type: 'text', text: 'ok' }],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 10, output_tokens: 5 },
+      model: 'claude-sonnet-4-6',
+    }));
+    const orch = new Orchestrator({
+      registry,
+      claude: { messages: { create } } as any,
+      model: 'claude-sonnet-4-6',
+      maxIterations: 3,
+    });
+    await orch.run({ question: 'hi', threadHistory: [] });
+    const callArgs = create.mock.calls[0][0];
+    expect(callArgs.system).toHaveLength(1);
+  });
+
+  it('handles availableLists empty (e.g., listLists() failed) without crashing', async () => {
+    const { registry } = buildRegistry();
+    const create = vi.fn(async () => ({
+      content: [{ type: 'text', text: 'ok' }],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 10, output_tokens: 5 },
+      model: 'claude-sonnet-4-6',
+    }));
+    const orch = new Orchestrator({
+      registry,
+      claude: { messages: { create } } as any,
+      model: 'claude-sonnet-4-6',
+      maxIterations: 3,
+    });
+    await orch.run({
+      question: 'lista de prueba',
+      threadHistory: [],
+      pendingContext: {
+        kind: 'klaviyo_csv_pending',
+        filename: 'leads.csv',
+        rowCount: 5,
+        channels: ['email'],
+        availableLists: [],
+      },
+    });
+    const note = (create.mock.calls[0][0].system as any[])[1].text as string;
+    // Should still produce a coherent note even without list directory.
+    expect(note).toMatch(/leads\.csv/);
+    expect(note).toMatch(/list directory unavailable/i);
+  });
 });

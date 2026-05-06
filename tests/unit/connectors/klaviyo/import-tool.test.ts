@@ -179,6 +179,17 @@ describe('klaviyo.import_profiles', () => {
 
   it.each([
     ["let's use lista de prueba", 'lista de prueba'],
+    ["let's do lista de prueba", 'lista de prueba'],
+    ["let's make lista de prueba", 'lista de prueba'],
+    ["let's try lista de prueba", 'lista de prueba'],
+    ["let's pick lista de prueba", 'lista de prueba'],
+    ["let's go with lista de prueba", 'lista de prueba'],
+    ["lets use lista de prueba", 'lista de prueba'], // missing apostrophe
+    ['vamos a usar lista de prueba', 'lista de prueba'],
+    ['vamos a crear lista de prueba', 'lista de prueba'],
+    ['probar lista de prueba', 'lista de prueba'],
+    ['select lista de prueba', 'lista de prueba'],
+    ['upload to lista de prueba', 'lista de prueba'],
     ['use lista de prueba', 'lista de prueba'],
     ['use the list lista de prueba', 'lista de prueba'],
     ['use the list called lista de prueba', 'lista de prueba'],

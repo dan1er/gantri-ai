@@ -699,17 +699,33 @@ export class KlaviyoConnector implements Connector {
       // user's actual list name (e.g., a list named "lista de prueba" must
       // NOT be reduced to "de prueba" by a `^lista\s+` rule). Order matters:
       // longer / more specific patterns first.
+      // 'create'/'crear' intentionally excluded — they have dedicated
+      // 'create a list called X' patterns later in the array; including them
+      // here would let the bare-verb rule strip just 'create ' first.
+      const VERBS_EN = '(use|do|make|try|pick|choose|go\\s+with|import|send|push|add|put|upload|select|do\\s+it\\s+with)';
+      const VERBS_ES = '(usar|hacer|subir|elegir|escoger|seleccionar|probar|importar)';
       const stripPrefixes: RegExp[] = [
-        // English filler verbs
-        /^let'?s\s+use\s+(the\s+list\s+(called\s+)?)?/i,
-        /^let'?s\s+(create|make|do)\s+a\s+list\s+called\s+/i,
-        /^use\s+the\s+list\s+(called\s+)?/i,
-        /^use\s+/i,
+        // English filler verbs after "let's" / "lets". Dedicated patterns
+        // (create / crear) come BEFORE the generic verb stripper so the more
+        // specific rule wins.
+        /^let'?s\s+create\s+(a\s+|the\s+)?list\s+(called\s+)?/i,
+        /^let'?s\s+(create|make)\s+/i,
+        // Only strip "lista" inside this Spanish phrase if there's an
+        // unambiguous "llamada" / "que se llama" indicator. Otherwise the
+        // user typed "vamos a crear lista de prueba" intending the list
+        // name to literally be "lista de prueba" — not just "de prueba".
+        /^vamos\s+a\s+(crear|hacer)\s+(la\s+lista\s+(llamada\s+|que\s+se\s+llama\s+))?/i,
+        new RegExp(`^let'?s\\s+${VERBS_EN}\\s+(the\\s+list\\s+(called\\s+)?)?`, 'i'),
+        new RegExp(`^${VERBS_EN}\\s+the\\s+list\\s+(called\\s+)?`, 'i'),
+        new RegExp(`^${VERBS_EN}\\s+`, 'i'),
+        // Spanish "vamos a + verbo"
+        new RegExp(`^vamos\\s+a\\s+${VERBS_ES}\\s+(la\\s+lista\\s+(llamada\\s+|que\\s+se\\s+llama\\s+)?)?`, 'i'),
+        new RegExp(`^${VERBS_ES}\\s+(la\\s+lista\\s+(llamada\\s+|que\\s+se\\s+llama\\s+)?)?`, 'i'),
         /^create\s+(a\s+|the\s+)?list\s+(called\s+)?/i,
         /^call\s+it\s+/i,
         /^name\s+it\s+/i,
         /^the\s+name\s+is\s+/i,
-        // English: "send/import/add/put (them) (in)to (the) list (called) X"
+        // English: "(send/import/add/put) (them) (in)to (the) list (called) X"
         /^(send|push|import|add|put)\s+(them?\s+)?(in)?to\s+(the\s+)?(list\s+(called\s+)?)?/i,
         /^(send|push)\s+(them?\s+)?to\s+/i,
         /^to\s+the\s+list\s+(called\s+)?/i,

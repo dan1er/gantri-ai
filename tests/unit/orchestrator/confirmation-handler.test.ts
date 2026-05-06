@@ -13,8 +13,19 @@ function makeHandler(opts: any = {}) {
     client: opts.client ?? {},
     slack: opts.slack ?? { postMessage: vi.fn().mockResolvedValue(undefined) },
     sleep: opts.sleep ?? (async () => {}),
-    runTool: opts.runTool,
   });
+}
+
+/** Returns { handler, pendingRepo, slack } pre-wired with a pending row. */
+function makeDeps(opts: { pending: any }) {
+  const pendingRepo = {
+    lookupByThread: vi.fn().mockResolvedValue(opts.pending),
+    deleteById: vi.fn().mockResolvedValue(undefined),
+    updatePayload: vi.fn().mockResolvedValue(undefined),
+  };
+  const slack = { postMessage: vi.fn().mockResolvedValue(undefined) };
+  const handler = makeHandler({ pendingRepo, slack });
+  return { handler, pendingRepo, slack };
 }
 
 describe('ConfirmationHandler.tryHandle', () => {
@@ -43,64 +54,72 @@ describe('ConfirmationHandler.tryHandle', () => {
     expect(pendingRepo.lookupByThread).toHaveBeenCalledTimes(9);
   });
 
-  it('csv-pending: any non-cancel text dispatches commit_pending_csv_import with text as list', async () => {
-    const pendingRepo = {
-      lookupByThread: vi.fn().mockResolvedValue({
-        id: 'p1', kind: 'klaviyo_csv_pending', callerSlackId: 'U1',
-        channelId: 'D1', threadTs: 'D1',
-        payload: { profiles: [{ email: 'a@x.com' }], filename: 'f.csv', storagePath: null, channels: ['email'] },
-      }),
-      deleteById: vi.fn(), updatePayload: vi.fn().mockResolvedValue(undefined),
-    };
-    const runTool = vi.fn().mockResolvedValue({
-      kind: 'imported_directly', total_imported: 1, list: { id: 'L1', name: 'Trade Show Leads' },
+  describe('klaviyo_csv_pending — cancel fast-path only', () => {
+    it('returns true and deletes the pending row on "cancel"', async () => {
+      const { handler, pendingRepo, slack } = makeDeps({
+        pending: {
+          id: 'pid_1',
+          callerSlackId: 'U1',
+          channelId: 'C1',
+          threadTs: 'C1',
+          kind: 'klaviyo_csv_pending',
+          payload: { profiles: [], filename: 'test.csv', storagePath: null, channels: ['email'] },
+        },
+      });
+      const consumed = await handler.tryHandle({ slackUserId: 'U1', channelId: 'C1', threadTs: 'C1', text: 'cancel' });
+      expect(consumed).toBe(true);
+      expect(pendingRepo.deleteById).toHaveBeenCalledWith('pid_1');
+      expect(slack.postMessage).toHaveBeenCalledWith('C1', expect.stringMatching(/Cancelled/i), undefined);
     });
-    const slack = { postMessage: vi.fn().mockResolvedValue(undefined) };
-    const handler = makeHandler({ pendingRepo, runTool, slack });
-    const r = await handler.tryHandle({ slackUserId: 'U1', channelId: 'D1', threadTs: 'D1', text: 'prueba nueva' });
-    expect(r).toBe(true);
-    expect(runTool).toHaveBeenCalledWith(
-      'klaviyo.commit_pending_csv_import',
-      { list: 'prueba nueva' },
-      expect.objectContaining({ slackUserId: 'U1', channelId: 'D1' }),
+
+    it.each(['cancelar', 'abort', 'CANCEL', '  cancel  '])(
+      'returns true on "%s" (case-insensitive, trimmed)',
+      async (text) => {
+        const { handler, pendingRepo } = makeDeps({
+          pending: {
+            id: 'pid_1', callerSlackId: 'U1', channelId: 'C1', threadTs: 'C1',
+            kind: 'klaviyo_csv_pending',
+            payload: { profiles: [], filename: 'x.csv', storagePath: null, channels: ['email'] },
+          },
+        });
+        const consumed = await handler.tryHandle({ slackUserId: 'U1', channelId: 'C1', threadTs: 'C1', text });
+        expect(consumed).toBe(true);
+        expect(pendingRepo.deleteById).toHaveBeenCalledWith('pid_1');
+      },
     );
-    expect(slack.postMessage).toHaveBeenCalled();
-  });
 
-  it('csv-pending: LIST_NOT_FOUND surfaces top suggestions to the user', async () => {
-    const pendingRepo = {
-      lookupByThread: vi.fn().mockResolvedValue({
-        id: 'p1', kind: 'klaviyo_csv_pending', callerSlackId: 'U1',
-        channelId: 'D1', threadTs: 'D1',
-        payload: { profiles: [{ email: 'a@x.com' }], filename: 'f.csv', storagePath: null, channels: ['email'] },
-      }),
-      deleteById: vi.fn(), updatePayload: vi.fn().mockResolvedValue(undefined),
-    };
-    const runTool = vi.fn().mockResolvedValue({
-      error: { code: 'LIST_NOT_FOUND', details: { suggestions: [{ id: 'L1', name: 'Trade Show Leads' }] } },
+    it.each([
+      'lista de prueba',
+      'I want to save them to lista de prueba, crea la lista si no existe',
+      'no list',
+      'yes',
+      'prueba',
+      'how many rows did you say?',
+    ])('returns false (defers to orchestrator) on "%s"', async (text) => {
+      const { handler, pendingRepo, slack } = makeDeps({
+        pending: {
+          id: 'pid_1', callerSlackId: 'U1', channelId: 'C1', threadTs: 'C1',
+          kind: 'klaviyo_csv_pending',
+          payload: { profiles: [], filename: 'x.csv', storagePath: null, channels: ['email'] },
+        },
+      });
+      const consumed = await handler.tryHandle({ slackUserId: 'U1', channelId: 'C1', threadTs: 'C1', text });
+      expect(consumed).toBe(false);
+      expect(pendingRepo.deleteById).not.toHaveBeenCalled();
+      expect(slack.postMessage).not.toHaveBeenCalled();
     });
-    const slack = { postMessage: vi.fn().mockResolvedValue(undefined) };
-    const handler = makeHandler({ pendingRepo, runTool, slack });
-    await handler.tryHandle({ slackUserId: 'U1', channelId: 'D1', threadTs: 'D1', text: 'trade show' });
-    const reply = (slack.postMessage as any).mock.calls[0][1];
-    expect(reply).toMatch(/Trade Show Leads/);
-  });
 
-  it('csv-pending: cancel deletes the pending row + posts cancellation', async () => {
-    const pendingRepo = {
-      lookupByThread: vi.fn().mockResolvedValue({
-        id: 'p1', kind: 'klaviyo_csv_pending', callerSlackId: 'U1',
-        channelId: 'D1', threadTs: 'D1', payload: {},
-      }),
-      deleteById: vi.fn().mockResolvedValue(undefined),
-    };
-    const slack = { postMessage: vi.fn().mockResolvedValue(undefined) };
-    const handler = makeHandler({ pendingRepo, slack });
-    const r = await handler.tryHandle({ slackUserId: 'U1', channelId: 'D1', threadTs: 'D1', text: 'cancel' });
-    expect(r).toBe(true);
-    expect(pendingRepo.deleteById).toHaveBeenCalledWith('p1');
-    // threadTs 'D1' (channel id) gets filtered to undefined by safeThreadTs to avoid Slack invalid_thread_ts.
-    expect(slack.postMessage).toHaveBeenCalledWith('D1', expect.stringContaining('Cancelled'), undefined);
+    it('returns false (caller mismatch) when the reply is from a different Slack user', async () => {
+      const { handler } = makeDeps({
+        pending: {
+          id: 'pid_1', callerSlackId: 'U_OWNER', channelId: 'C1', threadTs: 'C1',
+          kind: 'klaviyo_csv_pending',
+          payload: { profiles: [], filename: 'x.csv', storagePath: null, channels: ['email'] },
+        },
+      });
+      const consumed = await handler.tryHandle({ slackUserId: 'U_OTHER', channelId: 'C1', threadTs: 'C1', text: 'cancel' });
+      expect(consumed).toBe(false);
+    });
   });
 
   it('cancel deletes the pending row, DMs cancelled', async () => {

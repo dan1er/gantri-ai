@@ -211,18 +211,6 @@ async function main() {
       deletionsRepo: klaviyoDeletionsRepo,
       client: klaviyoClient,
       slack: klaviyoSlackAdapter,
-      // CSV-list-pending dispatcher: lets the handler route any text reply
-      // straight to klaviyo.commit_pending_csv_import without going through
-      // the LLM (which would misinterpret arbitrary strings like "prueba
-      // nueva" as help requests).
-      runTool: async (toolName, args, actor) => {
-        return await orchestrator.runToolDirect({
-          toolName,
-          args,
-          actor: { slackUserId: actor.slackUserId, slackChannelId: actor.channelId },
-          thread: { channelId: actor.channelId, threadTs: actor.threadTs ?? actor.channelId },
-        });
-      },
     });
 
     klaviyoImportPoller = new KlaviyoImportPollerJob({

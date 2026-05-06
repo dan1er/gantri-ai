@@ -11,13 +11,6 @@ export interface ConfirmationHandlerDeps {
   client: Pick<KlaviyoApiClient, 'bulkSubscribeProfiles' | 'requestProfileDeletion'>;
   slack: { postMessage(channel: string, text: string, threadTs?: string): Promise<void> };
   sleep?: (ms: number) => Promise<void>;
-  /** Optional tool dispatcher used to run klaviyo.commit_pending_csv_import.
-   *  When omitted (or in tests), CSV-pending dispatch is skipped. */
-  runTool?: (
-    name: string,
-    args: unknown,
-    actor: { slackUserId: string; channelId: string; threadTs?: string },
-  ) => Promise<unknown>;
 }
 
 export interface IncomingMessage {
@@ -63,64 +56,19 @@ export class ConfirmationHandler {
       return false;
     }
 
-    // CSV-list-pending uses ANY non-empty text as the list selection (deterministic
-    // — we don't want the LLM to misinterpret "prueba nueva" as a help request).
-    // Special cases:
-    //   - cancel / abort → delete pending, abort
-    //   - awaiting-create state + "yes" / "si" → create the previously-named
-    //     list AND finalize the import in one step
-    //   - awaiting-create state + anything else → clear that state and treat
-    //     the new text as a fresh list-name attempt
     if (pending.kind === 'klaviyo_csv_pending') {
       const text = msg.text.trim();
-      const payload = pending.payload as { awaitingCreateForName?: string | null } & Record<string, unknown>;
-      const awaitingName = payload.awaitingCreateForName ?? null;
-
-      const isCancel = /^(cancel|cancelar|abort)$/i.test(text);
-      if (isCancel) {
+      if (/^(cancel|cancelar|abort)$/i.test(text)) {
         await this.deps.pendingRepo.deleteById(pending.id);
         await this.deps.slack.postMessage(msg.channelId, 'Cancelled. CSV import not submitted.', safeThreadTs(msg.threadTs));
         logger.info({ pendingId: pending.id, caller: pending.callerSlackId }, 'klaviyo_csv_cancelled');
         return true;
       }
-      if (!text) return false;
-
-      const isYes = /^(yes|y|si|sí|yes,?\s*create\s*it|create\s*it|dale|ok)$/i.test(text);
-      const isNo = /^(no|nope|nada)$/i.test(text);
-
-      try {
-        if (awaitingName && isYes) {
-          // User confirmed creation of the previously-named list.
-          await this.executeCreateAndImport(pending, msg, awaitingName);
-          return true;
-        }
-        if (awaitingName && isNo) {
-          // User declined creating that list. Clear the awaiting state and
-          // ask them for a new list name without aborting the import.
-          await this.deps.pendingRepo.updatePayload(pending.id, { awaitingCreateForName: null }).catch(() => {});
-          await this.deps.slack.postMessage(
-            msg.channelId,
-            `Ok, won't create it. Reply with a different list name (or "cancel" to abort the import).`,
-            safeThreadTs(msg.threadTs),
-          );
-          return true;
-        }
-        // If we're awaiting and the user typed something other than yes/no,
-        // assume they're picking a new list name — clear the awaiting state
-        // and treat the text as a fresh attempt.
-        if (awaitingName) {
-          await this.deps.pendingRepo.updatePayload(pending.id, { awaitingCreateForName: null }).catch(() => {});
-        }
-        await this.executeCsvImport(pending, msg, text);
-      } catch (err: any) {
-        logger.error({ pendingId: pending.id, err: String(err?.message ?? err) }, 'klaviyo_csv_exec_failed');
-        await this.deps.slack.postMessage(
-          msg.channelId,
-          `Couldn't run the CSV import: ${String(err?.message ?? err)}`,
-          safeThreadTs(msg.threadTs),
-        );
-      }
-      return true;
+      // Anything other than cancel: let the orchestrator interpret the reply
+      // with pending CSV state injected as a system note. The slack handler
+      // re-fetches the pending row and builds OrchestratorPendingCsvContext.
+      logger.info({ pendingId: pending.id, caller: pending.callerSlackId }, 'klaviyo_csv_routed_to_orchestrator');
+      return false;
     }
 
     // klaviyo_import / klaviyo_delete: yes/cancel only.
@@ -151,96 +99,6 @@ export class ConfirmationHandler {
       await this.deps.pendingRepo.deleteById(pending.id).catch(() => {});
     }
     return true;
-  }
-
-  /** Two-step "create the list the user named, then import" used when the
-   *  prior CSV-pending response was "no list called X — want me to create it?"
-   *  and the user replied "yes". Calls klaviyo.create_list, then runs the
-   *  ordinary CSV commit with the freshly-created list's name. Clears the
-   *  awaiting-create state regardless of outcome. */
-  private async executeCreateAndImport(pending: PendingConfirmationRow, msg: IncomingMessage, listName: string) {
-    if (!this.deps.runTool) {
-      await this.deps.slack.postMessage(msg.channelId, 'Internal: CSV commit handler is not wired up.', safeThreadTs(msg.threadTs));
-      return;
-    }
-    // Clear the awaiting state up front so a re-entry doesn't loop.
-    await this.deps.pendingRepo.updatePayload(pending.id, { awaitingCreateForName: null }).catch(() => {});
-
-    const createResult: any = await this.deps.runTool(
-      'klaviyo.create_list',
-      { name: listName },
-      { slackUserId: pending.callerSlackId, channelId: pending.channelId, threadTs: pending.threadTs },
-    );
-    if (createResult?.error) {
-      await this.deps.slack.postMessage(
-        msg.channelId,
-        `Couldn't create the list "${listName}": ${createResult.error.message}`,
-        safeThreadTs(msg.threadTs),
-      );
-      return;
-    }
-    if (!createResult?.ok) {
-      await this.deps.slack.postMessage(msg.channelId, `Couldn't create the list "${listName}".`, safeThreadTs(msg.threadTs));
-      return;
-    }
-    logger.info({ pendingId: pending.id, listId: createResult.id, listName }, 'klaviyo_csv_list_created_for_pending');
-    await this.deps.slack.postMessage(msg.channelId, `Created list *${createResult.name}*. Importing now...`, safeThreadTs(msg.threadTs));
-    // Now run the ordinary commit with the new list.
-    await this.executeCsvImport(pending, msg, createResult.name);
-  }
-
-  private async executeCsvImport(pending: PendingConfirmationRow, msg: IncomingMessage, listInput: string) {
-    if (!this.deps.runTool) {
-      await this.deps.slack.postMessage(msg.channelId, 'Internal: CSV commit handler is not wired up.', safeThreadTs(msg.threadTs));
-      return;
-    }
-    const result: any = await this.deps.runTool(
-      'klaviyo.commit_pending_csv_import',
-      { list: listInput },
-      { slackUserId: pending.callerSlackId, channelId: pending.channelId, threadTs: pending.threadTs },
-    );
-
-    if (result?.error?.code === 'LIST_NOT_FOUND') {
-      const sugg = result.error.details?.suggestions ?? [];
-      // The tool strips filler prefixes ("let's use", "to list", "subelos a")
-      // and returns the cleaned name in details.normalizedName. Prefer that
-      // over the raw user input — both for the user-facing prompt AND for
-      // what the pending row remembers as the "would-create" name.
-      const candidateName: string = result.error.details?.normalizedName?.trim?.() || listInput;
-      const lines: string[] = [];
-      if (sugg.length === 0) {
-        await this.deps.pendingRepo.updatePayload(pending.id, { awaitingCreateForName: candidateName }).catch(() => {});
-        lines.push(`There's no list called *${candidateName}*. Want me to create it? Reply *yes* (creates "${candidateName}") or pick a different list name.`);
-      } else if (sugg.length === 1) {
-        lines.push(`Did you mean *${sugg[0].name}*? Reply with the exact name or "no" to pick something else.`);
-      } else {
-        lines.push(
-          `I see a few lists that could match: ${sugg.map((s: any) => `*${s.name}*`).join(', ')} — which one? Reply with the exact name.`,
-        );
-      }
-      await this.deps.slack.postMessage(msg.channelId, lines.join('\n'), safeThreadTs(msg.threadTs));
-      return;
-    }
-    if (result?.error) {
-      await this.deps.slack.postMessage(msg.channelId, `Couldn't import: ${result.error.message}`, safeThreadTs(msg.threadTs));
-      return;
-    }
-    if (result?.kind === 'imported_directly') {
-      await this.deps.slack.postMessage(
-        msg.channelId,
-        `Submitted ${result.total_imported} profile${result.total_imported === 1 ? '' : 's'} to Klaviyo${result.list ? ` (list: ${result.list.name})` : ''}. They typically appear within ~1 minute.`,
-        safeThreadTs(msg.threadTs),
-      );
-      return;
-    }
-    if (result?.kind === 'awaiting_confirmation') {
-      await this.deps.slack.postMessage(msg.channelId, result.message, safeThreadTs(msg.threadTs));
-      return;
-    }
-    if (result?.kind === 'all_invalid') {
-      await this.deps.slack.postMessage(msg.channelId, `All ${result.invalid_count} rows failed validation.`, safeThreadTs(msg.threadTs));
-      return;
-    }
   }
 
   private async executeImport(pending: PendingConfirmationRow, msg: IncomingMessage) {

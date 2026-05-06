@@ -442,27 +442,56 @@ export class KlaviyoApiClient {
    *  `getBulkImportJobStatus`. `defaultConsentSource` is the per-batch fallback
    *  custom_source applied when a row doesn't carry its own. */
   async bulkSubscribeProfiles(opts: BulkSubscribeOptions): Promise<BulkSubscribeResult> {
+    // The Klaviyo bulk-subscribe endpoint is a strict JSON:API resource: profile
+    // attributes are restricted to {email, phone_number, subscriptions}. first_name,
+    // last_name, properties, and custom_source on the profile resource all 400.
+    // For first_name/last_name we'd need a separate /api/profile-bulk-import-jobs
+    // call — TODO: chain that BEFORE this when those fields are present.
+    // custom_source goes at JOB level (data.attributes.custom_source).
+    // list goes at JOB level via relationships.list (singular, one list per job).
     const subscriptions: Record<string, unknown> = {};
     if (opts.channels.includes('email')) subscriptions.email = { marketing: { consent: 'SUBSCRIBED' } };
     if (opts.channels.includes('sms')) subscriptions.sms = { marketing: { consent: 'SUBSCRIBED' } };
 
-    const profiles = opts.profiles.map((p) => {
-      const out: Record<string, unknown> = { email: p.email };
-      if (p.phone_number) out.phone_number = p.phone_number;
-      if (p.first_name) out.first_name = p.first_name;
-      if (p.last_name) out.last_name = p.last_name;
-      if (p.custom_source) out.custom_source = p.custom_source;
-      else if (opts.defaultConsentSource) out.custom_source = opts.defaultConsentSource;
-      if (p.consented_at) out.consented_at = p.consented_at;
-      else if (opts.consentedAt) out.consented_at = opts.consentedAt;
-      out.subscriptions = subscriptions;
-      return out;
+    const profileResources = opts.profiles.map((p) => {
+      const attrs: Record<string, unknown> = { email: p.email };
+      if (p.phone_number) attrs.phone_number = p.phone_number;
+      attrs.subscriptions = subscriptions;
+      return { type: 'profile', attributes: attrs };
     });
 
-    const attributes: Record<string, unknown> = { profiles, historical_import: false };
-    if (opts.listId) attributes.list_id = opts.listId;
+    const jobAttributes: Record<string, unknown> = {
+      profiles: { data: profileResources },
+      historical_import: false,
+    };
+    // Pick a single custom_source for the whole job — prefer the explicit
+    // defaultConsentSource, else fall back to the first row's per-row source
+    // (the profile-level field is rejected, so we lose per-row source granularity).
+    const jobCustomSource =
+      opts.defaultConsentSource ??
+      opts.profiles.find((p) => p.custom_source)?.custom_source ??
+      undefined;
+    if (jobCustomSource) jobAttributes.custom_source = jobCustomSource;
+    // consented_at is also rejected at the profile level; if any per-row
+    // consented_at was supplied or a batch-level one, set it at job level.
+    const jobConsentedAt =
+      opts.consentedAt ??
+      opts.profiles.find((p) => p.consented_at)?.consented_at ??
+      undefined;
+    if (jobConsentedAt) jobAttributes.consented_at = jobConsentedAt;
 
-    const body = { data: { type: 'profile-subscription-bulk-create-job', attributes } };
+    const body: Record<string, unknown> = {
+      data: {
+        type: 'profile-subscription-bulk-create-job',
+        attributes: jobAttributes,
+      },
+    };
+    if (opts.listId) {
+      (body.data as Record<string, unknown>).relationships = {
+        list: { data: { type: 'list', id: opts.listId } },
+      };
+    }
+
     const resp = await this.post<{ data: { id: string } }>('/profile-subscription-bulk-create-jobs', body);
     if (!resp?.data?.id) throw new KlaviyoApiError('Klaviyo returned no job_id', 502, resp);
     return { job_id: resp.data.id };

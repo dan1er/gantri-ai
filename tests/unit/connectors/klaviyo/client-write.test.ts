@@ -9,7 +9,7 @@ function fakeFetch(impl: (url: string, init: any) => Promise<{ status: number; b
 }
 
 describe('KlaviyoApiClient.bulkSubscribeProfiles', () => {
-  it('builds correct JSON:API body with both channels and a list_id', async () => {
+  it('builds correct JSON:API body — profiles wrapped in {data:[]} as relationship-style resources, list as relationship', async () => {
     let captured: any = null;
     const fetchImpl = fakeFetch(async (url, init) => {
       captured = { url, body: JSON.parse(init.body) };
@@ -18,7 +18,7 @@ describe('KlaviyoApiClient.bulkSubscribeProfiles', () => {
     const client = new KlaviyoApiClient({ apiKey: 'pk_test', fetchImpl });
     const r = await client.bulkSubscribeProfiles({
       profiles: [
-        { email: 'a@x.com', first_name: 'A', phone_number: '+14155550100' },
+        { email: 'a@x.com', phone_number: '+14155550100' },
         { email: 'b@y.com' },
       ],
       listId: 'L1',
@@ -28,15 +28,28 @@ describe('KlaviyoApiClient.bulkSubscribeProfiles', () => {
     });
     expect(r.job_id).toBe('job-1');
     expect(captured.url).toBe('https://a.klaviyo.com/api/profile-subscription-bulk-create-jobs');
-    const body = captured.body.data.attributes;
-    expect(body.list_id).toBe('L1');
-    expect(body.profiles[0].subscriptions.email.marketing.consent).toBe('SUBSCRIBED');
-    expect(body.profiles[0].subscriptions.sms.marketing.consent).toBe('SUBSCRIBED');
-    expect(body.profiles[0].custom_source).toBe('BDNY 2026');
-    expect(body.profiles[0].consented_at).toBe('2026-05-05T10:00:00Z');
-    expect(body.profiles[0].phone_number).toBe('+14155550100');
-    expect(body.profiles[0].first_name).toBe('A');
-    expect(body.historical_import).toBe(false);
+    const data = captured.body.data;
+    expect(data.type).toBe('profile-subscription-bulk-create-job');
+    // list goes via relationships, not attributes
+    expect(data.relationships.list.data).toEqual({ type: 'list', id: 'L1' });
+    expect(data.attributes.list_id).toBeUndefined();
+    // profiles is a relationship-style envelope { data: [...] }
+    expect(Array.isArray(data.attributes.profiles.data)).toBe(true);
+    expect(data.attributes.profiles.data[0].type).toBe('profile');
+    const p0 = data.attributes.profiles.data[0].attributes;
+    expect(p0.email).toBe('a@x.com');
+    expect(p0.phone_number).toBe('+14155550100');
+    expect(p0.subscriptions.email.marketing.consent).toBe('SUBSCRIBED');
+    expect(p0.subscriptions.sms.marketing.consent).toBe('SUBSCRIBED');
+    // first_name / last_name / properties / custom_source are NOT valid on the profile resource
+    expect(p0.first_name).toBeUndefined();
+    expect(p0.last_name).toBeUndefined();
+    expect(p0.custom_source).toBeUndefined();
+    expect(p0.properties).toBeUndefined();
+    // custom_source + consented_at go at JOB level
+    expect(data.attributes.custom_source).toBe('BDNY 2026');
+    expect(data.attributes.consented_at).toBe('2026-05-05T10:00:00Z');
+    expect(data.attributes.historical_import).toBe(false);
   });
 
   it('omits sms subscription when channels is email-only', async () => {
@@ -47,12 +60,12 @@ describe('KlaviyoApiClient.bulkSubscribeProfiles', () => {
     });
     const client = new KlaviyoApiClient({ apiKey: 'pk_test', fetchImpl });
     await client.bulkSubscribeProfiles({ profiles: [{ email: 'a@x.com' }], channels: ['email'] });
-    const sub = captured.data.attributes.profiles[0].subscriptions;
+    const sub = captured.data.attributes.profiles.data[0].attributes.subscriptions;
     expect(sub.email).toBeDefined();
     expect(sub.sms).toBeUndefined();
   });
 
-  it('omits list_id when undefined', async () => {
+  it('omits list relationship when listId is undefined', async () => {
     let captured: any = null;
     const fetchImpl = fakeFetch(async (_url, init) => {
       captured = JSON.parse(init.body);
@@ -60,7 +73,7 @@ describe('KlaviyoApiClient.bulkSubscribeProfiles', () => {
     });
     const client = new KlaviyoApiClient({ apiKey: 'pk_test', fetchImpl });
     await client.bulkSubscribeProfiles({ profiles: [{ email: 'a@x.com' }], channels: ['email'] });
-    expect(captured.data.attributes.list_id).toBeUndefined();
+    expect(captured.data.relationships).toBeUndefined();
   });
 
   it('throws KlaviyoApiError on 4xx', async () => {
@@ -69,7 +82,7 @@ describe('KlaviyoApiClient.bulkSubscribeProfiles', () => {
     await expect(client.bulkSubscribeProfiles({ profiles: [{ email: 'a@x.com' }], channels: ['email'] })).rejects.toThrow();
   });
 
-  it('per-row custom_source overrides defaultConsentSource', async () => {
+  it('falls back to per-row custom_source as job-level when no defaultConsentSource', async () => {
     let captured: any = null;
     const fetchImpl = fakeFetch(async (_url, init) => {
       captured = JSON.parse(init.body);
@@ -82,11 +95,28 @@ describe('KlaviyoApiClient.bulkSubscribeProfiles', () => {
         { email: 'b@y.com' },
       ],
       channels: ['email'],
+    });
+    // Bulk-subscribe doesn't accept per-row custom_source; we hoist the first row's value to the job level.
+    expect(captured.data.attributes.custom_source).toBe('inline override');
+    expect(captured.data.attributes.profiles.data[0].attributes.custom_source).toBeUndefined();
+    expect(captured.data.attributes.profiles.data[1].attributes.custom_source).toBeUndefined();
+  });
+
+  it('defaultConsentSource wins over per-row custom_source for the job-level field', async () => {
+    let captured: any = null;
+    const fetchImpl = fakeFetch(async (_url, init) => {
+      captured = JSON.parse(init.body);
+      return { status: 202, body: { data: { id: 'j' } } };
+    });
+    const client = new KlaviyoApiClient({ apiKey: 'pk_test', fetchImpl });
+    await client.bulkSubscribeProfiles({
+      profiles: [
+        { email: 'a@x.com', custom_source: 'per row' },
+      ],
+      channels: ['email'],
       defaultConsentSource: 'batch fallback',
     });
-    const profiles = captured.data.attributes.profiles;
-    expect(profiles[0].custom_source).toBe('inline override');
-    expect(profiles[1].custom_source).toBe('batch fallback');
+    expect(captured.data.attributes.custom_source).toBe('batch fallback');
   });
 });
 

@@ -575,9 +575,12 @@ export class KlaviyoApiClient {
         },
       },
     };
-    const resp = await this.post<{ data: { id: string } }>('/data-privacy-deletion-jobs', body);
-    if (!resp?.data?.id) throw new KlaviyoApiError('Klaviyo returned no deletion_job_id', 502, resp);
-    return { deletion_job_id: resp.data.id };
+    // Klaviyo's data-privacy-deletion-jobs endpoint also returns 202 + empty
+    // body (same as bulk-subscribe). The work is fire-and-forget; we can't
+    // poll a deletion-job. Synthesize a local id so the audit can record we
+    // submitted this request.
+    await this.post<unknown>('/data-privacy-deletion-jobs', body);
+    return { deletion_job_id: `local-deletion-${randomUUID()}` };
   }
 
   /** Create a new Klaviyo list. opt_in_process defaults to 'double_opt_in' (Klaviyo's default).

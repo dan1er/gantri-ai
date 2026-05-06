@@ -244,7 +244,7 @@ describe('KlaviyoApiClient.requestProfileDeletion', () => {
     });
     const client = new KlaviyoApiClient({ apiKey: 'pk_test', fetchImpl });
     const r = await client.requestProfileDeletion({ email: 'junk@x.com' });
-    expect(r.deletion_job_id).toBe('del-1');
+    expect(r.deletion_job_id).toMatch(/^local-deletion-[0-9a-f-]+$/);
     expect(captured.url).toBe('https://a.klaviyo.com/api/data-privacy-deletion-jobs');
     expect(captured.body.data.type).toBe('data-privacy-deletion-job');
     expect(captured.body.data.attributes.profile.data.attributes.email).toBe('junk@x.com');

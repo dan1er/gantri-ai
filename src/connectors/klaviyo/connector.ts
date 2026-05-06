@@ -700,16 +700,37 @@ export class KlaviyoConnector implements Connector {
       // fall back to the existing "list name appears in the user input"
       // suggestions (which can be empty for entirely-novel names).
       if (!resolved) {
+        // Match list names that appear as a WHOLE-WORD substring of the user's
+        // input. Without word boundaries, short list names like "PR" would
+        // false-match inside "**pr**ueba", which we hit in production smoke.
+        // We pad with spaces and require the list name to be surrounded by
+        // non-word characters in the input.
+        const paddedNeedle = ` ${needle} `.replace(/[^\p{L}\p{N}]/gu, ' ').replace(/\s+/g, ' ');
         const containedInInput = lists
-          .filter((l) => l.name.length >= 2 && needle.includes(l.name.toLowerCase()))
-          // longer name matches first (more specific wins)
+          .filter((l) => {
+            const n = l.name.trim().toLowerCase();
+            if (n.length < 2) return false;
+            // Build a regex that matches the list name with word boundaries
+            // tolerant of any non-letter / non-digit character on either side.
+            const escaped = n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const re = new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}([^\\p{L}\\p{N}]|$)`, 'iu');
+            return re.test(needle);
+          })
           .sort((a, b) => b.name.length - a.name.length);
-        if (containedInInput.length === 1) {
-          resolved = containedInInput[0];
-        } else if (containedInInput.length > 1) {
-          const top5 = containedInInput.slice(0, 5).map(({ id, name }) => ({ id, name }));
+        // Drop names that are strict prefixes of a longer match (we already
+        // sorted longest-first; the first hit is the most specific).
+        const longest = containedInInput[0];
+        const filtered = longest
+          ? containedInInput.filter((l) => l.name.length >= longest.name.length * 0.5)
+          : containedInInput;
+        if (filtered.length === 1) {
+          resolved = filtered[0];
+        } else if (filtered.length > 1) {
+          // Multiple comparable-length matches → ask the user which one.
+          const top5 = filtered.slice(0, 5).map(({ id, name }) => ({ id, name }));
           return { error: { code: 'LIST_NOT_FOUND', message: `Multiple lists could match "${args.list}".`, details: { suggestions: top5 } } };
         }
+        void paddedNeedle; // currently unused; keeping the variable name for future debugging
       }
       if (!resolved) {
         const top5 = lists

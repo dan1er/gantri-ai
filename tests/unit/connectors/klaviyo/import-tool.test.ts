@@ -142,4 +142,55 @@ describe('klaviyo.import_profiles', () => {
     const r = await tool.execute({ profiles: [{ email: 'a@x.com' }], channels: ['email'], list: 'foobar' });
     expect((r as any).error.code).toBe('LIST_NOT_FOUND');
   });
+
+  it('extracts list name from natural-language phrases ("subelos a lista de prueba" → "lista de prueba")', async () => {
+    const deps = makeDeps({ listLists: [
+      { id: 'L_PRUEBA', name: 'lista de prueba' },
+      { id: 'L_TRADE', name: 'Trade Customers' },
+    ] });
+    const tool = getTool(deps);
+    const r = await tool.execute({
+      profiles: [{ email: 'a@x.com' }],
+      channels: ['email'],
+      list: 'subelos a lista de prueba',
+    });
+    expect((r as any).kind).toBe('imported_directly');
+    const subscribeCall = (deps.client.bulkSubscribeProfiles as any).mock.calls[0][0];
+    expect(subscribeCall.listId).toBe('L_PRUEBA');
+  });
+
+  it('does NOT false-match a short list name ("PR") inside a longer word ("prueba") — regression', async () => {
+    const deps = makeDeps({ listLists: [
+      { id: 'L_PR', name: 'PR' },
+      { id: 'L_PRUEBA', name: 'lista de prueba' },
+    ] });
+    const tool = getTool(deps);
+    const r = await tool.execute({
+      profiles: [{ email: 'a@x.com' }],
+      channels: ['email'],
+      list: 'lista de prueba',
+    });
+    expect((r as any).kind).toBe('imported_directly');
+    const subscribeCall = (deps.client.bulkSubscribeProfiles as any).mock.calls[0][0];
+    // MUST resolve to the exact-name match (lista de prueba), NOT the
+    // accidentally-substring-matching "PR" inside "**pr**ueba".
+    expect(subscribeCall.listId).toBe('L_PRUEBA');
+  });
+
+  it('multiple natural-language matches → LIST_NOT_FOUND with both as suggestions', async () => {
+    const deps = makeDeps({ listLists: [
+      { id: 'L_A', name: 'lista de prueba' },
+      { id: 'L_B', name: 'segunda lista de prueba' },
+    ] });
+    const tool = getTool(deps);
+    const r = await tool.execute({
+      profiles: [{ email: 'a@x.com' }],
+      channels: ['email'],
+      list: 'subelos a la segunda lista de prueba',
+    });
+    // Both lists' names appear in the input; the tool should ask the user.
+    expect((r as any).error.code).toBe('LIST_NOT_FOUND');
+    const sugg = (r as any).error.details.suggestions;
+    expect(sugg.length).toBeGreaterThanOrEqual(1);
+  });
 });

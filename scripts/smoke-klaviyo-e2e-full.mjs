@@ -211,22 +211,110 @@ async function cleanup({ supabase, client }) {
   }
 }
 
+async function caseStatus({ conn, importsRepo }) {
+  console.log(`\n=== CASE 3: import_status read-only lookup ===`);
+  // Insert a fake audit row, then look it up via the tool.
+  const { id } = await importsRepo.insert({
+    callerSlackId: TEST_CALLER_SLACK_ID, callerEmail: 'test@gantri.com',
+    source: 'inline', listId: TEST_LIST_ID, listName: TEST_LIST_NAME,
+    channels: ['email'], totalSubmitted: 5, totalImported: 5, totalInvalidRejected: 0,
+    klaviyoJobId: 'local-test-status', status: 'queued',
+  });
+  auditIdsToCleanup.push(id);
+
+  const tool = conn.tools.find((t) => t.name === 'klaviyo.import_status');
+  const r = await runTool(tool, { audit_id: id });
+  if (r.audit_id !== id || r.status !== 'queued' || r.total_imported !== 5) {
+    console.error(`  ✗ status lookup returned wrong shape: ${JSON.stringify(r)}`);
+    return false;
+  }
+  console.log(`  ✓ status lookup by audit_id returned status=${r.status} total_imported=${r.total_imported} list=${r.list?.name}`);
+
+  // NOT_FOUND case
+  const r2 = await runTool(tool, { audit_id: '00000000-0000-0000-0000-000000000000' });
+  if (r2.error?.code !== 'NOT_FOUND') { console.error(`  ✗ expected NOT_FOUND, got ${JSON.stringify(r2)}`); return false; }
+  console.log(`  ✓ unknown audit_id returns NOT_FOUND`);
+  return true;
+}
+
+async function caseDeletePreview({ conn, client }) {
+  console.log(`\n=== CASE 4: delete_profiles preview (no actual delete) ===`);
+  // First import a profile we can then "preview-delete"
+  const stamp = Date.now();
+  const email = `e2e-delete-${stamp}+test@gantri.com`;
+  const importTool = conn.tools.find((t) => t.name === 'klaviyo.import_profiles');
+  await runTool(importTool, { profiles: [{ email }], list: TEST_LIST_NAME, channels: ['email'] });
+
+  // Wait for indexing
+  console.log(`  → Waiting up to 90s for ${email} to appear in Klaviyo before delete preview...`);
+  const profile = await waitForProfile(client, email);
+  if (!profile) { console.error(`  ✗ profile didn't index in 90s`); return false; }
+  console.log(`  ✓ profile indexed (id=${profile.id})`);
+
+  // Now call delete_profiles — should return awaiting_confirmation, no actual delete
+  const deleteTool = conn.tools.find((t) => t.name === 'klaviyo.delete_profiles');
+  const r = await runTool(deleteTool, { emails: [email, 'never-existed@example.invalid'] });
+  if (r.kind !== 'awaiting_confirmation') {
+    console.error(`  ✗ expected awaiting_confirmation, got kind=${r.kind}: ${JSON.stringify(r)}`);
+    return false;
+  }
+  if (r.found.length !== 1) { console.error(`  ✗ expected 1 found, got ${r.found.length}`); return false; }
+  if (r.not_found.length !== 1) { console.error(`  ✗ expected 1 not_found, got ${r.not_found.length}`); return false; }
+  console.log(`  ✓ preview returned 1 found + 1 not_found, confirmation_token=${r.confirmation_token.slice(0,8)}...`);
+
+  // Track for cleanup
+  allTestEmails.push(email);
+  return true;
+}
+
+async function caseCreateList({ conn, supabase }) {
+  console.log(`\n=== CASE 5: create_list new list ===`);
+  const stamp = Date.now();
+  const newListName = `__e2e_test_list_${stamp}`;
+  const tool = conn.tools.find((t) => t.name === 'klaviyo.create_list');
+  const r = await runTool(tool, { name: newListName });
+  if (!r.ok) { console.error(`  ✗ create_list failed: ${JSON.stringify(r)}`); return false; }
+  console.log(`  ✓ list created: id=${r.id}, name=${r.name}`);
+
+  // Cleanup: delete the list
+  try {
+    const KEY_ = KEY;
+    const fetchRes = await fetch(`https://a.klaviyo.com/api/lists/${r.id}`, {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Klaviyo-API-Key ${KEY_}`,
+        revision: '2026-04-15',
+        accept: 'application/vnd.api+json',
+      },
+    });
+    if (fetchRes.ok || fetchRes.status === 204) console.log(`  ✓ test list deleted`);
+    else console.warn(`  ⚠ list delete returned HTTP ${fetchRes.status} — leaving in place`);
+  } catch (err) {
+    console.warn(`  ⚠ list delete failed: ${err?.message}`);
+  }
+  return true;
+}
+
 async function main() {
   const { conn, importsRepo, supabase } = buildConnector();
   const client = new KlaviyoApiClient({ apiKey: KEY });
 
-  const results = { inline: false, csv: false };
+  const results = { inline: false, csv: false, status: false, deletePreview: false, createList: false };
   try {
     results.inline = await caseInline({ conn, importsRepo, client });
     results.csv = await caseCsv({ conn, importsRepo, client });
+    results.status = await caseStatus({ conn, importsRepo });
+    results.deletePreview = await caseDeletePreview({ conn, client });
+    results.createList = await caseCreateList({ conn, supabase });
   } finally {
     try { await cleanup({ supabase, client }); } catch (err) { console.warn('cleanup error', err); }
   }
 
   console.log(`\n========================================`);
-  console.log(`SUMMARY: inline=${results.inline ? 'PASS' : 'FAIL'}  csv=${results.csv ? 'PASS' : 'FAIL'}`);
+  console.log(`SUMMARY:`);
+  for (const [k, v] of Object.entries(results)) console.log(`  ${k.padEnd(15)} ${v ? 'PASS ✓' : 'FAIL ✗'}`);
   console.log(`========================================`);
-  if (!results.inline || !results.csv) process.exit(1);
+  if (Object.values(results).some((v) => !v)) process.exit(1);
 }
 
 main().catch((err) => {

@@ -13,7 +13,8 @@ describe('KlaviyoApiClient.bulkSubscribeProfiles', () => {
     let captured: any = null;
     const fetchImpl = fakeFetch(async (url, init) => {
       captured = { url, body: JSON.parse(init.body) };
-      return { status: 202, body: { data: { id: 'job-1' } } };
+      // Klaviyo returns 202 + content-length 0 — the helper must tolerate empty body.
+      return { status: 202, body: undefined };
     });
     const client = new KlaviyoApiClient({ apiKey: 'pk_test', fetchImpl });
     const r = await client.bulkSubscribeProfiles({
@@ -26,7 +27,8 @@ describe('KlaviyoApiClient.bulkSubscribeProfiles', () => {
       consentedAt: '2026-05-05T10:00:00Z',
       defaultConsentSource: 'BDNY 2026',
     });
-    expect(r.job_id).toBe('job-1');
+    // bulk-subscribe doesn't return a job id — we synthesize a local- prefixed UUID.
+    expect(r.job_id).toMatch(/^local-bulksubscribe-[0-9a-f-]+$/);
     expect(captured.url).toBe('https://a.klaviyo.com/api/profile-subscription-bulk-create-jobs');
     const data = captured.body.data;
     expect(data.type).toBe('profile-subscription-bulk-create-job');
@@ -162,60 +164,74 @@ describe('KlaviyoApiClient.findProfileByEmail', () => {
     expect(r).toBeNull();
   });
 
-  it('returns profile + lists', async () => {
+  it('returns profile + lists (two-call shape: /profiles + /profiles/{id}/lists)', async () => {
+    const calls: string[] = [];
     const fetchImpl = fakeFetch(async (url) => {
-      expect(url).toContain('filter=');
-      expect(decodeURIComponent(url)).toContain('equals(email,"a@x.com")');
+      calls.push(url);
+      if (url.includes('/profiles?')) {
+        // First call: search by email — Klaviyo does NOT support `include=lists` on collection /profiles, so we drop it.
+        expect(url).not.toContain('include=lists');
+        expect(decodeURIComponent(url)).toContain('equals(email,"a@x.com")');
+        return {
+          status: 200,
+          body: { data: [{ id: 'pid1', attributes: { email: 'a@x.com', created: '2024-08-12T19:03:45+00:00' } }] },
+        };
+      }
+      // Second call: fetch list memberships for the resolved profile id.
+      expect(url).toContain('/api/profiles/pid1/lists');
       return {
         status: 200,
-        body: {
-          data: [{
-            id: 'pid1',
-            attributes: { email: 'a@x.com', created: '2024-08-12T19:03:45+00:00' },
-            relationships: { lists: { data: [{ id: 'L1' }] } },
-          }],
-          included: [{ type: 'list', id: 'L1', attributes: { name: 'Trade Customers' } }],
-        },
+        body: { data: [{ type: 'list', id: 'L1', attributes: { name: 'Trade Customers' } }] },
       };
     });
     const client = new KlaviyoApiClient({ apiKey: 'pk_test', fetchImpl });
     const r = await client.findProfileByEmail('a@x.com');
     expect(r).toEqual({ id: 'pid1', created_at: '2024-08-12T19:03:45+00:00', lists: ['Trade Customers'] });
+    expect(calls.length).toBe(2);
   });
 
-  it('falls back to created_at attribute name when present', async () => {
-    const fetchImpl = fakeFetch(async () => ({
-      status: 200,
-      body: {
-        data: [{
-          id: 'pid1',
-          attributes: { email: 'a@x.com', created_at: '2024-08-12T19:03:45+00:00' },
-          relationships: { lists: { data: [] } },
-        }],
-        included: [],
-      },
-    }));
+  it('falls back to created_at attribute name and empty list array when no lists', async () => {
+    const fetchImpl = fakeFetch(async (url) => {
+      if (url.includes('/profiles?')) {
+        return {
+          status: 200,
+          body: { data: [{ id: 'pid1', attributes: { email: 'a@x.com', created_at: '2024-08-12T19:03:45+00:00' } }] },
+        };
+      }
+      return { status: 200, body: { data: [] } };
+    });
     const client = new KlaviyoApiClient({ apiKey: 'pk_test', fetchImpl });
     const r = await client.findProfileByEmail('a@x.com');
     expect(r?.created_at).toBe('2024-08-12T19:03:45+00:00');
     expect(r?.lists).toEqual([]);
   });
 
-  it('returns list id when included entry is missing', async () => {
-    const fetchImpl = fakeFetch(async () => ({
-      status: 200,
-      body: {
-        data: [{
-          id: 'pid1',
-          attributes: { email: 'a@x.com', created: '2024-01-01T00:00:00Z' },
-          relationships: { lists: { data: [{ id: 'L1' }, { id: 'L2' }] } },
-        }],
-        included: [{ type: 'list', id: 'L1', attributes: { name: 'Trade' } }],
-      },
-    }));
+  it('falls back to bare list id when name attribute is missing', async () => {
+    const fetchImpl = fakeFetch(async (url) => {
+      if (url.includes('/profiles?')) {
+        return { status: 200, body: { data: [{ id: 'pid1', attributes: { email: 'a@x.com', created: '2024-01-01T00:00:00Z' } }] } };
+      }
+      return {
+        status: 200,
+        body: { data: [{ type: 'list', id: 'L1', attributes: { name: 'Trade' } }, { type: 'list', id: 'L2', attributes: {} }] },
+      };
+    });
     const client = new KlaviyoApiClient({ apiKey: 'pk_test', fetchImpl });
     const r = await client.findProfileByEmail('a@x.com');
     expect(r?.lists).toEqual(['Trade', 'L2']);
+  });
+
+  it('lists fetch failure is non-fatal — returns profile with empty lists', async () => {
+    const fetchImpl = fakeFetch(async (url) => {
+      if (url.includes('/profiles?')) {
+        return { status: 200, body: { data: [{ id: 'pid1', attributes: { email: 'a@x.com', created: '2024-01-01T00:00:00Z' } }] } };
+      }
+      return { status: 500, body: { errors: [{ detail: 'temporary failure' }] } };
+    });
+    const client = new KlaviyoApiClient({ apiKey: 'pk_test', fetchImpl });
+    const r = await client.findProfileByEmail('a@x.com');
+    expect(r?.id).toBe('pid1');
+    expect(r?.lists).toEqual([]);
   });
 });
 

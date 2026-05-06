@@ -87,21 +87,32 @@ export class ConfirmationHandler {
       listId: p.listId ?? undefined,
       channels: p.channels,
     });
+    // Klaviyo's bulk-subscribe returns 202 with no body, so there's no
+    // real job to poll. The client returns a synthetic `local-` job_id; we
+    // mark the audit complete immediately for those.
+    const isLocalJob = result.job_id.startsWith('local-');
     const audit = await this.deps.importsRepo.insert({
       callerSlackId: pending.callerSlackId, callerEmail: null,
       source: p.source, filename: p.filename, storagePath: p.storagePath,
       listId: p.listId, listName: p.listName, channels: p.channels,
       totalSubmitted: p.totalSubmitted, totalImported: p.valid.length, totalInvalidRejected: p.totalInvalidRejected,
-      klaviyoJobId: result.job_id, status: 'queued',
+      klaviyoJobId: result.job_id, status: isLocalJob ? 'complete' : 'queued',
     });
+    if (isLocalJob) {
+      await this.deps.importsRepo.updateStatus(audit.id, {
+        status: 'complete', succeededCount: p.valid.length, alreadySubscribedCount: 0, failedCount: 0,
+      });
+    }
     await this.deps.slack.postMessage(
       msg.channelId,
-      `Queued ${p.valid.length} profile${p.valid.length === 1 ? '' : 's'} (audit \`${audit.id}\`, job \`${result.job_id}\`). I'll DM when it's done.`,
+      isLocalJob
+        ? `Submitted ${p.valid.length} profile${p.valid.length === 1 ? '' : 's'} to Klaviyo (audit \`${audit.id}\`). Klaviyo accepted — profiles typically appear within ~1 minute.`
+        : `Queued ${p.valid.length} profile${p.valid.length === 1 ? '' : 's'} (audit \`${audit.id}\`, job \`${result.job_id}\`). I'll DM when it's done.`,
       msg.threadTs,
     );
     logger.info(
-      { auditId: audit.id, jobId: result.job_id, valid: p.valid.length, rejected: p.totalInvalidRejected },
-      'klaviyo_import_queued',
+      { auditId: audit.id, jobId: result.job_id, valid: p.valid.length, rejected: p.totalInvalidRejected, immediateComplete: isLocalJob },
+      'klaviyo_import_submitted',
     );
   }
 

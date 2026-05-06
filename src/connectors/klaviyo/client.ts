@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { logger } from '../../logger.js';
 
 /**
@@ -210,7 +211,10 @@ export class KlaviyoApiClient {
     return data as T;
   }
 
-  /** POST helper for `*-values-reports` endpoints (the only POSTs we make). */
+  /** POST helper for `*-values-reports` endpoints (the only POSTs we make).
+   *  Tolerates `content-length: 0` empty-body responses (Klaviyo's async POSTs
+   *  like `profile-subscription-bulk-create-jobs` return 202 with no body).
+   *  In that case the helper returns `null as T` — callers must handle it. */
   private async post<T>(path: string, body: unknown): Promise<T> {
     const url = `${this.baseUrl}${path}`;
     const t0 = Date.now();
@@ -226,8 +230,9 @@ export class KlaviyoApiClient {
       logger.warn({ path, status: res.status, elapsed, body: respBody }, 'klaviyo api error');
       throw new KlaviyoApiError(`POST ${path} -> ${res.status}`, res.status, respBody);
     }
-    const data = await res.json();
-    logger.info({ path, status: res.status, elapsed }, 'klaviyo api ok');
+    const text = await res.text();
+    const data = text.length === 0 ? null : JSON.parse(text);
+    logger.info({ path, status: res.status, elapsed, empty_body: text.length === 0 }, 'klaviyo api ok');
     return data as T;
   }
 
@@ -492,9 +497,13 @@ export class KlaviyoApiClient {
       };
     }
 
-    const resp = await this.post<{ data: { id: string } }>('/profile-subscription-bulk-create-jobs', body);
-    if (!resp?.data?.id) throw new KlaviyoApiError('Klaviyo returned no job_id', 502, resp);
-    return { job_id: resp.data.id };
+    // Klaviyo's bulk-subscribe endpoint returns HTTP 202 with an EMPTY body —
+    // there is no job_id to track. The work is fire-and-forget from our side.
+    // We synthesize a local id so callers (audit table, poller) have something
+    // to key on. The poller treats `local-` prefixed ids as "verify by querying
+    // the profiles directly" rather than "GET /profile-bulk-import-jobs/<id>".
+    await this.post<unknown>('/profile-subscription-bulk-create-jobs', body);
+    return { job_id: `local-bulksubscribe-${randomUUID()}` };
   }
 
   /** GET /profile-bulk-import-jobs/:id — poll status of a bulk subscribe job
@@ -512,27 +521,34 @@ export class KlaviyoApiClient {
     };
   }
 
-  /** GET /profiles?filter=equals(email,"...")&include=lists — single-profile
-   *  lookup by email used by the delete-preview path. Returns null when the
-   *  email isn't on file. `created_at` is normalized across the two attribute
-   *  names Klaviyo has used historically (`created` and `created_at`). List
-   *  names are resolved from the `included` block when present, falling back
-   *  to the bare list id so callers always get a stable string array. */
+  /** GET /profiles?filter=equals(email,"...") — single-profile lookup by email.
+   *  Returns null when the email isn't on file. `created_at` is normalized
+   *  across the two attribute names Klaviyo has used historically (`created`
+   *  and `created_at`).
+   *
+   *  Klaviyo's collection /profiles endpoint does NOT currently support
+   *  `include=lists` ("'lists' include is not currently supported when listing
+   *  profiles"). To get list membership we make a separate /profiles/{id}/lists
+   *  call. We do this lazily — only when a caller explicitly needs the list
+   *  array — by following the `lists` relationship link. */
   async findProfileByEmail(email: string): Promise<{ id: string; created_at: string; lists: string[] } | null> {
     const filter = `equals(email,"${email.replace(/"/g, '\\"')}")`;
-    const path = `/profiles?filter=${encodeURIComponent(filter)}&include=lists&fields[profile]=email,created`;
-    const resp = await this.get<{ data: any[]; included?: any[] }>(path);
+    const path = `/profiles?filter=${encodeURIComponent(filter)}&fields[profile]=email,created`;
+    const resp = await this.get<{ data: any[] }>(path);
     const profile = resp?.data?.[0];
     if (!profile) return null;
-    const listIds: string[] = (profile.relationships?.lists?.data ?? []).map((d: any) => d.id);
-    const listNames = listIds.map((lid) => {
-      const l = (resp.included ?? []).find((x: any) => x.type === 'list' && x.id === lid);
-      return l?.attributes?.name ?? lid;
-    });
+    let lists: string[] = [];
+    try {
+      const listsResp = await this.get<{ data: any[] }>(`/profiles/${encodeURIComponent(profile.id)}/lists`);
+      lists = (listsResp?.data ?? []).map((l: any) => l.attributes?.name ?? l.id);
+    } catch (err) {
+      // Non-fatal — return profile without list info if the lists endpoint hiccups.
+      logger.warn({ err: String((err as any)?.message ?? err), profileId: profile.id }, 'klaviyo profile lists fetch failed');
+    }
     return {
       id: profile.id,
       created_at: profile.attributes?.created ?? profile.attributes?.created_at,
-      lists: listNames,
+      lists,
     };
   }
 

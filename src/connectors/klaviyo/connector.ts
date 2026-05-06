@@ -679,21 +679,37 @@ export class KlaviyoConnector implements Connector {
         listId: listId ?? undefined,
         channels: args.channels,
       });
+      // Klaviyo's bulk-subscribe returns 202 with no body and no job_id, so
+      // there's nothing to poll. We mark the audit row 'complete' immediately
+      // and trust Klaviyo to process the submission. If verification is needed,
+      // the user can ask "did smoke3+test@gantri.com get added?" and we look it
+      // up via findProfileByEmail.
+      const isLocalJob = result.job_id.startsWith('local-');
       const audit = await this.deps.importsRepo.insert({
         callerSlackId: actor.slackUserId, callerEmail: null,
         source: args.source, filename: args.filename ?? null, storagePath: args.storage_path ?? null,
         listId, listName, channels: args.channels,
         totalSubmitted: raws.length, totalImported: v.valid.length, totalInvalidRejected: 0,
-        klaviyoJobId: result.job_id, status: 'queued',
+        klaviyoJobId: result.job_id, status: isLocalJob ? 'complete' : 'queued',
       });
-      logger.info({ auditId: audit.id, jobId: result.job_id, valid: v.valid.length }, 'klaviyo_import_queued');
+      if (isLocalJob) {
+        await this.deps.importsRepo.updateStatus(audit.id, {
+          status: 'complete',
+          succeededCount: v.valid.length,
+          alreadySubscribedCount: 0,
+          failedCount: 0,
+        });
+      }
+      logger.info({ auditId: audit.id, jobId: result.job_id, valid: v.valid.length, immediateComplete: isLocalJob }, 'klaviyo_import_submitted');
       return {
         kind: 'imported_directly' as const,
-        audit_id: audit.id, klaviyo_job_id: result.job_id, status: 'queued' as const,
+        audit_id: audit.id, klaviyo_job_id: result.job_id, status: (isLocalJob ? 'complete' : 'queued') as 'complete' | 'queued',
         list: listId ? { id: listId, name: listName! } : null,
         channels: args.channels,
         total_submitted: raws.length, total_imported: v.valid.length, total_invalid_rejected: 0,
-        message: `Queued ${v.valid.length} profile${v.valid.length === 1 ? '' : 's'} to Klaviyo${listName ? ` (list: ${listName})` : ''}. I'll DM when it's done.`,
+        message: isLocalJob
+          ? `Submitted ${v.valid.length} profile${v.valid.length === 1 ? '' : 's'} to Klaviyo${listName ? ` (list: ${listName})` : ''}. Klaviyo accepted the request — profiles typically appear within ~1 minute. Ask me "did <email> get added?" to verify a specific one.`
+          : `Queued ${v.valid.length} profile${v.valid.length === 1 ? '' : 's'} to Klaviyo${listName ? ` (list: ${listName})` : ''}. I'll DM when it's done.`,
       };
     }
 

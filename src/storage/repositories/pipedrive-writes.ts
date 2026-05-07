@@ -3,7 +3,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 export interface PipedriveWriteRow {
   id: string;
   callerSlackId: string;
-  action: 'create_lead' | 'add_note' | 'create_activity';
+  action: 'create_lead' | 'add_note' | 'create_activity' | 'delete_lead';
   pipedriveResourceType: 'lead' | 'note' | 'activity' | 'person' | 'organization' | null;
   pipedriveResourceId: string | null;
   requestPayload: unknown;

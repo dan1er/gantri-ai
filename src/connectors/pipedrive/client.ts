@@ -654,4 +654,43 @@ export class PipedriveApiClient {
     if (input.userId !== undefined) body.user_id = input.userId;
     return this.requestWrite('/v1/activities', body);
   }
+
+  /** Fetch the lead row (used to render a preview before destructive ops). */
+  async getLead(leadId: string): Promise<{ id: string; title: string; person_id: number | null; organization_id: number | null } | null> {
+    const path = `/v1/leads/${encodeURIComponent(leadId)}`;
+    const url = `${this.baseUrl}${path}`;
+    const res = await this.fetchImpl(url, { method: 'GET', headers: this.headers() });
+    if (res.status === 404) return null;
+    if (!res.ok) {
+      let body: unknown = null;
+      try { body = await res.clone().json(); } catch {}
+      throw new PipedriveApiError(`GET ${path} -> ${res.status}`, res.status, body);
+    }
+    const json = await res.clone().json() as { success: boolean; data: { id: string; title: string; person_id: number | null; organization_id: number | null } };
+    return json.data;
+  }
+
+  /** Soft-delete a lead. Pipedrive moves it to the recycle bin (recoverable
+   *  for ~90 days via the UI). Returns the deleted lead's id. */
+  async deleteLead(leadId: string): Promise<{ id: string }> {
+    const path = `/v1/leads/${encodeURIComponent(leadId)}`;
+    const url = `${this.baseUrl}${path}`;
+    const t0 = Date.now();
+    let res = await this.fetchImpl(url, { method: 'DELETE', headers: this.headers() });
+    if (res.status === 429 || res.status >= 500) {
+      logger.warn({ path, status: res.status }, 'pipedrive transient delete error — retrying once');
+      await new Promise((r) => setTimeout(r, this.retryDelayMs));
+      res = await this.fetchImpl(url, { method: 'DELETE', headers: this.headers() });
+    }
+    const elapsed = Date.now() - t0;
+    if (!res.ok) {
+      let body: unknown = null;
+      try { body = await res.clone().json(); } catch { body = await res.clone().text().catch(() => null); }
+      logger.warn({ path, status: res.status, elapsed, body }, 'pipedrive delete api error');
+      throw new PipedriveApiError(`DELETE ${path} -> ${res.status}`, res.status, body);
+    }
+    const json = await res.clone().json() as { success: boolean; data: { id: string } };
+    logger.info({ path, status: res.status, elapsed }, 'pipedrive delete api ok');
+    return { id: json.data.id };
+  }
 }

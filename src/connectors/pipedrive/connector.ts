@@ -164,6 +164,27 @@ export class PipedriveConnector implements Connector {
       execute: (args) => this.runCreateActivity(args as CreateActivityArgs),
     };
 
+    const DeleteLeadArgs = z.object({
+      leadId: z.string().regex(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+        'leadId must be a Pipedrive lead UUID',
+      ).describe('Lead UUID returned by `pipedrive.create_lead` (or visible in Pipedrive\'s URL).'),
+      confirm: z.boolean().default(false).describe('Pass true ONLY after the user has explicitly confirmed (e.g. replied "yes"/"si"/"delete it"). On the first call (confirm=false) the tool returns a preview asking for confirmation; do NOT auto-confirm.'),
+    });
+    type DeleteLeadArgs = z.infer<typeof DeleteLeadArgs>;
+    const deleteLeadTool: ToolDef<DeleteLeadArgs> = {
+      name: 'pipedrive.delete_lead',
+      description: [
+        'Delete a Pipedrive lead. Soft delete — Pipedrive moves it to the recycle bin (recoverable for ~90 days from the UI).',
+        'ADMIN or MARKETING role only.',
+        'TWO-STEP CONFIRM: first call without `confirm:true` returns a preview; relay the preview to the user, wait for explicit "yes"/"si"/"delete it" in their NEXT message, then re-call with `confirm:true`. NEVER auto-confirm — passing `confirm:true` without the user explicitly approving in the latest turn is a bug.',
+        'Use when the user says: "delete that lead", "borra ese lead", "remove the X lead", "undo the lead I just created".',
+      ].join(' '),
+      schema: DeleteLeadArgs as z.ZodType<DeleteLeadArgs>,
+      jsonSchema: zodToJsonSchema(DeleteLeadArgs),
+      execute: (args) => this.runDeleteLead(args as DeleteLeadArgs),
+    };
+
     return [
       this.toolListDirectory(),
       this.toolSearch(),
@@ -179,6 +200,7 @@ export class PipedriveConnector implements Connector {
       createLeadTool,
       addNoteTool,
       createActivityTool,
+      deleteLeadTool,
     ];
   }
 
@@ -432,6 +454,71 @@ export class PipedriveConnector implements Connector {
         status: 'failure',
       }).catch(() => {});
       logger.warn({ caller: actor.slackUserId, action: 'create_activity', error_code: 'PIPEDRIVE_ERROR', status }, 'pipedrive_write_failed');
+      return { error: { code: 'PIPEDRIVE_ERROR', status, message, body } };
+    }
+  }
+
+  private async runDeleteLead(args: { leadId: string; confirm: boolean }): Promise<unknown> {
+    if (!this.writesRepo || !this.usersRepo || !this.getActor) {
+      return { error: { code: 'WRITE_DEPS_NOT_CONFIGURED', message: 'Pipedrive write tools require writesRepo + usersRepo + getActor.' } };
+    }
+    const actor = this.getActor();
+    if (!actor) return { error: { code: 'NO_ACTOR', message: 'pipedrive.delete_lead requires an active actor.' } };
+    const role = await this.usersRepo.getRole(actor.slackUserId);
+    if (role !== 'admin' && role !== 'marketing') {
+      return { error: { code: 'FORBIDDEN', message: 'Pipedrive write tools require role=admin or role=marketing.' } };
+    }
+
+    if (!args.confirm) {
+      // Two-step confirm: fetch the lead's title so we can render an unambiguous
+      // preview, then return awaiting_confirmation. The LLM relays the message
+      // and only re-calls with confirm:true after the user explicitly approves.
+      let lead: { id: string; title: string } | null = null;
+      try {
+        lead = await this.client.getLead(args.leadId);
+      } catch (err: unknown) {
+        const status = (err as { status?: number })?.status;
+        const message = err instanceof Error ? err.message : String(err);
+        return { error: { code: 'PIPEDRIVE_ERROR', status, message } };
+      }
+      if (!lead) {
+        return { error: { code: 'LEAD_NOT_FOUND', message: `No lead found with id ${args.leadId}.` } };
+      }
+      return {
+        kind: 'awaiting_confirmation' as const,
+        leadId: lead.id,
+        leadTitle: lead.title,
+        message: `About to delete lead *${lead.title}* (id: ${lead.id}). Reply *yes* to confirm — Pipedrive will move it to the recycle bin (recoverable for ~90 days).`,
+      };
+    }
+
+    try {
+      await this.client.deleteLead(args.leadId);
+      await this.writesRepo.insert({
+        callerSlackId: actor.slackUserId,
+        action: 'delete_lead',
+        pipedriveResourceType: 'lead',
+        pipedriveResourceId: args.leadId,
+        requestPayload: args,
+        responsePayload: { leadId: args.leadId },
+        status: 'success',
+      });
+      logger.info({ caller: actor.slackUserId, lead_id: args.leadId }, 'pipedrive_lead_deleted');
+      return { ok: true as const, leadId: args.leadId, message: `Deleted lead ${args.leadId}. It's in Pipedrive's recycle bin if you change your mind.` };
+    } catch (err: unknown) {
+      const status = (err as { status?: number })?.status;
+      const body = (err as { body?: unknown })?.body;
+      const message = err instanceof Error ? err.message : String(err);
+      await this.writesRepo.insert({
+        callerSlackId: actor.slackUserId,
+        action: 'delete_lead',
+        pipedriveResourceType: null,
+        pipedriveResourceId: null,
+        requestPayload: args,
+        responsePayload: { error: { code: 'PIPEDRIVE_ERROR', status, message, body } },
+        status: 'failure',
+      }).catch(() => {});
+      logger.warn({ caller: actor.slackUserId, action: 'delete_lead', error_code: 'PIPEDRIVE_ERROR', status }, 'pipedrive_write_failed');
       return { error: { code: 'PIPEDRIVE_ERROR', status, message, body } };
     }
   }

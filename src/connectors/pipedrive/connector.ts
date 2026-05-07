@@ -122,6 +122,24 @@ export class PipedriveConnector implements Connector {
       execute: (args) => this.runCreateLead(args as CreateLeadArgs),
     };
 
+    const AddNoteArgs = z.object({
+      targetType: z.enum(['lead', 'deal', 'person', 'org']).describe('Which Pipedrive entity to attach the note to.'),
+      targetId: z.string().min(1).describe('Lead UUID, or integer id (as string) for deal/person/org.'),
+      content: z.string().min(1).max(5000).describe('Note body. Plain text or simple HTML; Pipedrive sanitizes.'),
+    });
+    type AddNoteArgs = z.infer<typeof AddNoteArgs>;
+    const addNoteTool: ToolDef<AddNoteArgs> = {
+      name: 'pipedrive.add_note',
+      description: [
+        'Pin a note to an existing Pipedrive lead, deal, person, or organization.',
+        'ADMIN or MARKETING role only.',
+        'Use when the user says "note on the X lead", "log that…", "anota que…", "agrega una nota a…".',
+      ].join(' '),
+      schema: AddNoteArgs as z.ZodType<AddNoteArgs>,
+      jsonSchema: zodToJsonSchema(AddNoteArgs),
+      execute: (args) => this.runAddNote(args as AddNoteArgs),
+    };
+
     return [
       this.toolListDirectory(),
       this.toolSearch(),
@@ -135,6 +153,7 @@ export class PipedriveConnector implements Connector {
       this.toolActivitySummary(),
       this.toolUserPerformance(),
       createLeadTool,
+      addNoteTool,
     ];
   }
 
@@ -259,6 +278,65 @@ export class PipedriveConnector implements Connector {
       }).catch(() => {});
       logger.warn({ caller: actor.slackUserId, action: 'create_lead', error_code: 'PIPEDRIVE_ERROR', status }, 'pipedrive_write_failed');
       return { error: { code: 'PIPEDRIVE_ERROR', status, message, body, partial, personIdLeaked: personId, orgIdLeaked: orgId } };
+    }
+  }
+
+  private async runAddNote(args: { targetType: 'lead' | 'deal' | 'person' | 'org'; targetId: string; content: string }): Promise<unknown> {
+    if (!this.writesRepo || !this.usersRepo || !this.getActor) {
+      return { error: { code: 'WRITE_DEPS_NOT_CONFIGURED', message: 'Pipedrive write tools require writesRepo + usersRepo + getActor.' } };
+    }
+    const actor = this.getActor();
+    if (!actor) return { error: { code: 'NO_ACTOR', message: 'pipedrive.add_note requires an active actor.' } };
+    const role = await this.usersRepo.getRole(actor.slackUserId);
+    if (role !== 'admin' && role !== 'marketing') {
+      return { error: { code: 'FORBIDDEN', message: 'Pipedrive write tools require role=admin or role=marketing.' } };
+    }
+
+    // Lead ids are UUIDs; deal/person/org ids are integers
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    let payload: { content: string; leadId?: string; dealId?: number; personId?: number; orgId?: number };
+    if (args.targetType === 'lead') {
+      if (!UUID_RE.test(args.targetId)) return { error: { code: 'INVALID_ARGS', message: 'Lead targetId must be a UUID.' } };
+      payload = { content: args.content, leadId: args.targetId };
+    } else {
+      const numId = Number(args.targetId);
+      if (!Number.isInteger(numId) || numId <= 0) {
+        return { error: { code: 'INVALID_ARGS', message: `${args.targetType} targetId must be a positive integer.` } };
+      }
+      payload = { content: args.content };
+      if (args.targetType === 'deal') payload.dealId = numId;
+      else if (args.targetType === 'person') payload.personId = numId;
+      else if (args.targetType === 'org') payload.orgId = numId;
+    }
+
+    try {
+      const note = await this.client.createNote(payload);
+      await this.writesRepo.insert({
+        callerSlackId: actor.slackUserId,
+        action: 'add_note',
+        pipedriveResourceType: 'note',
+        pipedriveResourceId: String(note.id),
+        requestPayload: args,
+        responsePayload: { noteId: note.id },
+        status: 'success',
+      });
+      logger.info({ caller: actor.slackUserId, note_id: note.id, target_type: args.targetType, target_id: args.targetId }, 'pipedrive_note_created');
+      return { noteId: note.id, targetType: args.targetType, targetId: args.targetId };
+    } catch (err: unknown) {
+      const status = (err as { status?: number })?.status;
+      const body = (err as { body?: unknown })?.body;
+      const message = err instanceof Error ? err.message : String(err);
+      await this.writesRepo.insert({
+        callerSlackId: actor.slackUserId,
+        action: 'add_note',
+        pipedriveResourceType: null,
+        pipedriveResourceId: null,
+        requestPayload: args,
+        responsePayload: { error: { code: 'PIPEDRIVE_ERROR', status, message, body } },
+        status: 'failure',
+      }).catch(() => {});
+      logger.warn({ caller: actor.slackUserId, action: 'add_note', error_code: 'PIPEDRIVE_ERROR', status }, 'pipedrive_write_failed');
+      return { error: { code: 'PIPEDRIVE_ERROR', status, message, body } };
     }
   }
 

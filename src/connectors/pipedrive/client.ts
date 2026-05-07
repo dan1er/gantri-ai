@@ -545,7 +545,7 @@ export class PipedriveApiClient {
   // ─── search helpers ──────────────────────────────────────────────────────
 
   async findPersonByEmail(email: string): Promise<{ id: number; name: string } | null> {
-    const path = '/api/v1/persons/search';
+    const path = '/v1/persons/search';
     const params = new URLSearchParams({ term: email, fields: 'email', exact_match: 'true', limit: '5' });
     const url = `${this.baseUrl}${path}?${params.toString()}`;
     const res = await this.fetchImpl(url, { method: 'GET', headers: this.headers() });
@@ -560,7 +560,7 @@ export class PipedriveApiClient {
   }
 
   async findOrganizationByName(name: string): Promise<{ id: number; name: string } | null> {
-    const path = '/api/v1/organizations/search';
+    const path = '/v1/organizations/search';
     const params = new URLSearchParams({ term: name, exact_match: 'true', limit: '5' });
     const url = `${this.baseUrl}${path}?${params.toString()}`;
     const res = await this.fetchImpl(url, { method: 'GET', headers: this.headers() });
@@ -581,12 +581,12 @@ export class PipedriveApiClient {
     if (input.email) body.email = [{ value: input.email, primary: true, label: 'work' }];
     if (input.phone) body.phone = [{ value: input.phone, primary: true, label: 'work' }];
     if (input.orgId !== undefined) body.org_id = input.orgId;
-    const r = await this.requestWrite<{ id: number; name: string }>('/api/v1/persons', body);
+    const r = await this.requestWrite<{ id: number; name: string }>('/v1/persons', body);
     return { id: r.id, name: r.name };
   }
 
   async createOrganization(input: { name: string }): Promise<{ id: number; name: string }> {
-    const r = await this.requestWrite<{ id: number; name: string }>('/api/v1/organizations', { name: input.name });
+    const r = await this.requestWrite<{ id: number; name: string }>('/v1/organizations', { name: input.name });
     return { id: r.id, name: r.name };
   }
 
@@ -606,7 +606,7 @@ export class PipedriveApiClient {
     if (input.value) body.value = input.value;
     if (input.expectedCloseDate) body.expected_close_date = input.expectedCloseDate;
     if (input.labelIds?.length) body.label_ids = input.labelIds;
-    return this.requestWrite('/api/v1/leads', body);
+    return this.requestWrite('/v1/leads', body);
   }
 
   async createNote(input: {
@@ -621,7 +621,7 @@ export class PipedriveApiClient {
     if (input.dealId !== undefined) body.deal_id = input.dealId;
     if (input.personId !== undefined) body.person_id = input.personId;
     if (input.orgId !== undefined) body.org_id = input.orgId;
-    return this.requestWrite('/api/v1/notes', body);
+    return this.requestWrite('/v1/notes', body);
   }
 
   async createActivity(input: {
@@ -652,7 +652,7 @@ export class PipedriveApiClient {
     if (input.personId !== undefined) body.person_id = input.personId;
     if (input.orgId !== undefined) body.org_id = input.orgId;
     if (input.userId !== undefined) body.user_id = input.userId;
-    return this.requestWrite('/api/v1/activities', body);
+    return this.requestWrite('/v1/activities', body);
   }
 
   // ─── destructive ops (admin/marketing only — gated at the connector layer) ──
@@ -699,37 +699,37 @@ export class PipedriveApiClient {
   // Leads (id is UUID)
 
   async getLead(leadId: string): Promise<{ id: string; title: string; person_id: number | null; organization_id: number | null } | null> {
-    return this.fetchById(`/api/v1/leads/${encodeURIComponent(leadId)}`);
+    return this.fetchById(`/v1/leads/${encodeURIComponent(leadId)}`);
   }
 
   async deleteLead(leadId: string): Promise<{ id: string }> {
-    return this.deleteById(`/api/v1/leads/${encodeURIComponent(leadId)}`);
+    return this.deleteById(`/v1/leads/${encodeURIComponent(leadId)}`);
   }
 
   // Notes (id is integer)
 
   async getNote(noteId: number): Promise<{ id: number; content: string; lead_id: string | null; deal_id: number | null; person_id: number | null; org_id: number | null } | null> {
-    return this.fetchById(`/api/v1/notes/${noteId}`);
+    return this.fetchById(`/v1/notes/${noteId}`);
   }
 
   async deleteNote(noteId: number): Promise<{ id: number }> {
-    return this.deleteById(`/api/v1/notes/${noteId}`);
+    return this.deleteById(`/v1/notes/${noteId}`);
   }
 
   // Activities (id is integer)
 
   async getActivity(activityId: number): Promise<{ id: number; subject: string; type: string; due_date: string | null; due_time: string | null; done: boolean } | null> {
-    return this.fetchById(`/api/v1/activities/${activityId}`);
+    return this.fetchById(`/v1/activities/${activityId}`);
   }
 
   async deleteActivity(activityId: number): Promise<{ id: number }> {
-    return this.deleteById(`/api/v1/activities/${activityId}`);
+    return this.deleteById(`/v1/activities/${activityId}`);
   }
 
   // Organizations — `getOrganization(id)` already exists earlier (v2 read).
   // We reuse it for the preview and add only the destructive helper here.
 
   async deleteOrganization(orgId: number): Promise<{ id: number }> {
-    return this.deleteById(`/api/v1/organizations/${orgId}`);
+    return this.deleteById(`/v1/organizations/${orgId}`);
   }
 }

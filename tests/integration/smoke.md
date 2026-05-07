@@ -30,4 +30,17 @@ Run after deploys that touch `confirmation-handler.ts`, `orchestrator.ts`, the s
 
 Cleanup: archive the throwaway lists in Klaviyo and bulk-delete imported test profiles via `klaviyo.delete_profiles`.
 
+## Pipedrive write tools — Tier 1 (added 2026-05-07)
+
+Run after deploys that touch `src/connectors/pipedrive/connector.ts`, `src/connectors/pipedrive/client.ts`, or `migrations/0018_pipedrive_writes.sql`. Use a throwaway organization name (`E2E Test Co`) and a throwaway email (`e2e-test@example.com`); clean up afterwards.
+
+18. As role=admin in DM with the bot: _"Add e2e-test@example.com as a lead with org E2E Test Co"_. Expect a "Created lead" reply with `personCreated:true`, `orgCreated:true`. Verify a `pipedrive_writes` row appears in Supabase with `status='success'`.
+19. _"Note on lead <uuid from step 18>: smoke test note"_. Expect "Note added". Verify the note appears in Pipedrive's UI under that lead.
+20. _"Schedule a task to follow up with E2E Test Co next week"_. Expect activity created with `dueDate ≈ today+7`. Verify the activity in Pipedrive.
+21. _"Add e2e-test@example.com as a lead again"_ (same email). Expect `personCreated:false` (re-used the existing person). New lead is created.
+22. As role=user (a temporarily-demoted admin or a test user): _"Add a lead"_. Expect "Pipedrive write tools require the admin or marketing role" reply.
+23. Logs: `fly logs -a gantri-ai-bot | grep -E "pipedrive_(lead|note|activity)_created|pipedrive_write_failed"` should show 3 success log lines from steps 18-21 and zero failures.
+
+Cleanup: archive/delete the test leads, the E2E Test Co organization, and the test person in the Pipedrive UI.
+
 Log the result of the run (pass/fail per step) in the deploy PR.

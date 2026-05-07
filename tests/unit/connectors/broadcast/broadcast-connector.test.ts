@@ -10,6 +10,7 @@ type User = {
   slackUserId: string;
   email: string | null;
   role: string | null;
+  createdAt?: string | null;
 };
 
 function makeUsersRepo(users: User[], callerRole: string | null = 'admin') {
@@ -361,5 +362,64 @@ describe('BroadcastConnector → bot.update_user_role', () => {
     const { conn } = makeDeps({ users: [], callerRole: 'admin' });
     const tool = getTool(conn, 'bot.update_user_role');
     expect(() => tool.schema.parse({ slack_user_id: 'U_target', role: 'wizard' })).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// list_users tests
+// ---------------------------------------------------------------------------
+
+describe('BroadcastConnector → bot.list_users', () => {
+  const fiveUsers: User[] = [
+    { slackUserId: 'U_DANNY', email: 'danny@gantri.com', role: 'admin', createdAt: '2026-01-01T00:00:00.000Z' },
+    { slackUserId: 'U_LANA', email: 'lana@gantri.com', role: 'user', createdAt: '2026-01-02T00:00:00.000Z' },
+    { slackUserId: 'U_JEN', email: 'jen@gantri.com', role: 'marketing', createdAt: '2026-01-03T00:00:00.000Z' },
+    { slackUserId: 'U_STEPH', email: 'steph@gantri.com', role: 'marketing', createdAt: '2026-01-04T00:00:00.000Z' },
+    { slackUserId: 'U_LEGACY', email: null, role: 'user', createdAt: null },
+  ];
+
+  it('admin caller → returns all users with role + email + createdAt', async () => {
+    const { conn } = makeDeps({ users: fiveUsers, callerRole: 'admin' });
+    const tool = getTool(conn, 'bot.list_users');
+    const res: any = await tool.execute({});
+    expect(res.count).toBe(5);
+    expect(res.users).toEqual([
+      { slackUserId: 'U_DANNY', email: 'danny@gantri.com', role: 'admin', createdAt: '2026-01-01T00:00:00.000Z' },
+      { slackUserId: 'U_LANA', email: 'lana@gantri.com', role: 'user', createdAt: '2026-01-02T00:00:00.000Z' },
+      { slackUserId: 'U_JEN', email: 'jen@gantri.com', role: 'marketing', createdAt: '2026-01-03T00:00:00.000Z' },
+      { slackUserId: 'U_STEPH', email: 'steph@gantri.com', role: 'marketing', createdAt: '2026-01-04T00:00:00.000Z' },
+      { slackUserId: 'U_LEGACY', email: null, role: 'user', createdAt: null },
+    ]);
+  });
+
+  it('role filter narrows the result set', async () => {
+    const { conn } = makeDeps({ users: fiveUsers, callerRole: 'admin' });
+    const tool = getTool(conn, 'bot.list_users');
+    const res: any = await tool.execute({ role: 'marketing' });
+    expect(res.count).toBe(2);
+    expect(res.users.map((u: any) => u.slackUserId)).toEqual(['U_JEN', 'U_STEPH']);
+  });
+
+  it('non-admin caller → FORBIDDEN, no DB read for the list', async () => {
+    const { conn, usersRepo } = makeDeps({ users: fiveUsers, callerRole: 'user' });
+    const tool = getTool(conn, 'bot.list_users');
+    const res: any = await tool.execute({});
+    expect(res.error?.code).toBe('FORBIDDEN');
+    expect(usersRepo.listAll).not.toHaveBeenCalled();
+  });
+
+  it('NO_ACTOR when no actor in context', async () => {
+    const { conn } = makeDeps({ users: fiveUsers, callerRole: 'admin' });
+    // override the actor getter to return undefined
+    (conn as any).deps.getActor = () => undefined;
+    const tool = getTool(conn, 'bot.list_users');
+    const res: any = await tool.execute({});
+    expect(res.error?.code).toBe('NO_ACTOR');
+  });
+
+  it('rejects unknown role filter at the schema layer', () => {
+    const { conn } = makeDeps({ users: fiveUsers, callerRole: 'admin' });
+    const tool = getTool(conn, 'bot.list_users');
+    expect(() => tool.schema.parse({ role: 'wizard' })).toThrow();
   });
 });

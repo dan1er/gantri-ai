@@ -29,6 +29,12 @@ const UpdateUserRoleArgs = z.object({
 });
 type UpdateUserRoleArgs = z.infer<typeof UpdateUserRoleArgs>;
 
+const ListUsersArgs = z.object({
+  role: z.enum(['admin', 'marketing', 'user']).optional()
+    .describe('Optional filter: only return users with this role. Omit to return everyone.'),
+});
+type ListUsersArgs = z.infer<typeof ListUsersArgs>;
+
 export interface BroadcastConnectorDeps {
   slackClient: WebClient;
   usersRepo: AuthorizedUsersRepo;
@@ -95,7 +101,43 @@ export class BroadcastConnector implements Connector {
       jsonSchema: zodToJsonSchema(UpdateUserRoleArgs),
       execute: (args) => this.updateRole(args),
     };
-    return [broadcast, addUser, updateRole];
+    const listUsers: ToolDef<ListUsersArgs> = {
+      name: 'bot.list_users',
+      description: [
+        'List every authorized user of the bot with their role.',
+        'ADMIN-ONLY (gated by role="admin" on the caller).',
+        'Optional `role` filter: when set, returns only users with that role. Omit to get everyone.',
+        'Use when the operator says: "who has access to the bot", "list users and roles", "who is admin", "show all marketing users", "quien tiene acceso".',
+        'Returns `{count, users: [{slackUserId, email, role, createdAt}, ...]}` sorted by createdAt ascending. `email` is null when we never resolved one (legacy rows added by slack id only).',
+      ].join(' '),
+      schema: ListUsersArgs as z.ZodType<ListUsersArgs>,
+      jsonSchema: zodToJsonSchema(ListUsersArgs),
+      execute: (args) => this.listUsers(args),
+    };
+    return [broadcast, addUser, updateRole, listUsers];
+  }
+
+  private async listUsers(args: ListUsersArgs) {
+    const actor = this.deps.getActor();
+    if (!actor) {
+      return { error: { code: 'NO_ACTOR', message: 'bot.list_users requires an active actor.' } };
+    }
+    const callerRole = await this.deps.usersRepo.getRole(actor.slackUserId);
+    if (callerRole !== 'admin') {
+      logger.warn({ caller: actor.slackUserId, role: callerRole }, 'list_users denied: non-admin');
+      return { error: { code: 'FORBIDDEN', message: 'Only role="admin" can list bot users.' } };
+    }
+    const all = await this.deps.usersRepo.listAll();
+    const filtered = args.role ? all.filter((u) => u.role === args.role) : all;
+    return {
+      count: filtered.length,
+      users: filtered.map((u) => ({
+        slackUserId: u.slackUserId,
+        email: u.email,
+        role: u.role,
+        createdAt: u.createdAt,
+      })),
+    };
   }
 
   private async updateRole(args: UpdateUserRoleArgs) {

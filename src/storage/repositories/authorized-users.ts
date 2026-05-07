@@ -5,6 +5,7 @@ export interface AuthorizedUser {
   slackWorkspaceId: string | null;
   email: string | null;
   role: string | null;
+  createdAt: string | null;
 }
 
 export class AuthorizedUsersRepo {
@@ -33,7 +34,7 @@ export class AuthorizedUsersRepo {
   async listAll(): Promise<AuthorizedUser[]> {
     const { data, error } = await this.client
       .from('authorized_users')
-      .select('slack_user_id, slack_workspace_id, email, role')
+      .select('slack_user_id, slack_workspace_id, email, role, created_at')
       .order('created_at', { ascending: true });
     if (error) throw new Error(`authorized_users list failed: ${error.message}`);
     return (data ?? []).map((r) => ({
@@ -41,6 +42,7 @@ export class AuthorizedUsersRepo {
       slackWorkspaceId: (r.slack_workspace_id as string | null) ?? null,
       email: (r.email as string | null) ?? null,
       role: (r.role as string | null) ?? null,
+      createdAt: (r.created_at as string | null) ?? null,
     }));
   }
 
@@ -94,7 +96,7 @@ export class AuthorizedUsersRepo {
     const { data, error } = await this.client
       .from('authorized_users')
       .upsert(row, { onConflict: 'slack_user_id' })
-      .select('slack_user_id, slack_workspace_id, email, role')
+      .select('slack_user_id, slack_workspace_id, email, role, created_at')
       .single();
     if (error) throw new Error(`authorized_users upsert failed: ${error.message}`);
     return {
@@ -104,6 +106,7 @@ export class AuthorizedUsersRepo {
         slackWorkspaceId: (data.slack_workspace_id as string | null) ?? null,
         email: (data.email as string | null) ?? null,
         role: (data.role as string | null) ?? null,
+        createdAt: (data.created_at as string | null) ?? null,
       },
     };
   }

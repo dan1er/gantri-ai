@@ -19,10 +19,56 @@ const ALLOWED_COLS = new Set(['email', 'first_name', 'last_name', 'phone', 'cons
 const IGNORED_COLS = new Set(['consent_email', 'consent_sms']);
 const MAX_ROWS = 1000;
 
+// Header aliases — incoming names are lowercased + accent-stripped, then
+// looked up here to produce a canonical English column name. Any header not
+// in this map AND not already a canonical name is treated as unknown.
+// Spanish variants cover Slack uploads that come from Spanish-localized
+// spreadsheets (e.g. Numbers, Excel-ES). Add new locales here as needed.
+const HEADER_ALIASES: Record<string, string> = {
+  // email
+  'correo': 'email',
+  'correo electronico': 'email',
+  'correo del usuario': 'email',
+  'email del usuario': 'email',
+  'e-mail': 'email',
+  // first_name
+  'nombre': 'first_name',
+  'nombres': 'first_name',
+  'primer nombre': 'first_name',
+  'first name': 'first_name',
+  // last_name
+  'apellido': 'last_name',
+  'apellidos': 'last_name',
+  'last name': 'last_name',
+  // phone
+  'telefono': 'phone',
+  'celular': 'phone',
+  'movil': 'phone',
+  'numero de telefono': 'phone',
+  // consent_source
+  'fuente': 'consent_source',
+  'fuente de consentimiento': 'consent_source',
+  // consented_at
+  'fecha de consentimiento': 'consented_at',
+  'consentido en': 'consented_at',
+};
+
+function canonicalizeHeader(rawHeader: string): string {
+  // Lowercase + trim + strip diacritics so "Teléfono" / "TELEFONO" / "telefono"
+  // all collide on the same alias key.
+  const normalized = rawHeader
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '');
+  if (ALLOWED_COLS.has(normalized) || IGNORED_COLS.has(normalized)) return normalized;
+  return HEADER_ALIASES[normalized] ?? normalized;
+}
+
 export function parseCsv(text: string): ParseCsvResult {
   const stripped = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
   const result = Papa.parse<Record<string, string>>(stripped, {
-    header: true, skipEmptyLines: true, transformHeader: (h) => h.trim().toLowerCase(),
+    header: true, skipEmptyLines: true, transformHeader: canonicalizeHeader,
   });
   if (result.errors.length > 0) {
     const e = result.errors[0];

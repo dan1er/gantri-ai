@@ -510,11 +510,17 @@ export class PipedriveApiClient {
 
   // ─── write surface ───────────────────────────────────────────────────────
 
-  /** Single-attempt POST that throws on 4xx/5xx (caller wraps with retry). */
+  /** Single-attempt POST that throws on 4xx/5xx (caller wraps with retry).
+   *  IMPORTANT: do NOT add 'content-type' as a separate header on top of
+   *  `headers()` — the resulting `{Content-Type, content-type}` duplicate is
+   *  tolerated by /v1/persons and /v1/organizations but is REJECTED by the
+   *  stricter /v1/leads gateway with a 400 "expected request body to be sent
+   *  with application/json content-type" error. `this.headers()` already
+   *  returns Content-Type=application/json. */
   private async fetchOncePost(url: string, body: unknown): Promise<Response> {
     return this.fetchImpl(url, {
       method: 'POST',
-      headers: { ...this.headers(), 'content-type': 'application/json' },
+      headers: this.headers(),
       body: JSON.stringify(body),
     });
   }

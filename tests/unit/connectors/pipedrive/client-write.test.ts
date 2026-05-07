@@ -44,7 +44,11 @@ describe('PipedriveApiClient — write methods', () => {
     const fetchImpl = fakeFetch(async (url, init) => {
       expect(url).toMatch(/\/v1\/persons$/);
       expect(init?.method).toBe('POST');
-      expect(init?.headers?.['content-type']).toBe('application/json');
+      // Pipedrive's leads gateway is strict about a SINGLE Content-Type
+      // header. Verify the bot's POST sends `Content-Type` (capital, from
+      // headers()) and NOT a duplicate lowercase entry.
+      expect(init?.headers?.['Content-Type']).toBe('application/json');
+      expect(init?.headers?.['content-type']).toBeUndefined();
       const body = JSON.parse(init?.body as string);
       expect(body.name).toBe('Jane Doe');
       expect(body.email).toEqual([{ value: 'jane@foo.com', primary: true, label: 'work' }]);

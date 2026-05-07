@@ -40,7 +40,7 @@ export const INTRO_MESSAGE = [
   '',
   'If you have the *admin* or *marketing* role you can _write_ to Klaviyo straight from Slack — no need to switch to the Klaviyo UI:',
   '• *Add profiles inline by just asking* — for small batches (up to 20), paste or describe the people in chat. _"Add alice@x.com (Alice Anderson, +1 415 555 0101) and bob@y.com (Bob Brooks) to the Trade Show Leads list"_ works. I\'ll validate emails, ask which list (or _"no list"_), and subscribe them with email consent. No file needed.',
-  '• *Bulk via CSV* — drop the file into your DM with me. Headers in any language work (I map them automatically — `Correo del usuario` / `Nombre` / `Telefono` are recognized just like `email` / `first_name` / `phone`). I\'ll ask which list to put them in (or reply _"no list"_ to skip list-membership), then subscribe them with email consent. Files up to 1000 rows.',
+  '• *Bulk via CSV* — drop the file into your DM with me. I figure out the columns automatically — your headers don\'t have to match a fixed schema, just include something that looks like an email plus any of name / phone you have. I\'ll ask which list to put them in (or reply _"no list"_ to skip list-membership), then subscribe them with email consent. Files up to 1000 rows.',
   '• _"Create a Klaviyo list called BDNY 2026 Booth Leads"_ — fresh static list, ready to import into.',
   '• _"Delete these Klaviyo profiles: alice@x.com, bob@y.com"_ — always asks for confirmation first; up to 50 per call. Permanent — Klaviyo provides no undelete.',
   '• _"What\'s the status of the import I ran 10 minutes ago?"_ — audit trail with per-channel counts, list info, timestamps.',

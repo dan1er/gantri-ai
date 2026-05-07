@@ -140,6 +140,30 @@ export class PipedriveConnector implements Connector {
       execute: (args) => this.runAddNote(args as AddNoteArgs),
     };
 
+    const CreateActivityArgs = z.object({
+      subject: z.string().min(1).max(255).describe('Title of the activity.'),
+      type: z.enum(['call', 'meeting', 'task', 'email', 'lunch']).default('task').describe('Activity type. Default "task".'),
+      dueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('YYYY-MM-DD due date.'),
+      dueTime: z.string().regex(/^\d{2}:\d{2}$/).optional().describe('HH:MM (24h) due time.'),
+      durationMinutes: z.number().int().min(1).max(480).optional().describe('Duration in minutes (max 8h).'),
+      note: z.string().max(5000).optional().describe('Body of the activity (notes/agenda).'),
+      attachToType: z.enum(['lead', 'deal', 'person', 'org']).optional().describe('Optional: attach the activity to a Pipedrive entity.'),
+      attachToId: z.string().optional().describe('Lead UUID or integer id (as string) of the entity to attach to.'),
+      assigneeUserId: z.number().int().positive().optional().describe('Pipedrive user id of the assignee. Defaults to the API token user.'),
+    });
+    type CreateActivityArgs = z.infer<typeof CreateActivityArgs>;
+    const createActivityTool: ToolDef<CreateActivityArgs> = {
+      name: 'pipedrive.create_activity',
+      description: [
+        'Schedule a Pipedrive activity (call/meeting/task/email/lunch) with optional due date, time, duration, and attachment to a lead/deal/person/org.',
+        'ADMIN or MARKETING role only.',
+        'Use when the user says "remind me to follow up", "schedule a call", "agendame seguimiento", "follow up next Tuesday".',
+      ].join(' '),
+      schema: CreateActivityArgs as z.ZodType<CreateActivityArgs>,
+      jsonSchema: zodToJsonSchema(CreateActivityArgs),
+      execute: (args) => this.runCreateActivity(args as CreateActivityArgs),
+    };
+
     return [
       this.toolListDirectory(),
       this.toolSearch(),
@@ -154,6 +178,7 @@ export class PipedriveConnector implements Connector {
       this.toolUserPerformance(),
       createLeadTool,
       addNoteTool,
+      createActivityTool,
     ];
   }
 
@@ -336,6 +361,77 @@ export class PipedriveConnector implements Connector {
         status: 'failure',
       }).catch(() => {});
       logger.warn({ caller: actor.slackUserId, action: 'add_note', error_code: 'PIPEDRIVE_ERROR', status }, 'pipedrive_write_failed');
+      return { error: { code: 'PIPEDRIVE_ERROR', status, message, body } };
+    }
+  }
+
+  private async runCreateActivity(args: {
+    subject: string; type: 'call' | 'meeting' | 'task' | 'email' | 'lunch';
+    dueDate?: string; dueTime?: string; durationMinutes?: number; note?: string;
+    attachToType?: 'lead' | 'deal' | 'person' | 'org'; attachToId?: string;
+    assigneeUserId?: number;
+  }): Promise<unknown> {
+    if (!this.writesRepo || !this.usersRepo || !this.getActor) {
+      return { error: { code: 'WRITE_DEPS_NOT_CONFIGURED', message: 'Pipedrive write tools require writesRepo + usersRepo + getActor.' } };
+    }
+    const actor = this.getActor();
+    if (!actor) return { error: { code: 'NO_ACTOR', message: 'pipedrive.create_activity requires an active actor.' } };
+    const role = await this.usersRepo.getRole(actor.slackUserId);
+    if (role !== 'admin' && role !== 'marketing') {
+      return { error: { code: 'FORBIDDEN', message: 'Pipedrive write tools require role=admin or role=marketing.' } };
+    }
+
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const payload: Parameters<typeof this.client.createActivity>[0] = {
+      subject: args.subject, type: args.type,
+      dueDate: args.dueDate, dueTime: args.dueTime,
+      durationMinutes: args.durationMinutes, note: args.note,
+      userId: args.assigneeUserId,
+    };
+    if (args.attachToType && args.attachToId) {
+      if (args.attachToType === 'lead') {
+        if (!UUID_RE.test(args.attachToId)) return { error: { code: 'INVALID_ARGS', message: 'Lead attachToId must be a UUID.' } };
+        payload.leadId = args.attachToId;
+      } else {
+        const numId = Number(args.attachToId);
+        if (!Number.isInteger(numId) || numId <= 0) return { error: { code: 'INVALID_ARGS', message: `${args.attachToType} attachToId must be a positive integer.` } };
+        if (args.attachToType === 'deal') payload.dealId = numId;
+        else if (args.attachToType === 'person') payload.personId = numId;
+        else if (args.attachToType === 'org') payload.orgId = numId;
+      }
+    }
+
+    try {
+      const activity = await this.client.createActivity(payload);
+      await this.writesRepo.insert({
+        callerSlackId: actor.slackUserId,
+        action: 'create_activity',
+        pipedriveResourceType: 'activity',
+        pipedriveResourceId: String(activity.id),
+        requestPayload: args,
+        responsePayload: { activityId: activity.id },
+        status: 'success',
+      });
+      logger.info({ caller: actor.slackUserId, activity_id: activity.id, attach_to_type: args.attachToType, attach_to_id: args.attachToId }, 'pipedrive_activity_created');
+      return {
+        activityId: activity.id, subject: activity.subject,
+        dueDate: args.dueDate, dueTime: args.dueTime,
+        attachToType: args.attachToType, attachToId: args.attachToId,
+      };
+    } catch (err: unknown) {
+      const status = (err as { status?: number })?.status;
+      const body = (err as { body?: unknown })?.body;
+      const message = err instanceof Error ? err.message : String(err);
+      await this.writesRepo.insert({
+        callerSlackId: actor.slackUserId,
+        action: 'create_activity',
+        pipedriveResourceType: null,
+        pipedriveResourceId: null,
+        requestPayload: args,
+        responsePayload: { error: { code: 'PIPEDRIVE_ERROR', status, message, body } },
+        status: 'failure',
+      }).catch(() => {});
+      logger.warn({ caller: actor.slackUserId, action: 'create_activity', error_code: 'PIPEDRIVE_ERROR', status }, 'pipedrive_write_failed');
       return { error: { code: 'PIPEDRIVE_ERROR', status, message, body } };
     }
   }

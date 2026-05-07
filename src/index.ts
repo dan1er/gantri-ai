@@ -283,6 +283,14 @@ async function main() {
       },
       storage: klaviyoStorageAdapter,
       pendingRepo: klaviyoPendingRepo,
+      // The header mapper (Haiku) needs an Anthropic client; the global
+      // `claude` instance is constructed below (line ~310). We re-assign
+      // this field after that construction so the deferred `buildSlackApp`
+      // call sees a complete struct. (Cannot reference `claude` here yet
+      // because it's created later in initialization.)
+      // Filled in after `claude` is constructed.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      claude: undefined as any,
     };
   } else {
     logger.warn('klaviyo not configured (KLAVIYO_API_KEY missing) — skipping registration');
@@ -308,6 +316,11 @@ async function main() {
   }
 
   const claude = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+  // Backfill the Klaviyo file-shared deps with the freshly-constructed Anthropic
+  // client (used by the LLM-driven CSV header mapper). When Klaviyo is disabled
+  // klaviyoFileSharedDeps is undefined and the noop fallback (constructed below)
+  // gets `claude` directly.
+  if (klaviyoFileSharedDeps) klaviyoFileSharedDeps.claude = claude;
   const orchestrator = new Orchestrator({
     registry,
     claude,
@@ -358,6 +371,7 @@ async function main() {
     orchestrator: { runTool: async () => ({}) },
     storage: { upload: async () => ({ path: '' }) },
     pendingRepo: { insert: async () => ({ id: '', confirmationToken: '' }) },
+    claude,
   };
 
   const { app, receiver } = buildSlackApp({

@@ -8,7 +8,8 @@ import type { KlaviyoApiClient } from '../connectors/klaviyo/client.js';
 import { markdownToSlackBlocks } from '../orchestrator/formatter.js';
 import { logger } from '../logger.js';
 import { loadEnv } from '../config/env.js';
-import { parseCsv } from '../connectors/klaviyo/csv-parser.js';
+import { parseRawCsv } from '../connectors/klaviyo/csv-parser.js';
+import { validateAndMapForKlaviyo, type HeaderMapperDeps } from '../connectors/klaviyo/header-mapper.js';
 
 /**
  * Upload a text file to a Slack channel using the external-upload API (three
@@ -441,6 +442,10 @@ export interface FileSharedDeps {
       ttlMinutes?: number;
     }): Promise<{ id: string; confirmationToken: string }>;
   };
+  /** Anthropic SDK client used for the LLM-driven header validation +
+   *  mapping step. The mapper accepts CSVs whose headers are in any language
+   *  (Spanish, German, etc.) without us having to maintain an alias table. */
+  claude: HeaderMapperDeps['claude'];
 }
 
 const MAX_BYTES = 1_000_000;
@@ -493,11 +498,26 @@ export async function handleFileShared(input: { event: FileSharedEvent; deps: Fi
 
   let parsed;
   try {
-    parsed = parseCsv(buf.toString('utf8'));
+    parsed = parseRawCsv(buf.toString('utf8'));
   } catch (err: any) {
     await deps.slack.postMessage(
       event.channel_id,
       `Couldn't parse the CSV: ${String(err?.message ?? err)}. Make sure it has a header row and is comma-delimited.`,
+      undefined,
+    );
+    return;
+  }
+
+  // LLM-driven header validation + canonical mapping. Accepts CSVs in any
+  // language; throws with a user-facing reason when infeasible (e.g. no
+  // email-like column). Cost is one Haiku call per upload — negligible.
+  let mapped: { rows: import('../connectors/klaviyo/csv-parser.js').ParsedCsvRow[]; warnings: string[] };
+  try {
+    mapped = await validateAndMapForKlaviyo(parsed, { claude: deps.claude });
+  } catch (err: any) {
+    await deps.slack.postMessage(
+      event.channel_id,
+      String(err?.message ?? err),
       undefined,
     );
     return;
@@ -523,7 +543,7 @@ export async function handleFileShared(input: { event: FileSharedEvent; deps: Fi
   // CSV upload without first confirming the target list. Stash the parsed
   // rows in pending_confirmations and prompt the user — the confirmation
   // handler picks up the reply and calls klaviyo.commit_pending_csv_import.
-  const profiles = parsed.rows.map(({ rowIndex: _i, ...rest }) => rest);
+  const profiles = mapped.rows.map(({ rowIndex: _i, ...rest }) => rest);
   const pending = await deps.pendingRepo.insert({
     callerSlackId: event.user_id,
     channelId: event.channel_id,
@@ -542,7 +562,8 @@ export async function handleFileShared(input: { event: FileSharedEvent; deps: Fi
   });
 
   const lines: string[] = [];
-  if (parsed.warnings.length > 0) lines.push(parsed.warnings.join('\n'), '');
+  const allWarnings = [...parsed.warnings, ...mapped.warnings];
+  if (allWarnings.length > 0) lines.push(allWarnings.join('\n'), '');
   lines.push(
     `Got *${profiles.length} row${profiles.length === 1 ? '' : 's'}* from \`${file.name}\`. I'm assuming this is for a *Klaviyo import* — that's the only CSV flow I handle right now.`,
     `Which Klaviyo list should I import them to? Reply with the list name (or "no list" to create profiles without list-membership, or "cancel" to abort).`,

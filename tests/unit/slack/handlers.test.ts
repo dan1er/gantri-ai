@@ -265,6 +265,19 @@ describe('createDmHandler', () => {
 
 describe('handleFileShared', () => {
   function makeDeps(opts: any = {}) {
+    // Default fake Anthropic that maps a 2-row "email,first_name" CSV. Tests
+    // can override `claudeResponse` to script different mapper outcomes.
+    const defaultMapping = JSON.stringify({
+      ok: true,
+      mapping: { email: 'email', first_name: 'first_name', last_name: null, phone: null, consent_source: null, consented_at: null },
+    });
+    const claude = {
+      messages: {
+        create: vi.fn(async () => ({
+          content: [{ type: 'text', text: opts.claudeResponse ?? defaultMapping }],
+        })) as any,
+      },
+    };
     return {
       usersRepo: { getRole: vi.fn().mockResolvedValue(opts.role ?? 'admin') },
       slack: {
@@ -289,6 +302,7 @@ describe('handleFileShared', () => {
       pendingRepo: {
         insert: vi.fn().mockResolvedValue({ id: 'p1', confirmationToken: 'tok-csv-1' }),
       },
+      claude,
     };
   }
 
@@ -380,18 +394,57 @@ describe('handleFileShared', () => {
     expect(deps.slack.postMessage).toHaveBeenCalledWith('D1', expect.stringContaining('max'), undefined);
   });
 
-  it('reports CSV parse failure', async () => {
+  it('reports the LLM mapper reason when the CSV has no email-like column', async () => {
     const deps = makeDeps({
-      downloadFile: vi.fn().mockResolvedValue(Buffer.from('this is not csv\nheader-not-found')),
+      downloadFile: vi.fn().mockResolvedValue(Buffer.from('name,phone\nAlice,415-555-0101')),
+      claudeResponse: JSON.stringify({
+        ok: false,
+        reason: 'No header in this CSV looks like an email column.',
+      }),
     });
     deps.orchestrator.runTool = vi.fn();
     await handleFileShared({
       event: { channel_id: 'D1', user_id: 'U1', file_id: 'F1' },
       deps: deps as any,
     });
-    expect(deps.orchestrator.runTool).not.toHaveBeenCalled();
-    const args = (deps.slack.postMessage as any).mock.calls.map((c: any[]) => c[1]).join(' | ');
-    expect(args).toMatch(/parse|email column|header/i);
+    expect(deps.pendingRepo.insert).not.toHaveBeenCalled();
+    expect(deps.slack.postMessage).toHaveBeenCalledWith(
+      'D1',
+      expect.stringContaining('No header in this CSV looks like an email column.'),
+      undefined,
+    );
+  });
+
+  it('accepts CSVs whose headers are in another language (Spanish via LLM mapping)', async () => {
+    const deps = makeDeps({
+      downloadFile: vi.fn().mockResolvedValue(Buffer.from(
+        'Correo del usuario,Nombre,Telefono\nalice@x.com,Alice,+1 415 555 0101\nbob@x.com,Bob,',
+      )),
+      claudeResponse: JSON.stringify({
+        ok: true,
+        mapping: {
+          email: 'correo del usuario',
+          first_name: 'nombre',
+          last_name: null,
+          phone: 'telefono',
+          consent_source: null,
+          consented_at: null,
+        },
+      }),
+    });
+    await handleFileShared({
+      event: { channel_id: 'D1', user_id: 'U1', file_id: 'F1' },
+      deps: deps as any,
+    });
+    expect(deps.pendingRepo.insert).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'klaviyo_csv_pending',
+      payload: expect.objectContaining({
+        profiles: [
+          expect.objectContaining({ email: 'alice@x.com', first_name: 'Alice', phone: '+1 415 555 0101' }),
+          expect.objectContaining({ email: 'bob@x.com', first_name: 'Bob' }),
+        ],
+      }),
+    }));
   });
 
   it('handles download failure with retry-friendly message', async () => {

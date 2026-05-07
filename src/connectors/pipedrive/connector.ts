@@ -185,6 +185,63 @@ export class PipedriveConnector implements Connector {
       execute: (args) => this.runDeleteLead(args as DeleteLeadArgs),
     };
 
+    const TWO_STEP_CONFIRM_DESC = 'TWO-STEP CONFIRM: first call without `confirm:true` returns a preview; relay it to the user, wait for explicit "yes"/"si"/"delete it" in their NEXT message, then re-call with `confirm:true`. NEVER auto-confirm — passing `confirm:true` without explicit user approval in the latest turn is a destructive bug.';
+
+    const DeleteNoteArgs = z.object({
+      noteId: z.number().int().positive().describe('Pipedrive note id (integer).'),
+      confirm: z.boolean().default(false).describe('Pass true ONLY after the user has explicitly confirmed.'),
+    });
+    type DeleteNoteArgs = z.infer<typeof DeleteNoteArgs>;
+    const deleteNoteTool: ToolDef<DeleteNoteArgs> = {
+      name: 'pipedrive.delete_note',
+      description: [
+        'Delete a Pipedrive note. Soft delete — Pipedrive moves it to the recycle bin (recoverable for ~30 days from the UI).',
+        'ADMIN or MARKETING role only.',
+        TWO_STEP_CONFIRM_DESC,
+        'Use when the user says: "delete that note", "borra esa nota", "remove the note I just added", "undo that note".',
+      ].join(' '),
+      schema: DeleteNoteArgs as z.ZodType<DeleteNoteArgs>,
+      jsonSchema: zodToJsonSchema(DeleteNoteArgs),
+      execute: (args) => this.runDeleteNote(args as DeleteNoteArgs),
+    };
+
+    const DeleteActivityArgs = z.object({
+      activityId: z.number().int().positive().describe('Pipedrive activity id (integer).'),
+      confirm: z.boolean().default(false).describe('Pass true ONLY after the user has explicitly confirmed.'),
+    });
+    type DeleteActivityArgs = z.infer<typeof DeleteActivityArgs>;
+    const deleteActivityTool: ToolDef<DeleteActivityArgs> = {
+      name: 'pipedrive.delete_activity',
+      description: [
+        'Delete a Pipedrive activity (call/meeting/task/etc.). Soft delete — Pipedrive moves it to the recycle bin (recoverable for ~30 days from the UI).',
+        'ADMIN or MARKETING role only.',
+        TWO_STEP_CONFIRM_DESC,
+        'Use when the user says: "delete that activity", "cancela esa tarea", "remove the follow-up", "undo that task".',
+      ].join(' '),
+      schema: DeleteActivityArgs as z.ZodType<DeleteActivityArgs>,
+      jsonSchema: zodToJsonSchema(DeleteActivityArgs),
+      execute: (args) => this.runDeleteActivity(args as DeleteActivityArgs),
+    };
+
+    const DeleteOrganizationArgs = z.object({
+      orgId: z.number().int().positive().describe('Pipedrive organization id (integer).'),
+      confirm: z.boolean().default(false).describe('Pass true ONLY after the user has explicitly confirmed.'),
+    });
+    type DeleteOrganizationArgs = z.infer<typeof DeleteOrganizationArgs>;
+    const deleteOrganizationTool: ToolDef<DeleteOrganizationArgs> = {
+      name: 'pipedrive.delete_organization',
+      description: [
+        'Delete a Pipedrive organization (company record). Soft delete — Pipedrive moves it to the recycle bin (recoverable for ~30 days). Persons, deals, leads, and activities attached to the org STAY (they get unlinked, not deleted).',
+        'ADMIN or MARKETING role only.',
+        TWO_STEP_CONFIRM_DESC,
+        'Use when the user says: "delete that organization", "borra esa empresa", "remove company X", "undo the organization I just created".',
+        'The preview reports `people_count` and `open_deals_count` — if either is non-zero, the LLM should warn the user about unlinked-orphan risk before they confirm.',
+      ].join(' '),
+      schema: DeleteOrganizationArgs as z.ZodType<DeleteOrganizationArgs>,
+      jsonSchema: zodToJsonSchema(DeleteOrganizationArgs),
+      execute: (args) => this.runDeleteOrganization(args as DeleteOrganizationArgs),
+    };
+
     return [
       this.toolListDirectory(),
       this.toolSearch(),
@@ -201,6 +258,9 @@ export class PipedriveConnector implements Connector {
       addNoteTool,
       createActivityTool,
       deleteLeadTool,
+      deleteNoteTool,
+      deleteActivityTool,
+      deleteOrganizationTool,
     ];
   }
 
@@ -519,6 +579,193 @@ export class PipedriveConnector implements Connector {
         status: 'failure',
       }).catch(() => {});
       logger.warn({ caller: actor.slackUserId, action: 'delete_lead', error_code: 'PIPEDRIVE_ERROR', status }, 'pipedrive_write_failed');
+      return { error: { code: 'PIPEDRIVE_ERROR', status, message, body } };
+    }
+  }
+
+  /** Common preamble for the destructive *_delete tools: deps + actor + role
+   *  check, returning either the actor on success or a tool-result error. */
+  private async checkDestructiveAuth(toolName: string): Promise<
+    | { ok: true; actor: { slackUserId: string; slackChannelId?: string } }
+    | { ok: false; error: { code: string; message: string } }
+  > {
+    if (!this.writesRepo || !this.usersRepo || !this.getActor) {
+      return { ok: false, error: { code: 'WRITE_DEPS_NOT_CONFIGURED', message: 'Pipedrive write tools require writesRepo + usersRepo + getActor.' } };
+    }
+    const actor = this.getActor();
+    if (!actor) return { ok: false, error: { code: 'NO_ACTOR', message: `${toolName} requires an active actor.` } };
+    const role = await this.usersRepo.getRole(actor.slackUserId);
+    if (role !== 'admin' && role !== 'marketing') {
+      return { ok: false, error: { code: 'FORBIDDEN', message: 'Pipedrive write tools require role=admin or role=marketing.' } };
+    }
+    return { ok: true, actor };
+  }
+
+  private async runDeleteNote(args: { noteId: number; confirm: boolean }): Promise<unknown> {
+    const auth = await this.checkDestructiveAuth('pipedrive.delete_note');
+    if (!auth.ok) return { error: auth.error };
+    const { actor } = auth;
+
+    if (!args.confirm) {
+      let note: { id: number; content: string; lead_id: string | null; deal_id: number | null; person_id: number | null; org_id: number | null } | null = null;
+      try {
+        note = await this.client.getNote(args.noteId);
+      } catch (err: unknown) {
+        const status = (err as { status?: number })?.status;
+        const message = err instanceof Error ? err.message : String(err);
+        return { error: { code: 'PIPEDRIVE_ERROR', status, message } };
+      }
+      if (!note) return { error: { code: 'NOTE_NOT_FOUND', message: `No note found with id ${args.noteId}.` } };
+      const snippet = note.content.replace(/<[^>]+>/g, '').slice(0, 80);
+      return {
+        kind: 'awaiting_confirmation' as const,
+        noteId: note.id,
+        contentSnippet: snippet,
+        message: `About to delete note #${note.id} (\`${snippet}${snippet.length === 80 ? '…' : ''}\`). Reply *yes* to confirm — Pipedrive will move it to the recycle bin (recoverable for ~30 days).`,
+      };
+    }
+
+    try {
+      await this.client.deleteNote(args.noteId);
+      await this.writesRepo!.insert({
+        callerSlackId: actor.slackUserId,
+        action: 'delete_note',
+        pipedriveResourceType: 'note',
+        pipedriveResourceId: String(args.noteId),
+        requestPayload: args,
+        responsePayload: { noteId: args.noteId },
+        status: 'success',
+      });
+      logger.info({ caller: actor.slackUserId, note_id: args.noteId }, 'pipedrive_note_deleted');
+      return { ok: true as const, noteId: args.noteId, message: `Deleted note #${args.noteId}. Recoverable from Pipedrive's recycle bin for ~30 days.` };
+    } catch (err: unknown) {
+      const status = (err as { status?: number })?.status;
+      const body = (err as { body?: unknown })?.body;
+      const message = err instanceof Error ? err.message : String(err);
+      await this.writesRepo!.insert({
+        callerSlackId: actor.slackUserId,
+        action: 'delete_note',
+        pipedriveResourceType: null,
+        pipedriveResourceId: null,
+        requestPayload: args,
+        responsePayload: { error: { code: 'PIPEDRIVE_ERROR', status, message, body } },
+        status: 'failure',
+      }).catch(() => {});
+      logger.warn({ caller: actor.slackUserId, action: 'delete_note', error_code: 'PIPEDRIVE_ERROR', status }, 'pipedrive_write_failed');
+      return { error: { code: 'PIPEDRIVE_ERROR', status, message, body } };
+    }
+  }
+
+  private async runDeleteActivity(args: { activityId: number; confirm: boolean }): Promise<unknown> {
+    const auth = await this.checkDestructiveAuth('pipedrive.delete_activity');
+    if (!auth.ok) return { error: auth.error };
+    const { actor } = auth;
+
+    if (!args.confirm) {
+      let activity: { id: number; subject: string; type: string; due_date: string | null; due_time: string | null; done: boolean } | null = null;
+      try {
+        activity = await this.client.getActivity(args.activityId);
+      } catch (err: unknown) {
+        const status = (err as { status?: number })?.status;
+        const message = err instanceof Error ? err.message : String(err);
+        return { error: { code: 'PIPEDRIVE_ERROR', status, message } };
+      }
+      if (!activity) return { error: { code: 'ACTIVITY_NOT_FOUND', message: `No activity found with id ${args.activityId}.` } };
+      const due = activity.due_date ? `${activity.due_date}${activity.due_time ? ` ${activity.due_time}` : ''}` : 'no due date';
+      return {
+        kind: 'awaiting_confirmation' as const,
+        activityId: activity.id,
+        subject: activity.subject,
+        type: activity.type,
+        message: `About to delete activity *${activity.subject}* (#${activity.id}, ${activity.type}, ${due}). Reply *yes* to confirm — Pipedrive will move it to the recycle bin (recoverable for ~30 days).`,
+      };
+    }
+
+    try {
+      await this.client.deleteActivity(args.activityId);
+      await this.writesRepo!.insert({
+        callerSlackId: actor.slackUserId,
+        action: 'delete_activity',
+        pipedriveResourceType: 'activity',
+        pipedriveResourceId: String(args.activityId),
+        requestPayload: args,
+        responsePayload: { activityId: args.activityId },
+        status: 'success',
+      });
+      logger.info({ caller: actor.slackUserId, activity_id: args.activityId }, 'pipedrive_activity_deleted');
+      return { ok: true as const, activityId: args.activityId, message: `Deleted activity #${args.activityId}. Recoverable from Pipedrive's recycle bin for ~30 days.` };
+    } catch (err: unknown) {
+      const status = (err as { status?: number })?.status;
+      const body = (err as { body?: unknown })?.body;
+      const message = err instanceof Error ? err.message : String(err);
+      await this.writesRepo!.insert({
+        callerSlackId: actor.slackUserId,
+        action: 'delete_activity',
+        pipedriveResourceType: null,
+        pipedriveResourceId: null,
+        requestPayload: args,
+        responsePayload: { error: { code: 'PIPEDRIVE_ERROR', status, message, body } },
+        status: 'failure',
+      }).catch(() => {});
+      logger.warn({ caller: actor.slackUserId, action: 'delete_activity', error_code: 'PIPEDRIVE_ERROR', status }, 'pipedrive_write_failed');
+      return { error: { code: 'PIPEDRIVE_ERROR', status, message, body } };
+    }
+  }
+
+  private async runDeleteOrganization(args: { orgId: number; confirm: boolean }): Promise<unknown> {
+    const auth = await this.checkDestructiveAuth('pipedrive.delete_organization');
+    if (!auth.ok) return { error: auth.error };
+    const { actor } = auth;
+
+    if (!args.confirm) {
+      // Reuses the existing v2 `getOrganization` (returns the basic record).
+      // The Pipedrive client throws on 404 (no null-on-404 path on v2 reads
+      // here), so distinguish "not found" from other API errors by status.
+      let org: { id: number; name: string } | null = null;
+      try {
+        org = await this.client.getOrganization(args.orgId);
+      } catch (err: unknown) {
+        const status = (err as { status?: number })?.status;
+        const message = err instanceof Error ? err.message : String(err);
+        if (status === 404) return { error: { code: 'ORGANIZATION_NOT_FOUND', message: `No organization found with id ${args.orgId}.` } };
+        return { error: { code: 'PIPEDRIVE_ERROR', status, message } };
+      }
+      if (!org) return { error: { code: 'ORGANIZATION_NOT_FOUND', message: `No organization found with id ${args.orgId}.` } };
+      return {
+        kind: 'awaiting_confirmation' as const,
+        orgId: org.id,
+        orgName: org.name,
+        message: `About to delete organization *${org.name}* (#${org.id}). Persons, deals, leads, and activities attached to this org will be UNLINKED (not deleted). Reply *yes* to confirm — Pipedrive will move the org to the recycle bin (recoverable for ~30 days).`,
+      };
+    }
+
+    try {
+      await this.client.deleteOrganization(args.orgId);
+      await this.writesRepo!.insert({
+        callerSlackId: actor.slackUserId,
+        action: 'delete_organization',
+        pipedriveResourceType: 'organization',
+        pipedriveResourceId: String(args.orgId),
+        requestPayload: args,
+        responsePayload: { orgId: args.orgId },
+        status: 'success',
+      });
+      logger.info({ caller: actor.slackUserId, org_id: args.orgId }, 'pipedrive_organization_deleted');
+      return { ok: true as const, orgId: args.orgId, message: `Deleted organization #${args.orgId}. Recoverable from Pipedrive's recycle bin for ~30 days.` };
+    } catch (err: unknown) {
+      const status = (err as { status?: number })?.status;
+      const body = (err as { body?: unknown })?.body;
+      const message = err instanceof Error ? err.message : String(err);
+      await this.writesRepo!.insert({
+        callerSlackId: actor.slackUserId,
+        action: 'delete_organization',
+        pipedriveResourceType: null,
+        pipedriveResourceId: null,
+        requestPayload: args,
+        responsePayload: { error: { code: 'PIPEDRIVE_ERROR', status, message, body } },
+        status: 'failure',
+      }).catch(() => {});
+      logger.warn({ caller: actor.slackUserId, action: 'delete_organization', error_code: 'PIPEDRIVE_ERROR', status }, 'pipedrive_write_failed');
       return { error: { code: 'PIPEDRIVE_ERROR', status, message, body } };
     }
   }

@@ -68,7 +68,7 @@ export const INTRO_MESSAGE = [
   '• _"Add Foo Studio as a lead — contact is jane@foostudio.com (Jane Doe), value $5k"_ — creates the lead with auto-resolved person + organization (reuses if they already exist).',
   '• _"Note on the Foo Studio lead: they want a custom matte black finish"_ — pin a free-form note to any lead/deal/person/org.',
   '• _"Remind me to follow up with Foo Studio next Tuesday at 3pm"_ — schedule a call/meeting/task with optional due date+time and assignee.',
-  '• _"Delete that lead"_ — undo an accidental lead. I always ask "yes/cancel" first, and Pipedrive keeps it in the recycle bin for ~90 days if you change your mind.',
+  '• _"Delete that lead"_ / _"borra esa nota"_ / _"cancela esa tarea"_ / _"remove that organization"_ — undo any lead, note, activity, or organization. I always show a preview and ask for *yes*; Pipedrive keeps deleted items in its recycle bin for ~30-90 days if you change your mind. Persons/deals/leads attached to a deleted organization stay (just unlinked).',
   '',
   'Every write is audited with the Slack user who triggered it.',
   '',

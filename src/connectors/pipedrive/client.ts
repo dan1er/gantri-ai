@@ -655,9 +655,12 @@ export class PipedriveApiClient {
     return this.requestWrite('/v1/activities', body);
   }
 
-  /** Fetch the lead row (used to render a preview before destructive ops). */
-  async getLead(leadId: string): Promise<{ id: string; title: string; person_id: number | null; organization_id: number | null } | null> {
-    const path = `/v1/leads/${encodeURIComponent(leadId)}`;
+  // ─── destructive ops (admin/marketing only — gated at the connector layer) ──
+
+  /** GET a single resource by id, returning the parsed `data` field. Returns
+   *  null on 404 (so the caller can render a friendly "not found" message
+   *  instead of throwing). */
+  private async fetchById<T>(path: string): Promise<T | null> {
     const url = `${this.baseUrl}${path}`;
     const res = await this.fetchImpl(url, { method: 'GET', headers: this.headers() });
     if (res.status === 404) return null;
@@ -666,14 +669,13 @@ export class PipedriveApiClient {
       try { body = await res.clone().json(); } catch {}
       throw new PipedriveApiError(`GET ${path} -> ${res.status}`, res.status, body);
     }
-    const json = await res.clone().json() as { success: boolean; data: { id: string; title: string; person_id: number | null; organization_id: number | null } };
+    const json = await res.clone().json() as { success: boolean; data: T };
     return json.data;
   }
 
-  /** Soft-delete a lead. Pipedrive moves it to the recycle bin (recoverable
-   *  for ~90 days via the UI). Returns the deleted lead's id. */
-  async deleteLead(leadId: string): Promise<{ id: string }> {
-    const path = `/v1/leads/${encodeURIComponent(leadId)}`;
+  /** DELETE a resource by id with one retry on 429/5xx. Returns the parsed
+   *  `data` field (Pipedrive returns `{success:true, data:{id}}`). */
+  private async deleteById<T>(path: string): Promise<T> {
     const url = `${this.baseUrl}${path}`;
     const t0 = Date.now();
     let res = await this.fetchImpl(url, { method: 'DELETE', headers: this.headers() });
@@ -689,8 +691,45 @@ export class PipedriveApiClient {
       logger.warn({ path, status: res.status, elapsed, body }, 'pipedrive delete api error');
       throw new PipedriveApiError(`DELETE ${path} -> ${res.status}`, res.status, body);
     }
-    const json = await res.clone().json() as { success: boolean; data: { id: string } };
+    const json = await res.clone().json() as { success: boolean; data: T };
     logger.info({ path, status: res.status, elapsed }, 'pipedrive delete api ok');
-    return { id: json.data.id };
+    return json.data;
+  }
+
+  // Leads (id is UUID)
+
+  async getLead(leadId: string): Promise<{ id: string; title: string; person_id: number | null; organization_id: number | null } | null> {
+    return this.fetchById(`/v1/leads/${encodeURIComponent(leadId)}`);
+  }
+
+  async deleteLead(leadId: string): Promise<{ id: string }> {
+    return this.deleteById(`/v1/leads/${encodeURIComponent(leadId)}`);
+  }
+
+  // Notes (id is integer)
+
+  async getNote(noteId: number): Promise<{ id: number; content: string; lead_id: string | null; deal_id: number | null; person_id: number | null; org_id: number | null } | null> {
+    return this.fetchById(`/v1/notes/${noteId}`);
+  }
+
+  async deleteNote(noteId: number): Promise<{ id: number }> {
+    return this.deleteById(`/v1/notes/${noteId}`);
+  }
+
+  // Activities (id is integer)
+
+  async getActivity(activityId: number): Promise<{ id: number; subject: string; type: string; due_date: string | null; due_time: string | null; done: boolean } | null> {
+    return this.fetchById(`/v1/activities/${activityId}`);
+  }
+
+  async deleteActivity(activityId: number): Promise<{ id: number }> {
+    return this.deleteById(`/v1/activities/${activityId}`);
+  }
+
+  // Organizations — `getOrganization(id)` already exists earlier (v2 read).
+  // We reuse it for the preview and add only the destructive helper here.
+
+  async deleteOrganization(orgId: number): Promise<{ id: number }> {
+    return this.deleteById(`/v1/organizations/${orgId}`);
   }
 }

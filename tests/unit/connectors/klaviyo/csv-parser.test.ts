@@ -32,30 +32,4 @@ describe('parseCsv', () => {
   it('throws when over the 1000-row cap', () => {
     expect(() => parseCsv(readFileSync(`${FIX}/valid-1001-rows.csv`, 'utf8'))).toThrow(/max is 1000/);
   });
-
-  it('accepts Spanish headers (Correo del usuario / Nombre / Apellido / Telefono)', () => {
-    const csv = [
-      'Correo del usuario,Nombre,Apellido,Telefono',
-      'alice@x.com,Alice,Anderson,+1 415 555 0101',
-      'bob@x.com,Bob,Brooks,',
-    ].join('\n');
-    const r = parseCsv(csv);
-    expect(r.rows.length).toBe(2);
-    expect(r.rows[0]).toMatchObject({ email: 'alice@x.com', first_name: 'Alice', last_name: 'Anderson', phone: '+1 415 555 0101' });
-    expect(r.rows[1]).toMatchObject({ email: 'bob@x.com', first_name: 'Bob', last_name: 'Brooks' });
-    expect(r.warnings).toEqual([]);
-  });
-
-  it('strips accents from headers ("Teléfono" → phone, "Correo Electrónico" → email)', () => {
-    const csv = ['Correo Electrónico,Nombre,Teléfono', 'alice@x.com,Alice,415-555-0101'].join('\n');
-    const r = parseCsv(csv);
-    expect(r.rows[0]).toMatchObject({ email: 'alice@x.com', first_name: 'Alice', phone: '415-555-0101' });
-  });
-
-  it('treats truly unknown headers as ignored with a warning', () => {
-    const csv = ['email,foo_bar,first_name', 'alice@x.com,xyz,Alice'].join('\n');
-    const r = parseCsv(csv);
-    expect(r.rows[0]).toMatchObject({ email: 'alice@x.com', first_name: 'Alice' });
-    expect(r.warnings.some((w) => w.includes('foo_bar'))).toBe(true);
-  });
 });

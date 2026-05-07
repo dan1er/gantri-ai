@@ -44,6 +44,7 @@ import type { FileSharedDeps } from './slack/handlers.js';
 import type { App as SlackApp } from '@slack/bolt';
 import { PipedriveConnector } from './connectors/pipedrive/connector.js';
 import { PipedriveApiClient } from './connectors/pipedrive/client.js';
+import { PipedriveWritesRepo } from './storage/repositories/pipedrive-writes.js';
 import { buildSearchConsoleConnector } from './connectors/gsc/connector.js';
 import { Orchestrator, getActiveActor, getActiveThread, runWithContext } from './orchestrator/orchestrator.js';
 import { buildSlackApp } from './slack/app.js';
@@ -309,7 +310,17 @@ async function main() {
 
   if (pipedriveApiToken) {
     const pipedriveClient = new PipedriveApiClient({ apiToken: pipedriveApiToken });
-    registry.register(new PipedriveConnector({ client: pipedriveClient }));
+    const pipedriveWritesRepo = new PipedriveWritesRepo(supabase);
+    // Local users repo (mirrors the Klaviyo block). The top-level `usersRepo`
+    // const is constructed further down (line ~352) for buildSlackApp; we
+    // can't reference it here without hoisting.
+    const pipedriveUsersRepo = new AuthorizedUsersRepo(supabase);
+    registry.register(new PipedriveConnector({
+      client: pipedriveClient,
+      writesRepo: pipedriveWritesRepo,
+      usersRepo: pipedriveUsersRepo,
+      getActor: () => getActiveActor(),
+    }));
     logger.info('pipedrive connector registered');
   } else {
     logger.warn('pipedrive not configured (PIPEDRIVE_API_TOKEN missing) — skipping registration');

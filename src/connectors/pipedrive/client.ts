@@ -708,6 +708,28 @@ export class PipedriveApiClient {
     return this.fetchById(`/v1/leads/${encodeURIComponent(leadId)}`);
   }
 
+  /** List leads from the Leads Inbox. Default sort is `add_time DESC` so the
+   *  most recently created lead is at index 0. Use `archived_status` to
+   *  include or exclude archived leads (default: not_archived). */
+  async listLeads(opts: { limit?: number; archivedStatus?: 'archived' | 'not_archived' | 'all'; ownerId?: number; personId?: number; orgId?: number; sort?: string } = {}): Promise<Array<{ id: string; title: string; owner_id: number; person_id: number | null; organization_id: number | null; value: { amount: number; currency: string } | null; expected_close_date: string | null; is_archived: boolean; was_seen: boolean; add_time: string; update_time: string }>> {
+    const params = new URLSearchParams();
+    params.set('limit', String(opts.limit ?? 50));
+    params.set('archived_status', opts.archivedStatus ?? 'not_archived');
+    if (opts.ownerId !== undefined) params.set('owner_id', String(opts.ownerId));
+    if (opts.personId !== undefined) params.set('person_id', String(opts.personId));
+    if (opts.orgId !== undefined) params.set('organization_id', String(opts.orgId));
+    params.set('sort', opts.sort ?? 'add_time DESC');
+    const url = `${this.baseUrl}/v1/leads?${params.toString()}`;
+    const res = await this.fetchImpl(url, { method: 'GET', headers: this.headers() });
+    if (!res.ok) {
+      let body: unknown = null;
+      try { body = await res.clone().json(); } catch {}
+      throw new PipedriveApiError(`GET /v1/leads -> ${res.status}`, res.status, body);
+    }
+    const json = await res.clone().json() as { success: boolean; data?: Array<any> };
+    return json.data ?? [];
+  }
+
   async deleteLead(leadId: string): Promise<{ id: string }> {
     return this.deleteById(`/v1/leads/${encodeURIComponent(leadId)}`);
   }

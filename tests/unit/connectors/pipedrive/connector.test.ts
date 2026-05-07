@@ -82,7 +82,7 @@ describe('pipedrive.list_directory', () => {
     expect(r.data.rows[0]).toMatchObject({ id: 11, pipeline_id: 3, pipeline_name: 'Wholesale (physical)', name: 'Discovery', order_nr: 1 });
   });
 
-  it('kind="users" returns only active users by default', async () => {
+  it('kind="users" returns ALL users (active + inactive) so the LLM can resolve any owner_id', async () => {
     const stub = makeStub({ listUsers: vi.fn().mockResolvedValue([
       { id: 1, name: 'Lana', email: 'lana@gantri.com', active_flag: true, is_admin: 1 },
       { id: 2, name: 'OldRep', email: 'old@gantri.com', active_flag: false },
@@ -90,8 +90,11 @@ describe('pipedrive.list_directory', () => {
     const conn = new PipedriveConnector({ client: stub });
     const tool = conn.tools.find((t) => t.name === 'pipedrive.list_directory')!;
     const r = await tool.execute({ kind: 'users' }) as any;
-    expect(r.data.rows.length).toBe(1);
-    expect(r.data.rows[0].name).toBe('Lana');
+    expect(r.data.rows.length).toBe(2);
+    const lana = r.data.rows.find((u: any) => u.id === 1);
+    const old = r.data.rows.find((u: any) => u.id === 2);
+    expect(lana.active).toBe(true);
+    expect(old.active).toBe(false);
   });
 
   it('kind="deal_fields" returns only user-visible custom fields', async () => {

@@ -268,6 +268,7 @@ export class PipedriveConnector implements Connector {
       this.toolPipelineSnapshot(),
       this.toolListDeals(),
       this.toolDealDetail(),
+      this.toolListLeads(),
       this.toolOrganizationPerformance(),
       this.toolOrganizationDetail(),
       this.toolLostReasonsBreakdown(),
@@ -901,7 +902,10 @@ export class PipedriveConnector implements Connector {
           }
           if (args.kind === 'users') {
             const users = await this.client.listUsers();
-            return { ok: true, data: { kind: 'users', rows: users.filter((u) => u.active_flag).map((u) => ({ id: u.id, name: u.name, email: u.email, active: u.active_flag, is_admin: !!u.is_admin })) } };
+            // Include inactive users so the LLM can resolve any owner_id /
+            // creator_user_id it sees in deal_detail / list_deals output.
+            // Active flag is exposed so the LLM can filter when relevant.
+            return { ok: true, data: { kind: 'users', rows: users.map((u) => ({ id: u.id, name: u.name, email: u.email, active: u.active_flag, is_admin: !!u.is_admin })) } };
           }
           if (args.kind === 'deal_fields') {
             const fields = await this.client.listDealFields();
@@ -942,7 +946,12 @@ export class PipedriveConnector implements Connector {
             args.entity === 'organizations' ? ['organization'] as const :
             ['person'] as const;
           const hits = await this.client.itemSearch({ term: args.query, itemTypes: itemTypes ? [...itemTypes] : undefined, limit: args.limit });
-          return { ok: true, data: { query: args.query, count: hits.length, rows: hits.map((h) => ({ type: h.type, id: h.id, name: h.title, summary: h.summary, score: h.score })) } };
+          return { ok: true, data: { query: args.query, count: hits.length, rows: hits.map((h) => ({
+            type: h.type, id: h.id, name: h.title, summary: h.summary, score: h.score,
+            url: h.type === 'deal' || h.type === 'person' || h.type === 'organization'
+              ? pipedriveWebUrl(h.type, h.id)
+              : undefined,
+          })) } };
         } catch (err) { return pipedriveErrorResult(err); }
       },
     };
@@ -1165,6 +1174,7 @@ export class PipedriveConnector implements Connector {
             if (args.search && !d.title.toLowerCase().includes(args.search.toLowerCase())) return null;
             return {
               id: d.id,
+              url: pipedriveWebUrl('deal', d.id),
               title: d.title,
               status: d.status,
               valueUsd: round2(Number(d.value) || 0),
@@ -1229,15 +1239,26 @@ export class PipedriveConnector implements Connector {
           ]);
           const activities = activitiesRes.items;
           const lastActivity = activities.length > 0 ? activities[activities.length - 1] : null;
-          const owner = typeof deal.owner_id === 'object' && deal.owner_id !== null
+          let owner = typeof deal.owner_id === 'object' && deal.owner_id !== null
             ? deal.owner_id
             : { id: deal.owner_id as number, name: null as string | null };
+          // Pipedrive v2 sometimes returns owner_id as a bare integer with no
+          // name resolved. Fall back to listUsers() so the bot doesn't have to
+          // speculate about who owns the deal.
+          if (!owner.name) {
+            try {
+              const users = await this.client.listUsers();
+              const found = users.find((u) => u.id === owner.id);
+              if (found) owner = { id: owner.id, name: found.name };
+            } catch { /* best-effort */ }
+          }
           const person = typeof deal.person_id === 'object' && deal.person_id !== null ? deal.person_id : null;
           const org = typeof deal.org_id === 'object' && deal.org_id !== null ? deal.org_id : null;
           return {
             ok: true,
             data: {
               id: deal.id,
+              url: pipedriveWebUrl('deal', deal.id),
               title: deal.title,
               status: deal.status,
               valueUsd: round2(Number(deal.value) || 0),
@@ -1259,6 +1280,70 @@ export class PipedriveConnector implements Connector {
               activitiesCount: activities.length,
               doneActivitiesCount: activities.filter((a) => a.done === 1).length,
               customFields,
+            },
+          };
+        } catch (err) { return pipedriveErrorResult(err); }
+      },
+    };
+  }
+
+  /** Pipedrive's *Leads Inbox* — pre-deal records. Distinct from `list_deals`
+   *  which queries pipeline deals. The user's "ultimo lead" / "leads from
+   *  BDNY" / etc. should hit THIS tool, not list_deals. */
+  private toolListLeads(): ToolDef {
+    const Args = z.object({
+      limit: z.number().int().min(1).max(500).default(50).describe('Max rows to return.'),
+      includeArchived: z.boolean().default(false).describe('When true, includes archived leads. Default false (active leads only).'),
+      ownerId: z.number().int().optional().describe('Filter by owner user id (use list_directory kind="users" to resolve names).'),
+      personId: z.number().int().optional().describe('Filter to leads attached to this person.'),
+      orgId: z.number().int().optional().describe('Filter to leads attached to this organization.'),
+      sort: z.enum(['add_time DESC', 'add_time ASC', 'update_time DESC', 'update_time ASC', 'title ASC', 'title DESC']).default('add_time DESC').describe('Sort field + direction. Default add_time DESC (newest first).'),
+    });
+    type A = z.infer<typeof Args>;
+    return {
+      name: 'pipedrive.list_leads',
+      description: [
+        'List Pipedrive leads from the Leads Inbox (pre-deal records — distinct from `list_deals` which queries pipeline deals).',
+        'Use for: "ultimo lead", "show me recent leads", "leads from BDNY", "leads owned by Lana", "lead inbox snapshot".',
+        'Default sort is `add_time DESC` — most recently created lead first. Each row includes the lead UUID, title, owner, attached person/org ids, value, archived flag, add_time + a direct gantri.pipedrive.com URL the LLM should embed verbatim when sharing.',
+        'Returns archived=false by default; pass `includeArchived: true` to include archived leads.',
+      ].join(' '),
+      schema: Args as z.ZodType<A>,
+      jsonSchema: zodToJsonSchema(Args),
+      execute: async (rawArgs) => {
+        const args = rawArgs as A;
+        try {
+          const [leads, users] = await Promise.all([
+            this.client.listLeads({
+              limit: args.limit,
+              archivedStatus: args.includeArchived ? 'all' : 'not_archived',
+              ownerId: args.ownerId,
+              personId: args.personId,
+              orgId: args.orgId,
+              sort: args.sort,
+            }),
+            this.client.listUsers().catch(() => [] as Awaited<ReturnType<typeof this.client.listUsers>>),
+          ]);
+          const userById = new Map(users.map((u) => [u.id, u.name] as const));
+          return {
+            ok: true,
+            data: {
+              count: leads.length,
+              rows: leads.map((l) => ({
+                id: l.id,
+                url: pipedriveWebUrl('lead', l.id),
+                title: l.title,
+                ownerId: l.owner_id,
+                ownerName: userById.get(l.owner_id) ?? null,
+                personId: l.person_id,
+                organizationId: l.organization_id,
+                value: l.value ? { amount: round2(Number(l.value.amount)), currency: l.value.currency } : null,
+                isArchived: l.is_archived,
+                wasSeen: l.was_seen,
+                addTime: l.add_time,
+                updateTime: l.update_time,
+                expectedCloseDate: l.expected_close_date,
+              })),
             },
           };
         } catch (err) { return pipedriveErrorResult(err); }
@@ -1395,16 +1480,16 @@ export class PipedriveConnector implements Connector {
           const userById = new Map(users.map((u) => [u.id, u.name] as const));
 
           const data: Record<string, unknown> = {
-            org: { id: org.id, name: org.name, address: org.address ?? null, web: org.web ?? null },
+            org: { id: org.id, url: pipedriveWebUrl('organization', org.id), name: org.name, address: org.address ?? null, web: org.web ?? null },
           };
           if (args.includeDeals) {
-            data.deals = dealsRes.items.slice(0, 50).map((d) => ({ id: d.id, title: d.title, status: d.status, valueUsd: round2(Number(d.value) || 0), stageId: d.stage_id, pipelineId: d.pipeline_id }));
+            data.deals = dealsRes.items.slice(0, 50).map((d) => ({ id: d.id, url: pipedriveWebUrl('deal', d.id), title: d.title, status: d.status, valueUsd: round2(Number(d.value) || 0), stageId: d.stage_id, pipelineId: d.pipeline_id }));
           }
           if (args.includePersons) {
-            data.persons = personsRes.items.slice(0, 50).map((p) => ({ id: p.id, name: p.name, emails: p.emails ?? [], phones: p.phones ?? [] }));
+            data.persons = personsRes.items.slice(0, 50).map((p) => ({ id: p.id, url: pipedriveWebUrl('person', p.id), name: p.name, emails: p.emails ?? [], phones: p.phones ?? [] }));
           }
           if (args.includeActivities) {
-            data.activities = activitiesRes.items.slice(0, 50).map((a) => ({ id: a.id, type: a.type, subject: a.subject, due: a.due_date ?? null, done: a.done === 1, ownerName: userById.get(a.user_id) ?? null }));
+            data.activities = activitiesRes.items.slice(0, 50).map((a) => ({ id: a.id, url: pipedriveWebUrl('activity', a.id), type: a.type, subject: a.subject, due: a.due_date ?? null, done: a.done === 1, ownerName: userById.get(a.user_id) ?? null }));
           }
           const truncatedFlags = {
             deals: args.includeDeals && dealsRes.hasMore,

@@ -10,7 +10,8 @@ export interface PipedriveWriteRow {
     | 'delete_lead'
     | 'delete_note'
     | 'delete_activity'
-    | 'delete_organization';
+    | 'delete_organization'
+    | 'delete_person';
   pipedriveResourceType: 'lead' | 'note' | 'activity' | 'person' | 'organization' | null;
   pipedriveResourceId: string | null;
   requestPayload: unknown;

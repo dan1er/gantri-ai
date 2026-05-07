@@ -6,6 +6,7 @@ import { logger } from '../../logger.js';
 import {
   PipedriveApiClient,
   PipedriveApiError,
+  pipedriveWebUrl,
   type Deal,
 } from './client.js';
 
@@ -242,6 +243,24 @@ export class PipedriveConnector implements Connector {
       execute: (args) => this.runDeleteOrganization(args as DeleteOrganizationArgs),
     };
 
+    const DeletePersonArgs = z.object({
+      personId: z.number().int().positive().describe('Pipedrive person id (integer).'),
+      confirm: z.boolean().default(false).describe('Pass true ONLY after the user has explicitly confirmed.'),
+    });
+    type DeletePersonArgs = z.infer<typeof DeletePersonArgs>;
+    const deletePersonTool: ToolDef<DeletePersonArgs> = {
+      name: 'pipedrive.delete_person',
+      description: [
+        'Delete a Pipedrive person (contact record). Soft delete — Pipedrive moves it to the recycle bin (recoverable for ~30 days). Deals + leads + activities attached to the person STAY (they get unlinked, not deleted).',
+        'ADMIN or MARKETING role only.',
+        TWO_STEP_CONFIRM_DESC,
+        'Use when the user says: "delete that person", "borra ese contacto", "remove the contact", "undo the person I just created".',
+      ].join(' '),
+      schema: DeletePersonArgs as z.ZodType<DeletePersonArgs>,
+      jsonSchema: zodToJsonSchema(DeletePersonArgs),
+      execute: (args) => this.runDeletePerson(args as DeletePersonArgs),
+    };
+
     return [
       this.toolListDirectory(),
       this.toolSearch(),
@@ -261,6 +280,7 @@ export class PipedriveConnector implements Connector {
       deleteNoteTool,
       deleteActivityTool,
       deleteOrganizationTool,
+      deletePersonTool,
     ];
   }
 
@@ -360,12 +380,15 @@ export class PipedriveConnector implements Connector {
       return {
         leadId: lead.id,
         leadTitle: lead.title,
+        leadUrl: pipedriveWebUrl('lead', lead.id),
         personId,
         personName,
         personCreated,
+        personUrl: personId !== undefined ? pipedriveWebUrl('person', personId) : undefined,
         orgId,
         orgName,
         orgCreated,
+        orgUrl: orgId !== undefined ? pipedriveWebUrl('organization', orgId) : undefined,
         noteSubmitted: a.note ? noteSubmitted : undefined,
         noteError,
       };
@@ -428,7 +451,10 @@ export class PipedriveConnector implements Connector {
         status: 'success',
       });
       logger.info({ caller: actor.slackUserId, note_id: note.id, target_type: args.targetType, target_id: args.targetId }, 'pipedrive_note_created');
-      return { noteId: note.id, targetType: args.targetType, targetId: args.targetId };
+      // Notes don't have their own web URL — link to the parent entity instead.
+      const parentType = args.targetType === 'org' ? 'organization' : args.targetType;
+      const targetUrl = pipedriveWebUrl(parentType as 'lead' | 'deal' | 'person' | 'organization', args.targetId);
+      return { noteId: note.id, targetType: args.targetType, targetId: args.targetId, targetUrl };
     } catch (err: unknown) {
       const status = (err as { status?: number })?.status;
       const body = (err as { body?: unknown })?.body;
@@ -495,10 +521,19 @@ export class PipedriveConnector implements Connector {
         status: 'success',
       });
       logger.info({ caller: actor.slackUserId, activity_id: activity.id, attach_to_type: args.attachToType, attach_to_id: args.attachToId }, 'pipedrive_activity_created');
+      // Activity URL is approximate (Pipedrive's activity-list dialog). When
+      // an activity attaches to a lead/deal/person/org, the parent's URL is
+      // the cleaner deep-link, so include both.
+      const parentType = args.attachToType === 'org' ? 'organization' : args.attachToType;
+      const attachUrl = args.attachToType && args.attachToId
+        ? pipedriveWebUrl(parentType as 'lead' | 'deal' | 'person' | 'organization', args.attachToId)
+        : undefined;
       return {
         activityId: activity.id, subject: activity.subject,
+        activityUrl: pipedriveWebUrl('activity', activity.id),
         dueDate: args.dueDate, dueTime: args.dueTime,
         attachToType: args.attachToType, attachToId: args.attachToId,
+        attachUrl,
       };
     } catch (err: unknown) {
       const status = (err as { status?: number })?.status;
@@ -766,6 +801,67 @@ export class PipedriveConnector implements Connector {
         status: 'failure',
       }).catch(() => {});
       logger.warn({ caller: actor.slackUserId, action: 'delete_organization', error_code: 'PIPEDRIVE_ERROR', status }, 'pipedrive_write_failed');
+      return { error: { code: 'PIPEDRIVE_ERROR', status, message, body } };
+    }
+  }
+
+  private async runDeletePerson(args: { personId: number; confirm: boolean }): Promise<unknown> {
+    const auth = await this.checkDestructiveAuth('pipedrive.delete_person');
+    if (!auth.ok) return { error: auth.error };
+    const { actor } = auth;
+
+    if (!args.confirm) {
+      let person: { id: number; name: string; open_deals_count: number | null; email: Array<{ value: string }> | null } | null = null;
+      try {
+        person = await this.client.getPerson(args.personId);
+      } catch (err: unknown) {
+        const status = (err as { status?: number })?.status;
+        const message = err instanceof Error ? err.message : String(err);
+        if (status === 404) return { error: { code: 'PERSON_NOT_FOUND', message: `No person found with id ${args.personId}.` } };
+        return { error: { code: 'PIPEDRIVE_ERROR', status, message } };
+      }
+      if (!person) return { error: { code: 'PERSON_NOT_FOUND', message: `No person found with id ${args.personId}.` } };
+      const primaryEmail = Array.isArray(person.email) && person.email.length > 0 ? person.email[0].value : null;
+      const openDeals = person.open_deals_count ?? 0;
+      const orphanWarning = openDeals > 0
+        ? ` ⚠️ This person has ${openDeals} open deal${openDeals === 1 ? '' : 's'} attached — they'll be UNLINKED (not deleted). Make sure that's intended before confirming.`
+        : '';
+      return {
+        kind: 'awaiting_confirmation' as const,
+        personId: person.id,
+        personName: person.name,
+        personEmail: primaryEmail,
+        message: `About to delete person *${person.name}*${primaryEmail ? ` (${primaryEmail})` : ''} (#${person.id}).${orphanWarning} Reply *yes* to confirm — Pipedrive will move it to the recycle bin (recoverable for ~30 days).`,
+      };
+    }
+
+    try {
+      await this.client.deletePerson(args.personId);
+      await this.writesRepo!.insert({
+        callerSlackId: actor.slackUserId,
+        action: 'delete_person',
+        pipedriveResourceType: 'person',
+        pipedriveResourceId: String(args.personId),
+        requestPayload: args,
+        responsePayload: { personId: args.personId },
+        status: 'success',
+      });
+      logger.info({ caller: actor.slackUserId, person_id: args.personId }, 'pipedrive_person_deleted');
+      return { ok: true as const, personId: args.personId, message: `Deleted person #${args.personId}. Recoverable from Pipedrive's recycle bin for ~30 days.` };
+    } catch (err: unknown) {
+      const status = (err as { status?: number })?.status;
+      const body = (err as { body?: unknown })?.body;
+      const message = err instanceof Error ? err.message : String(err);
+      await this.writesRepo!.insert({
+        callerSlackId: actor.slackUserId,
+        action: 'delete_person',
+        pipedriveResourceType: null,
+        pipedriveResourceId: null,
+        requestPayload: args,
+        responsePayload: { error: { code: 'PIPEDRIVE_ERROR', status, message, body } },
+        status: 'failure',
+      }).catch(() => {});
+      logger.warn({ caller: actor.slackUserId, action: 'delete_person', error_code: 'PIPEDRIVE_ERROR', status }, 'pipedrive_write_failed');
       return { error: { code: 'PIPEDRIVE_ERROR', status, message, body } };
     }
   }

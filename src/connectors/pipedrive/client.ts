@@ -738,4 +738,39 @@ export class PipedriveApiClient {
   async deleteOrganization(orgId: number): Promise<{ id: number }> {
     return this.deleteById(`/v1/organizations/${orgId}`);
   }
+
+  // Persons (id is integer)
+
+  async getPerson(personId: number): Promise<{ id: number; name: string; open_deals_count: number | null; email: Array<{ value: string }> | null } | null> {
+    return this.fetchById(`/v1/persons/${personId}`);
+  }
+
+  async deletePerson(personId: number): Promise<{ id: number }> {
+    return this.deleteById(`/v1/persons/${personId}`);
+  }
+}
+
+/**
+ * Build a user-facing Pipedrive web URL for an entity. Uses the Gantri
+ * company subdomain (`gantri.pipedrive.com`) so the link opens directly in
+ * Gantri's tenant. The LLM should embed these in tool replies so users get
+ * a working link instead of a hallucinated one.
+ */
+export function pipedriveWebUrl(type: 'lead' | 'person' | 'organization' | 'deal' | 'activity', id: string | number): string {
+  const base = 'https://gantri.pipedrive.com';
+  switch (type) {
+    case 'lead':
+      // Leads have UUIDs; URL goes to the Leads Inbox detail view.
+      return `${base}/leads/inbox/${encodeURIComponent(String(id))}`;
+    case 'person':
+      return `${base}/person/${id}`;
+    case 'organization':
+      return `${base}/organization/${id}`;
+    case 'deal':
+      return `${base}/deal/${id}`;
+    case 'activity':
+      // Activities don't have a clean per-record URL; the activities list
+      // with the dialog query param is the closest stable target.
+      return `${base}/activities/list?activity=${id}`;
+  }
 }

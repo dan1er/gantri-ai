@@ -24,15 +24,27 @@ import {
 
 export interface PipedriveConnectorDeps {
   client: PipedriveApiClient;
+  /** When omitted, write tools fail with WRITE_DEPS_NOT_CONFIGURED. */
+  writesRepo?: import('../../storage/repositories/pipedrive-writes.js').PipedriveWritesRepo;
+  /** When omitted, write tools fail with WRITE_DEPS_NOT_CONFIGURED. */
+  usersRepo?: import('../../storage/repositories/authorized-users.js').AuthorizedUsersRepo;
+  /** When omitted, write tools fail with NO_ACTOR. */
+  getActor?: () => import('../../orchestrator/orchestrator.js').ActorContext | undefined;
 }
 
 export class PipedriveConnector implements Connector {
   readonly name = 'pipedrive';
   readonly tools: readonly ToolDef[];
   private readonly client: PipedriveApiClient;
+  private readonly writesRepo?: PipedriveConnectorDeps['writesRepo'];
+  private readonly usersRepo?: PipedriveConnectorDeps['usersRepo'];
+  private readonly getActor?: PipedriveConnectorDeps['getActor'];
 
   constructor(deps: PipedriveConnectorDeps) {
     this.client = deps.client;
+    this.writesRepo = deps.writesRepo;
+    this.usersRepo = deps.usersRepo;
+    this.getActor = deps.getActor;
     this.tools = this.buildTools();
   }
 
@@ -81,6 +93,35 @@ export class PipedriveConnector implements Connector {
   }
 
   private buildTools(): readonly ToolDef[] {
+    const CreateLeadArgs = z.object({
+      title: z.string().min(1).max(255).describe('Title of the lead — usually the company or contact name. Required.'),
+      personEmail: z.string().email().optional().describe('Email of the contact person. If omitted, no person attaches by email.'),
+      personName: z.string().min(1).max(120).optional().describe('Display name of the person. Falls back to the email when not provided.'),
+      personPhone: z.string().min(3).max(40).optional().describe('Phone number of the person (e.g. "+1 415 555 0101"). Optional.'),
+      orgName: z.string().min(1).max(255).optional().describe('Organization name. The connector first looks for an exact match before creating a new org.'),
+      value: z.number().positive().optional().describe('Expected lead value (amount only).'),
+      currency: z.string().length(3).default('USD').describe('Currency code for `value`. Default USD.'),
+      labelIds: z.array(z.string()).optional().describe('Pipedrive lead label ids to attach.'),
+      expectedCloseDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Expected close date in YYYY-MM-DD.'),
+      note: z.string().min(1).max(5000).optional().describe('Optional first note to pin to the lead. Best-effort: lead succeeds even if the note fails.'),
+    }).refine(
+      (v) => Boolean(v.personEmail || v.personName || v.orgName),
+      { message: 'Need at least one of personEmail, personName, or orgName.' },
+    );
+    type CreateLeadArgs = z.infer<typeof CreateLeadArgs>;
+    const createLeadTool: ToolDef<CreateLeadArgs> = {
+      name: 'pipedrive.create_lead',
+      description: [
+        'Create a new B2B lead in Pipedrive (the Leads Inbox — pre-deal). Auto-finds the person by email and the organization by name; creates them if absent.',
+        'ADMIN or MARKETING role only — fails with FORBIDDEN otherwise.',
+        'At least one of `personEmail`, `personName`, `orgName` must be set.',
+        'Use ONLY when the user explicitly asks to "add a lead", "capture a lead", "create a lead", "captura un lead", "registra un lead". Do NOT fire it for analytics/read questions.',
+      ].join(' '),
+      schema: CreateLeadArgs as z.ZodType<CreateLeadArgs>,
+      jsonSchema: zodToJsonSchema(CreateLeadArgs),
+      execute: (args) => this.runCreateLead(args as CreateLeadArgs),
+    };
+
     return [
       this.toolListDirectory(),
       this.toolSearch(),
@@ -93,7 +134,132 @@ export class PipedriveConnector implements Connector {
       this.toolLostReasonsBreakdown(),
       this.toolActivitySummary(),
       this.toolUserPerformance(),
+      createLeadTool,
     ];
+  }
+
+  private async runCreateLead(args: import('zod').infer<any>): Promise<unknown> {
+    const a = args as { title: string; personEmail?: string; personName?: string; personPhone?: string; orgName?: string; value?: number; currency: string; labelIds?: string[]; expectedCloseDate?: string; note?: string };
+    if (!this.writesRepo || !this.usersRepo || !this.getActor) {
+      return { error: { code: 'WRITE_DEPS_NOT_CONFIGURED', message: 'Pipedrive write tools require writesRepo + usersRepo + getActor in connector deps.' } };
+    }
+    const actor = this.getActor();
+    if (!actor) return { error: { code: 'NO_ACTOR', message: 'pipedrive.create_lead requires an active actor.' } };
+    const role = await this.usersRepo.getRole(actor.slackUserId);
+    if (role !== 'admin' && role !== 'marketing') {
+      logger.warn({ caller: actor.slackUserId, role }, 'pipedrive_create_lead_denied');
+      return { error: { code: 'FORBIDDEN', message: 'Pipedrive write tools require role=admin or role=marketing.' } };
+    }
+
+    let personId: number | undefined;
+    let personName: string | undefined;
+    let personCreated = false;
+    let orgId: number | undefined;
+    let orgName: string | undefined;
+    let orgCreated = false;
+
+    try {
+      // Resolve org first so we can attach the new person to it on creation.
+      if (a.orgName) {
+        const found = await this.client.findOrganizationByName(a.orgName);
+        if (found) {
+          orgId = found.id;
+          orgName = found.name;
+        } else {
+          const created = await this.client.createOrganization({ name: a.orgName });
+          orgId = created.id;
+          orgName = created.name;
+          orgCreated = true;
+        }
+      }
+
+      // Resolve person.
+      if (a.personEmail) {
+        const found = await this.client.findPersonByEmail(a.personEmail);
+        if (found) {
+          personId = found.id;
+          personName = found.name;
+        } else {
+          const created = await this.client.createPerson({
+            name: a.personName ?? a.personEmail,
+            email: a.personEmail,
+            phone: a.personPhone,
+            orgId,
+          });
+          personId = created.id;
+          personName = created.name;
+          personCreated = true;
+        }
+      } else if (a.personName) {
+        const created = await this.client.createPerson({ name: a.personName, phone: a.personPhone, orgId });
+        personId = created.id;
+        personName = created.name;
+        personCreated = true;
+      }
+
+      // Create lead
+      const lead = await this.client.createLead({
+        title: a.title,
+        personId,
+        orgId,
+        value: a.value !== undefined ? { amount: a.value, currency: a.currency } : undefined,
+        labelIds: a.labelIds,
+        expectedCloseDate: a.expectedCloseDate,
+      });
+
+      // Best-effort note attach
+      let noteSubmitted = true;
+      let noteError: string | undefined;
+      if (a.note) {
+        try {
+          await this.client.createNote({ content: a.note, leadId: lead.id });
+        } catch (err: unknown) {
+          noteSubmitted = false;
+          noteError = err instanceof Error ? err.message : String(err);
+        }
+      }
+
+      const responsePayload = { leadId: lead.id, personId, orgId, personCreated, orgCreated, noteSubmitted, noteError };
+      await this.writesRepo.insert({
+        callerSlackId: actor.slackUserId,
+        action: 'create_lead',
+        pipedriveResourceType: 'lead',
+        pipedriveResourceId: lead.id,
+        requestPayload: a,
+        responsePayload,
+        status: 'success',
+      });
+      logger.info({ caller: actor.slackUserId, lead_id: lead.id, person_id: personId, org_id: orgId, person_created: personCreated, org_created: orgCreated }, 'pipedrive_lead_created');
+
+      return {
+        leadId: lead.id,
+        leadTitle: lead.title,
+        personId,
+        personName,
+        personCreated,
+        orgId,
+        orgName,
+        orgCreated,
+        noteSubmitted: a.note ? noteSubmitted : undefined,
+        noteError,
+      };
+    } catch (err: unknown) {
+      const status = (err as { status?: number })?.status;
+      const body = (err as { body?: unknown })?.body;
+      const message = err instanceof Error ? err.message : String(err);
+      const partial = personId !== undefined || orgId !== undefined;
+      await this.writesRepo.insert({
+        callerSlackId: actor.slackUserId,
+        action: 'create_lead',
+        pipedriveResourceType: null,
+        pipedriveResourceId: null,
+        requestPayload: a,
+        responsePayload: { error: { code: 'PIPEDRIVE_ERROR', status, message, body }, partial, personIdLeaked: personId, orgIdLeaked: orgId },
+        status: 'failure',
+      }).catch(() => {});
+      logger.warn({ caller: actor.slackUserId, action: 'create_lead', error_code: 'PIPEDRIVE_ERROR', status }, 'pipedrive_write_failed');
+      return { error: { code: 'PIPEDRIVE_ERROR', status, message, body, partial, personIdLeaked: personId, orgIdLeaked: orgId } };
+    }
   }
 
   // ============================================================

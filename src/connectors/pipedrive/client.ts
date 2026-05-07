@@ -507,4 +507,151 @@ export class PipedriveApiClient {
       score: h.result_score,
     }));
   }
+
+  // ─── write surface ───────────────────────────────────────────────────────
+
+  /** Single-attempt POST that throws on 4xx/5xx (caller wraps with retry). */
+  private async fetchOncePost(url: string, body: unknown): Promise<Response> {
+    return this.fetchImpl(url, {
+      method: 'POST',
+      headers: { ...this.headers(), 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  /** POST with one retry on 429/5xx. `path` starts with `/`. Returns parsed JSON `data` field. */
+  private async requestWrite<T>(path: string, body: unknown): Promise<T> {
+    const url = `${this.baseUrl}${path}`;
+    const t0 = Date.now();
+    let res = await this.fetchOncePost(url, body);
+    if (res.status === 429 || res.status >= 500) {
+      logger.warn({ path, status: res.status }, 'pipedrive transient write error — retrying once');
+      await new Promise((r) => setTimeout(r, this.retryDelayMs));
+      res = await this.fetchOncePost(url, body);
+    }
+    const elapsed = Date.now() - t0;
+    if (!res.ok) {
+      let errBody: unknown = null;
+      try { errBody = await res.clone().json(); } catch { errBody = await res.clone().text().catch(() => null); }
+      logger.warn({ path, status: res.status, elapsed, body: errBody }, 'pipedrive write api error');
+      throw new PipedriveApiError(`POST ${path} -> ${res.status}`, res.status, errBody);
+    }
+    const json = await res.clone().json();
+    logger.info({ path, status: res.status, elapsed }, 'pipedrive write api ok');
+    // Pipedrive v1 wraps the resource as { success, data }
+    return (json as { data: T }).data;
+  }
+
+  // ─── search helpers ──────────────────────────────────────────────────────
+
+  async findPersonByEmail(email: string): Promise<{ id: number; name: string } | null> {
+    const path = '/v1/persons/search';
+    const params = new URLSearchParams({ term: email, fields: 'email', exact_match: 'true', limit: '5' });
+    const url = `${this.baseUrl}${path}?${params.toString()}`;
+    const res = await this.fetchImpl(url, { method: 'GET', headers: this.headers() });
+    if (!res.ok) {
+      let body: unknown = null;
+      try { body = await res.clone().json(); } catch {}
+      throw new PipedriveApiError(`GET ${path} -> ${res.status}`, res.status, body);
+    }
+    const json = await res.clone().json() as { success: boolean; data?: { items?: Array<{ item: { id: number; name: string } }> } };
+    const item = json.data?.items?.[0]?.item;
+    return item ? { id: item.id, name: item.name } : null;
+  }
+
+  async findOrganizationByName(name: string): Promise<{ id: number; name: string } | null> {
+    const path = '/v1/organizations/search';
+    const params = new URLSearchParams({ term: name, exact_match: 'true', limit: '5' });
+    const url = `${this.baseUrl}${path}?${params.toString()}`;
+    const res = await this.fetchImpl(url, { method: 'GET', headers: this.headers() });
+    if (!res.ok) {
+      let body: unknown = null;
+      try { body = await res.clone().json(); } catch {}
+      throw new PipedriveApiError(`GET ${path} -> ${res.status}`, res.status, body);
+    }
+    const json = await res.clone().json() as { success: boolean; data?: { items?: Array<{ item: { id: number; name: string } }> } };
+    const item = json.data?.items?.[0]?.item;
+    return item ? { id: item.id, name: item.name } : null;
+  }
+
+  // ─── create helpers ──────────────────────────────────────────────────────
+
+  async createPerson(input: { name: string; email?: string; phone?: string; orgId?: number }): Promise<{ id: number; name: string }> {
+    const body: Record<string, unknown> = { name: input.name };
+    if (input.email) body.email = [{ value: input.email, primary: true, label: 'work' }];
+    if (input.phone) body.phone = [{ value: input.phone, primary: true, label: 'work' }];
+    if (input.orgId !== undefined) body.org_id = input.orgId;
+    const r = await this.requestWrite<{ id: number; name: string }>('/v1/persons', body);
+    return { id: r.id, name: r.name };
+  }
+
+  async createOrganization(input: { name: string }): Promise<{ id: number; name: string }> {
+    const r = await this.requestWrite<{ id: number; name: string }>('/v1/organizations', { name: input.name });
+    return { id: r.id, name: r.name };
+  }
+
+  async createLead(input: {
+    title: string;
+    personId?: number;
+    orgId?: number;
+    ownerId?: number;
+    value?: { amount: number; currency: string };
+    expectedCloseDate?: string;
+    labelIds?: string[];
+  }): Promise<{ id: string; title: string; person_id: number | null; organization_id: number | null }> {
+    const body: Record<string, unknown> = { title: input.title };
+    if (input.personId !== undefined) body.person_id = input.personId;
+    if (input.orgId !== undefined) body.organization_id = input.orgId;
+    if (input.ownerId !== undefined) body.owner_id = input.ownerId;
+    if (input.value) body.value = input.value;
+    if (input.expectedCloseDate) body.expected_close_date = input.expectedCloseDate;
+    if (input.labelIds?.length) body.label_ids = input.labelIds;
+    return this.requestWrite('/v1/leads', body);
+  }
+
+  async createNote(input: {
+    content: string;
+    leadId?: string;
+    dealId?: number;
+    personId?: number;
+    orgId?: number;
+  }): Promise<{ id: number; content: string }> {
+    const body: Record<string, unknown> = { content: input.content };
+    if (input.leadId) body.lead_id = input.leadId;
+    if (input.dealId !== undefined) body.deal_id = input.dealId;
+    if (input.personId !== undefined) body.person_id = input.personId;
+    if (input.orgId !== undefined) body.org_id = input.orgId;
+    return this.requestWrite('/v1/notes', body);
+  }
+
+  async createActivity(input: {
+    subject: string;
+    type: string;
+    dueDate?: string;
+    dueTime?: string;
+    durationMinutes?: number;
+    note?: string;
+    leadId?: string;
+    dealId?: number;
+    personId?: number;
+    orgId?: number;
+    userId?: number;
+  }): Promise<{ id: number; subject: string }> {
+    const body: Record<string, unknown> = { subject: input.subject, type: input.type };
+    if (input.dueDate) body.due_date = input.dueDate;
+    if (input.dueTime) body.due_time = input.dueTime;
+    if (input.durationMinutes !== undefined) {
+      // Pipedrive expects HH:MM string, NOT integer minutes.
+      const h = Math.floor(input.durationMinutes / 60);
+      const m = input.durationMinutes % 60;
+      body.duration = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+    }
+    if (input.note) body.note = input.note;
+    if (input.leadId) body.lead_id = input.leadId;
+    if (input.dealId !== undefined) body.deal_id = input.dealId;
+    if (input.personId !== undefined) body.person_id = input.personId;
+    if (input.orgId !== undefined) body.org_id = input.orgId;
+    if (input.userId !== undefined) body.user_id = input.userId;
+    return this.requestWrite('/v1/activities', body);
+  }
 }

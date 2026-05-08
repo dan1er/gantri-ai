@@ -286,4 +286,224 @@ describe('gantri.update_customer_email', () => {
     const r = await getTool(conn).execute({ orderId: 43785, newEmail: 'x@y.com', confirm: false });
     expect((r as any).customerName).toBe('(unnamed)');
   });
+
+  it('oldEmail-mode: happy path resolves user and returns awaiting_confirmation', async () => {
+    const customFetch = vi.fn(async (callOpts: any) => {
+      if (
+        callOpts.method === 'GET' &&
+        callOpts.path === '/api/admin/users/by-email?email=xavi%40example.com'
+      ) {
+        return {
+          account: {
+            userId: 59516,
+            email: 'xavi@example.com',
+            klaviyoId: '01JHPN57KPZFTJVN8D4D2WVK2H',
+            firstName: 'Xavi',
+            lastName: 'Ocana',
+          },
+        };
+      }
+      if (callOpts.method === 'POST' && callOpts.path === '/api/admin/paginated-transactions') {
+        // The resolver fetches up to 50 with `search: email`. Return one match
+        // with an exact email + authToken so it picks it up, plus a noisy
+        // false-positive that should be filtered out.
+        return {
+          transactions: [
+            {
+              id: 43785,
+              user: {
+                id: 59516,
+                email: 'xavi@example.com',
+                authToken: 'customer-jwt-token',
+                klaviyoId: '01JHPN57KPZFTJVN8D4D2WVK2H',
+                firstName: 'Xavi',
+                lastName: 'Ocana',
+              },
+            },
+            {
+              id: 99999,
+              user: {
+                id: 70000,
+                email: 'xavi-but-different@example.com',
+                authToken: 'should-not-be-picked',
+              },
+            },
+          ],
+          allOrders: 4,
+        };
+      }
+      throw new Error(`unexpected ${callOpts.method} ${callOpts.path}`);
+    });
+    const { conn, insertedRows } = makeDeps({ porterFetchImpl: customFetch });
+    const r = await getTool(conn).execute({
+      oldEmail: 'xavi@example.com',
+      newEmail: 'danavoniel@gmail.com',
+      confirm: false,
+    });
+    expect((r as any).kind).toBe('awaiting_confirmation');
+    expect((r as any).orderId).toBe(43785);
+    expect((r as any).userId).toBe(59516);
+    expect((r as any).currentEmail).toBe('xavi@example.com');
+    expect((r as any).newEmail).toBe('danavoniel@gmail.com');
+    expect((r as any).customerName).toBe('Xavi Ocana');
+    expect((r as any).totalOrders).toBe(4);
+    expect((r as any).klaviyoProfileLinked).toBe(true);
+    expect((r as any).target).toBe('staging');
+    expect(insertedRows).toHaveLength(0);
+  });
+
+  it('oldEmail-mode: returns USER_NOT_FOUND_BY_EMAIL when /api/admin/users/by-email is 404', async () => {
+    const customFetch = vi.fn(async (callOpts: any) => {
+      if (
+        callOpts.method === 'GET' &&
+        callOpts.path === '/api/admin/users/by-email?email=ghost%40example.com'
+      ) {
+        const err: any = new Error('not found');
+        err.status = 404;
+        throw err;
+      }
+      throw new Error(`unexpected ${callOpts.method} ${callOpts.path}`);
+    });
+    const { conn, insertedRows } = makeDeps({ porterFetchImpl: customFetch });
+    const r = await getTool(conn).execute({
+      oldEmail: 'ghost@example.com',
+      newEmail: 'x@y.com',
+      confirm: false,
+    });
+    expect((r as any).error.code).toBe('USER_NOT_FOUND_BY_EMAIL');
+    expect(insertedRows).toHaveLength(0);
+  });
+
+  it('oldEmail-mode: returns USER_HAS_NO_ORDERS when paginated-transactions returns no matching order', async () => {
+    const customFetch = vi.fn(async (callOpts: any) => {
+      if (
+        callOpts.method === 'GET' &&
+        callOpts.path === '/api/admin/users/by-email?email=lonely%40example.com'
+      ) {
+        return {
+          account: {
+            userId: 80000,
+            email: 'lonely@example.com',
+            klaviyoId: null,
+            firstName: 'Lonely',
+            lastName: 'User',
+          },
+        };
+      }
+      if (callOpts.method === 'POST' && callOpts.path === '/api/admin/paginated-transactions') {
+        // No matching order — could be because allOrders=0, or because the
+        // fuzzy search returned only false positives (different email).
+        return {
+          transactions: [
+            {
+              id: 12345,
+              user: {
+                id: 99999,
+                email: 'someone-else@example.com',
+                authToken: 'irrelevant',
+              },
+            },
+          ],
+          allOrders: 0,
+        };
+      }
+      throw new Error(`unexpected ${callOpts.method} ${callOpts.path}`);
+    });
+    const { conn, insertedRows } = makeDeps({ porterFetchImpl: customFetch });
+    const r = await getTool(conn).execute({
+      oldEmail: 'lonely@example.com',
+      newEmail: 'x@y.com',
+      confirm: false,
+    });
+    expect((r as any).error.code).toBe('USER_HAS_NO_ORDERS');
+    expect(insertedRows).toHaveLength(0);
+  });
+
+  it('arg validation: returns INVALID_ARGS when both orderId and oldEmail provided', async () => {
+    const { conn, insertedRows } = makeDeps();
+    const r = await getTool(conn).execute({
+      orderId: 43785,
+      oldEmail: 'xavi@example.com',
+      newEmail: 'x@y.com',
+      confirm: false,
+    });
+    expect((r as any).error.code).toBe('INVALID_ARGS');
+    expect(insertedRows).toHaveLength(0);
+  });
+
+  it('arg validation: returns INVALID_ARGS when neither orderId nor oldEmail provided', async () => {
+    const { conn, insertedRows } = makeDeps();
+    const r = await getTool(conn).execute({
+      newEmail: 'x@y.com',
+      confirm: false,
+    });
+    expect((r as any).error.code).toBe('INVALID_ARGS');
+    expect(insertedRows).toHaveLength(0);
+  });
+
+  it('oldEmail-mode: confirm:true path completes the email change end-to-end (mock PUT /api/user, mock Klaviyo)', async () => {
+    const customFetch = vi.fn(async (callOpts: any) => {
+      if (
+        callOpts.method === 'GET' &&
+        callOpts.path === '/api/admin/users/by-email?email=xavi%40example.com'
+      ) {
+        return {
+          account: {
+            userId: 59516,
+            email: 'xavi@example.com',
+            klaviyoId: '01JHPN57KPZFTJVN8D4D2WVK2H',
+            firstName: 'Xavi',
+            lastName: 'Ocana',
+          },
+        };
+      }
+      if (callOpts.method === 'POST' && callOpts.path === '/api/admin/paginated-transactions') {
+        return {
+          transactions: [
+            {
+              id: 43785,
+              user: {
+                id: 59516,
+                email: 'xavi@example.com',
+                authToken: 'customer-jwt-token',
+                klaviyoId: '01JHPN57KPZFTJVN8D4D2WVK2H',
+                firstName: 'Xavi',
+                lastName: 'Ocana',
+              },
+            },
+          ],
+          allOrders: 1,
+        };
+      }
+      if (callOpts.method === 'GET' && callOpts.path === '/api/user') {
+        return { data: { id: 59516, email: 'xavi@example.com', firstName: 'Xavi', lastName: 'Ocana' } };
+      }
+      if (callOpts.method === 'PUT' && callOpts.path === '/api/user') {
+        return { success: true, data: { id: 59516, email: callOpts.body?.email } };
+      }
+      throw new Error(`unexpected ${callOpts.method} ${callOpts.path}`);
+    });
+    const { conn, insertedRows } = makeDeps({ porterFetchImpl: customFetch });
+    const r = await getTool(conn).execute({
+      oldEmail: 'xavi@example.com',
+      newEmail: 'danavoniel@gmail.com',
+      syncKlaviyo: true,
+      confirm: true,
+    });
+    expect((r as any).ok).toBe(true);
+    expect((r as any).porterOk).toBe(true);
+    expect((r as any).klaviyoOk).toBe(true);
+    expect(insertedRows).toHaveLength(1);
+    expect(insertedRows[0]).toMatchObject({
+      callerSlackId: 'U_ZUZ',
+      action: 'update_customer_email',
+      porterUserId: 59516,
+      // The audit row uses the orderId resolved from the most recent order,
+      // not args.orderId (which is undefined in oldEmail mode).
+      porterOrderId: 43785,
+      klaviyoProfileId: '01JHPN57KPZFTJVN8D4D2WVK2H',
+      status: 'success',
+      writeTarget: 'staging',
+    });
+  });
 });

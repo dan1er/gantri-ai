@@ -35,6 +35,7 @@ import { Ga4Connector } from './connectors/ga4/connector.js';
 import { buildImpactConnector } from './connectors/impact/connector.js';
 import { KlaviyoConnector } from './connectors/klaviyo/connector.js';
 import { KlaviyoApiClient } from './connectors/klaviyo/client.js';
+import { GantriWritesRepo } from './storage/repositories/gantri-writes.js';
 import { KlaviyoImportsRepo } from './storage/repositories/klaviyo-imports.js';
 import { KlaviyoDeletionsRepo } from './storage/repositories/klaviyo-deletions.js';
 import { PendingConfirmationsRepo } from './storage/repositories/pending-confirmations.js';
@@ -58,6 +59,14 @@ import { ReportsRunner } from './reports/runner.js';
 async function main() {
   const env = loadEnv();
   const supabase = getSupabase();
+
+  // Surface the staging-vs-prod choice for gantri customer-data writes in
+  // boot logs. The actual switch is read per-request inside the write tool,
+  // so a `fly secrets set` flips behavior without redeploy — but on a fresh
+  // boot this line tells you at-a-glance which environment the bot is
+  // currently writing to.
+  const writeTarget = process.env.PORTER_WRITE_TARGET === 'prod' ? 'prod' : 'staging';
+  logger.info({ porter_write_target: writeTarget }, 'gantri_porter_write_target');
 
   const [
     email, password, dashboardId,
@@ -120,13 +129,18 @@ async function main() {
   // cap (so multi-year totals match Grafana exactly).
   const rollupRepo = new RollupRepo(supabase);
 
-  const gantriPorter = new GantriPorterConnector({
-    baseUrl: porterApiBaseUrl,
-    email: porterBotEmail,
-    password: porterBotPassword,
-    rollupRepo,
-  });
-  registry.register(gantriPorter);
+  // Top-level repos used by both buildSlackApp and the GantriPorterConnector
+  // write-tool deps (gantri.update_customer_email needs usersRepo to enforce
+  // role gating + writesRepo to log every attempt to the audit table).
+  const usersRepo = new AuthorizedUsersRepo(supabase);
+  const gantriWritesRepo = new GantriWritesRepo(supabase);
+
+  // GantriPorterConnector is constructed AFTER the klaviyo block below so
+  // we can pass through the (optional) KlaviyoApiClient — the write tool
+  // calls klaviyo.updateProfileEmail when syncKlaviyo is true and the
+  // customer has a stamped klaviyoId. See the `let gantriPorter` + assignment
+  // at the end of the klaviyo block.
+  let gantriPorter: GantriPorterConnector;
 
   const grafana = new GrafanaConnector({
     baseUrl: grafanaUrl,
@@ -297,6 +311,24 @@ async function main() {
     logger.warn('klaviyo not configured (KLAVIYO_API_KEY missing) — skipping registration');
   }
 
+  // Wire the GantriPorterConnector now that klaviyoClientRef is set (or
+  // confirmed undefined). The write-tool deps (writesRepo + usersRepo +
+  // getActor + klaviyoClient) enable gantri.update_customer_email; without
+  // them the tool short-circuits with WRITE_DEPS_NOT_CONFIGURED. klaviyoClient
+  // is genuinely optional — when Klaviyo is disabled the tool's syncKlaviyo
+  // path becomes a no-op rather than erroring.
+  gantriPorter = new GantriPorterConnector({
+    baseUrl: porterApiBaseUrl,
+    email: porterBotEmail,
+    password: porterBotPassword,
+    rollupRepo,
+    writesRepo: gantriWritesRepo,
+    usersRepo,
+    getActor: () => getActiveActor(),
+    klaviyoClient: klaviyoClientRef ?? undefined,
+  });
+  registry.register(gantriPorter);
+
   if (gscOauthClientId && gscOauthClientSecret && gscOauthRefreshToken) {
     registry.register(buildSearchConsoleConnector({
       clientId: gscOauthClientId,
@@ -360,7 +392,8 @@ async function main() {
   });
   registry.register(reportsConnector);
 
-  const usersRepo = new AuthorizedUsersRepo(supabase);
+  // usersRepo is hoisted above (before GantriPorterConnector) so the write-tool
+  // deps can pick it up; reuse the same instance here.
   const conversationsRepo = new ConversationsRepo(supabase);
 
   // No-op fallbacks for environments where Klaviyo isn't configured. The bot

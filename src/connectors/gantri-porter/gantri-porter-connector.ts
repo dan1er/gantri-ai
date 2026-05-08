@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { Connector, ToolDef } from '../base/connector.js';
 import { DateRangeArg, normalizeDateRange } from '../base/date-range.js';
+import { zodToJsonSchema } from '../base/zod-to-json-schema.js';
 import { logger } from '../../logger.js';
 import type { RollupRepo, RollupRow } from '../../storage/rollup-repo.js';
 
@@ -160,6 +161,182 @@ export class GantriPorterConnector implements Connector {
       throw err;
     }
     return (await res.json()) as T;
+  }
+
+  async runUpdateCustomerEmail(rawArgs: {
+    orderId: number; newEmail: string; syncKlaviyo?: boolean; confirm?: boolean;
+  }): Promise<unknown> {
+    // Defensive defaults: tests (and edge-case callers) may invoke execute()
+    // with the schema's optional fields omitted, in which case the Zod defaults
+    // wouldn't have applied. Mirror the schema defaults here.
+    const args = {
+      orderId: rawArgs.orderId,
+      newEmail: rawArgs.newEmail,
+      syncKlaviyo: rawArgs.syncKlaviyo ?? true,
+      confirm: rawArgs.confirm ?? false,
+    };
+    const { writesRepo, usersRepo, getActor, klaviyoClient } = this.deps;
+    if (!writesRepo || !usersRepo || !getActor) {
+      return { error: { code: 'WRITE_DEPS_NOT_CONFIGURED', message: 'gantri.update_customer_email requires writesRepo + usersRepo + getActor in connector deps.' } };
+    }
+    const actor = getActor();
+    if (!actor) return { error: { code: 'NO_ACTOR', message: 'gantri.update_customer_email requires an active actor.' } };
+    const role = await usersRepo.getRole(actor.slackUserId);
+    if (role !== 'cx' && role !== 'admin') {
+      return { error: { code: 'FORBIDDEN', message: 'gantri.update_customer_email requires role=cx or role=admin.' } };
+    }
+
+    const baseUrl = this.writeBaseUrl();
+    const target = this.writeTargetLabel();
+
+    // 1. Fetch the order
+    let orderResp: { order: any } | null = null;
+    try {
+      orderResp = await this.porterFetch<{ order: any }>({
+        method: 'GET',
+        path: `/api/admin/transactions/${args.orderId}`,
+        baseUrl,
+      });
+    } catch (err: any) {
+      if (err?.status === 404) {
+        return { error: { code: 'ORDER_NOT_FOUND', message: `Order ${args.orderId} not found in ${target}.` } };
+      }
+      return { error: { code: 'PORTER_ERROR', status: err?.status, message: err?.message ?? String(err), body: err?.body } };
+    }
+    const order = orderResp.order;
+    const customerToken: string | undefined = order?.user?.authToken;
+    const userId: number | undefined = order?.user?.id;
+    const klaviyoId: string | null = order?.user?.klaviyoId ?? null;
+    const currentEmail: string = order?.email ?? '';
+    const firstName: string = order?.firstName ?? '';
+    const lastName: string = order?.lastName ?? '';
+
+    // 2. Preview
+    if (!args.confirm) {
+      let totalOrders = 1;
+      try {
+        const tx = await this.porterFetch<{ allOrders?: number; transactions?: unknown[] }>({
+          method: 'POST',
+          path: '/api/admin/paginated-transactions',
+          baseUrl,
+          body: { start: 0, count: 100, search: currentEmail },
+        });
+        totalOrders = tx.allOrders ?? tx.transactions?.length ?? 1;
+      } catch { /* fall back to 1 */ }
+      const willSyncKlaviyo = args.syncKlaviyo && !!klaviyoId;
+      const customerName = (firstName || lastName) ? `${firstName} ${lastName}`.trim() : '(unnamed)';
+      const targetPrefix = target === 'staging'
+        ? '_(staging mode — change applies to stage.api.gantri.com only)_\n'
+        : '_(PROD MODE — change applies to live customer data)_\n';
+      const message = `${targetPrefix}About to change email on Porter user *${userId}* (${customerName}) from \`${currentEmail}\` to \`${args.newEmail}\`. This customer has *${totalOrders} order${totalOrders === 1 ? '' : 's'}* total — all of them will reflect the new email.${willSyncKlaviyo ? ` Klaviyo profile *${klaviyoId}* is linked and will also be updated.` : (klaviyoId ? ' Klaviyo sync was disabled by request.' : ' No Klaviyo profile linked.')}\nReply *yes* to confirm.`;
+      return {
+        kind: 'awaiting_confirmation' as const,
+        target,
+        orderId: args.orderId,
+        userId,
+        customerName,
+        currentEmail,
+        newEmail: args.newEmail,
+        totalOrders,
+        klaviyoProfileLinked: !!klaviyoId,
+        willSyncKlaviyo,
+        message,
+      };
+    }
+
+    // 3. Execute
+    if (!customerToken) {
+      return { error: { code: 'NO_AUTH_TOKEN', message: `Order ${args.orderId} response did not include user.authToken — cannot impersonate.` } };
+    }
+
+    let porterOk = false;
+    let klaviyoOk = false;
+    let klaviyoError: string | undefined;
+    try {
+      // 3a. Fetch customer's current state via impersonation
+      const me = await this.porterFetch<{ data?: { firstName?: string; lastName?: string }; firstName?: string; lastName?: string }>({
+        method: 'GET',
+        path: '/api/user',
+        baseUrl,
+        token: customerToken,
+      });
+      const meFirstName = me.data?.firstName ?? me.firstName ?? firstName ?? 'Customer';
+      const meLastName = me.data?.lastName ?? me.lastName ?? lastName ?? '';
+
+      // 3b. PUT new email
+      await this.porterFetch({
+        method: 'PUT',
+        path: '/api/user',
+        baseUrl,
+        token: customerToken,
+        body: { email: args.newEmail, firstName: meFirstName, lastName: meLastName },
+      });
+      porterOk = true;
+      logger.info({ caller: actor.slackUserId, order_id: args.orderId, user_id: userId, target }, 'gantri_customer_email_porter_updated');
+
+      // 3c. Klaviyo sync
+      if (args.syncKlaviyo && klaviyoId && klaviyoClient) {
+        try {
+          await klaviyoClient.updateProfileEmail(klaviyoId, args.newEmail);
+          klaviyoOk = true;
+          logger.info({ caller: actor.slackUserId, order_id: args.orderId, klaviyo_id: klaviyoId }, 'gantri_customer_email_klaviyo_synced');
+        } catch (err: any) {
+          klaviyoError = err?.message ?? String(err);
+          logger.warn({ caller: actor.slackUserId, order_id: args.orderId, error: klaviyoError }, 'gantri_customer_email_klaviyo_failed');
+        }
+      } else if (args.syncKlaviyo && !klaviyoId) {
+        logger.info({ caller: actor.slackUserId, order_id: args.orderId, reason: 'no_klaviyo_id' }, 'gantri_customer_email_klaviyo_skipped');
+      } else if (!args.syncKlaviyo) {
+        logger.info({ caller: actor.slackUserId, order_id: args.orderId, reason: 'sync_disabled' }, 'gantri_customer_email_klaviyo_skipped');
+      }
+
+      // 3d. Audit
+      const klaviyoNeeded = args.syncKlaviyo && !!klaviyoId;
+      const status: 'success' | 'partial' = (klaviyoNeeded && !klaviyoOk) ? 'partial' : 'success';
+      await writesRepo.insert({
+        callerSlackId: actor.slackUserId,
+        action: 'update_customer_email',
+        porterUserId: userId ?? null,
+        porterOrderId: args.orderId,
+        klaviyoProfileId: (klaviyoNeeded && klaviyoOk) ? klaviyoId : null,
+        requestPayload: { ...args, fromEmail: currentEmail },
+        responsePayload: { porterOk, klaviyoOk, klaviyoError },
+        status,
+        writeTarget: target,
+      });
+
+      const targetPrefix = target === 'staging' ? '_(staging)_ ' : '_(PROD)_ ';
+      const klaviyoMsg = klaviyoNeeded
+        ? (klaviyoOk
+            ? ' Klaviyo synced.'
+            : ` Klaviyo sync FAILED: ${klaviyoError}. Re-run with syncKlaviyo:true to retry just that step.`)
+        : '';
+      return {
+        ok: true as const,
+        target,
+        porterOk,
+        klaviyoOk,
+        klaviyoError,
+        message: `${targetPrefix}Email updated. Porter user ${userId} → \`${args.newEmail}\`.${klaviyoMsg}`,
+      };
+    } catch (err: any) {
+      const status = err?.status as number | undefined;
+      const body = err?.body;
+      const message = err instanceof Error ? err.message : String(err);
+      await writesRepo.insert({
+        callerSlackId: actor.slackUserId,
+        action: 'update_customer_email',
+        porterUserId: userId ?? null,
+        porterOrderId: args.orderId,
+        klaviyoProfileId: null,
+        requestPayload: { ...args, fromEmail: currentEmail },
+        responsePayload: { error: { code: 'PORTER_ERROR', status, message, body }, porterOk, klaviyoOk },
+        status: 'failure',
+        writeTarget: target,
+      }).catch(() => {});
+      logger.warn({ caller: actor.slackUserId, order_id: args.orderId, error_code: 'PORTER_ERROR', status }, 'gantri_customer_email_failed');
+      return { error: { code: 'PORTER_ERROR', status, message, body } };
+    }
   }
 }
 
@@ -590,7 +767,28 @@ function buildPorterTools(conn: GantriPorterConnector): ToolDef[] {
     },
   };
 
-  return [ordersQuery, orderGet, orderStats];
+  const UpdateCustomerEmailArgs = z.object({
+    orderId: z.number().int().positive().describe('Porter order id (the integer in https://admin.gantri.com/orders/<id>).'),
+    newEmail: z.string().email().describe('The new email to set on the customer.'),
+    syncKlaviyo: z.boolean().default(true).describe('When true (default), also patch the linked Klaviyo profile. Pass false to update Porter only.'),
+    confirm: z.boolean().default(false).describe('Pass true ONLY after the user has explicitly confirmed (e.g. replied "yes"). On the first call (confirm=false) the tool returns a preview asking for confirmation; do NOT auto-confirm.'),
+  });
+  type UpdateCustomerEmailArgs = z.infer<typeof UpdateCustomerEmailArgs>;
+  const updateCustomerEmailTool: ToolDef<UpdateCustomerEmailArgs> = {
+    name: 'gantri.update_customer_email',
+    description: [
+      'Change the email on a Gantri customer account. Goes through Porter\'s PUT /api/user via impersonation, so all app-level hooks fire (uniqueness validation, notification email to the old address, session-token invalidation). Optionally syncs the change to the linked Klaviyo profile in the same call.',
+      'CX or ADMIN role only — fails with FORBIDDEN otherwise.',
+      'TWO-STEP CONFIRM: first call without confirm:true returns a preview (current email, customer name, total order count, klaviyo-linked flag); relay the preview to the user, wait for explicit "yes"/"si" in the NEXT message, then re-call with confirm:true. NEVER auto-confirm.',
+      'Use when CX says: "modify email on order X to Y", "cambia el correo en el order X", "update customer email on order X", or relays a CX ticket text.',
+      'When PORTER_WRITE_TARGET=staging (default), writes hit stage.api.gantri.com. When set to prod, writes hit production. Surface the target prominently in the user-facing reply.',
+    ].join(' '),
+    schema: UpdateCustomerEmailArgs as z.ZodType<UpdateCustomerEmailArgs>,
+    jsonSchema: zodToJsonSchema(UpdateCustomerEmailArgs),
+    execute: (args) => conn.runUpdateCustomerEmail(args as UpdateCustomerEmailArgs),
+  };
+
+  return [ordersQuery, orderGet, orderStats, updateCustomerEmailTool];
 }
 
 function round2(n: number): number {

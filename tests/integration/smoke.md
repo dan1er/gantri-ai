@@ -43,4 +43,35 @@ Run after deploys that touch `src/connectors/pipedrive/connector.ts`, `src/conne
 
 Cleanup: archive/delete the test leads, the E2E Test Co organization, and the test person in the Pipedrive UI.
 
+## CX customer-email flow — Tier 1 (added 2026-05-08)
+
+Run after deploys that touch `gantri-porter-connector.ts`,
+`klaviyo/client.ts`, or `migrations/0023_gantri_writes.sql`.
+Defaults to staging (`PORTER_WRITE_TARGET=staging`).
+
+24. Confirm bot startup log line: `fly logs -a gantri-ai-bot | grep
+    gantri_porter_write_target` — should show
+    `porter_write_target=staging` (or `prod` after Danny flips it).
+25. Run the staging smoke: `fly ssh console -a gantri-ai-bot -C
+    'cd /app && node scripts/smoke-update-customer-email-staging.mjs'`.
+    Expect "✅ STAGING SMOKE PASSED".
+26. From Slack DM with the bot, as Zuzanna (role=cx) or Danny
+    (role=admin): _"modify email on order 43785 to test-cx@gantri.com"_
+    against a real staging order if one exists, or skip this step
+    until staging seed data is present.
+27. Reply *yes* to the preview. Verify reply prefix says
+    "_(staging mode)_". Verify a row appears in `gantri_writes` with
+    `write_target='staging'`, `status='success'`.
+28. As role=user (e.g. Lana): same prompt → expect FORBIDDEN reply
+    text including "cx or admin".
+29. Logs: `fly logs -a gantri-ai-bot | grep -E
+    "gantri_customer_email_(porter_updated|klaviyo_synced|klaviyo_skipped|klaviyo_failed|failed)"` — expect 1 success
+    log per smoke run, zero failures.
+
+When ready to flip to prod:
+- `fly secrets set PORTER_WRITE_TARGET=prod -a gantri-ai-bot`
+- Re-run step 24 to confirm the env reflects `prod`.
+- Run a real CX ticket (e.g. Zuzanna's pending request) end-to-end and
+  verify the audit row shows `write_target='prod'`.
+
 Log the result of the run (pass/fail per step) in the deploy PR.

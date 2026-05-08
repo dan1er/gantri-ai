@@ -552,6 +552,31 @@ export class KlaviyoApiClient {
     };
   }
 
+  /** Update a Klaviyo profile's primary email via PATCH /api/profiles/{id}.
+   *  Used by gantri.update_customer_email to keep Klaviyo in sync with Porter.
+   *  Throws on non-2xx responses; the caller maps that to a "partial" audit
+   *  status. */
+  async updateProfileEmail(profileId: string, newEmail: string): Promise<void> {
+    const url = `${this.baseUrl}/api/profiles/${encodeURIComponent(profileId)}`;
+    const body = {
+      data: {
+        type: 'profile',
+        id: profileId,
+        attributes: { email: newEmail },
+      },
+    };
+    const res = await this.fetchImpl(url, {
+      method: 'PATCH',
+      headers: this.headers(),
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      let errBody: unknown = null;
+      try { errBody = await res.clone().json(); } catch {}
+      throw new KlaviyoApiError(`PATCH /api/profiles/${profileId} -> ${res.status}`, res.status, errBody);
+    }
+  }
+
   /** POST /data-privacy-deletion-jobs — kicks off the GDPR/CCPA-compliant
    *  async profile deletion job (NOT the soft "suppress" path — this purges
    *  the profile and all associated events). Klaviyo accepts exactly one

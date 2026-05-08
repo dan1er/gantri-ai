@@ -9,7 +9,8 @@ function buildGantriRegistry(overrides: { updateEmail?: (args: any) => any } = {
     name: 'gantri.update_customer_email',
     description: 'update customer email',
     schema: z.object({
-      orderId: z.number(),
+      orderId: z.number().optional(),
+      oldEmail: z.string().optional(),
       newEmail: z.string(),
       syncKlaviyo: z.boolean().default(true),
       confirm: z.boolean().default(false),
@@ -22,9 +23,9 @@ function buildGantriRegistry(overrides: { updateEmail?: (args: any) => any } = {
         return {
           kind: 'awaiting_confirmation',
           target: 'staging',
-          orderId: a.orderId,
+          orderId: a.orderId ?? 43785,
           userId: 59516,
-          currentEmail: 'old@x.com',
+          currentEmail: a.oldEmail ?? 'old@x.com',
           newEmail: a.newEmail,
           customerName: 'Test User',
           totalOrders: 3,
@@ -161,5 +162,37 @@ describe('gantri.update_customer_email — orchestrator routing (LLM mocked)', (
     const orch = new Orchestrator({ registry, claude, model: 'claude-sonnet-4-6', maxIterations: 5 });
     await orch.run({ question: 'Modify email on order 43785 to x@y.com but don\'t touch Klaviyo', threadHistory: [] });
     expect((updateEmail.execute as any).mock.calls[0][0]).toMatchObject({ syncKlaviyo: false });
+  });
+
+  it("'cambia el correo de alice@example.com a bob@example.com' routes to gantri.update_customer_email with oldEmail+newEmail (no orderId)", async () => {
+    const { registry, updateEmail } = buildGantriRegistry();
+    const claude: any = fakeClaude([
+      // Turn 1: LLM picks the tool with oldEmail mode (no orderId).
+      {
+        content: [{
+          type: 'tool_use',
+          id: 't6',
+          name: 'gantri_update_customer_email',
+          input: { oldEmail: 'alice@example.com', newEmail: 'bob@example.com' },
+        }],
+        stop_reason: 'tool_use', usage: STD_USAGE, model: 'claude-sonnet-4-6',
+      },
+      // Turn 2: relays the preview.
+      {
+        content: [{ type: 'text', text: '_(staging mode)_ About to change email... Reply yes to confirm.' }],
+        stop_reason: 'end_turn', usage: STD_USAGE, model: 'claude-sonnet-4-6',
+      },
+    ]);
+    const orch = new Orchestrator({ registry, claude, model: 'claude-sonnet-4-6', maxIterations: 5 });
+    const out = await orch.run({
+      question: 'cambia el correo de alice@example.com a bob@example.com',
+      threadHistory: [],
+    });
+    expect(out.toolCalls).toHaveLength(1);
+    expect(out.toolCalls[0].name).toBe('gantri.update_customer_email');
+    const callArgs = (updateEmail.execute as any).mock.calls[0][0];
+    expect(callArgs.oldEmail).toBe('alice@example.com');
+    expect(callArgs.newEmail).toBe('bob@example.com');
+    expect(callArgs.orderId).toBeUndefined();
   });
 });

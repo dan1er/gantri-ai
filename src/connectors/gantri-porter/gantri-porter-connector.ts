@@ -4,7 +4,7 @@ import { DateRangeArg, normalizeDateRange } from '../base/date-range.js';
 import { logger } from '../../logger.js';
 import type { RollupRepo, RollupRow } from '../../storage/rollup-repo.js';
 
-export interface PorterApiConfig {
+export interface GantriPorterConnectorDeps {
   baseUrl: string;
   email: string;
   password: string;
@@ -15,6 +15,15 @@ export interface PorterApiConfig {
    * return a sample-of-2000 breakdown — see the comments in `orderStats` below.
    */
   rollupRepo?: RollupRepo;
+  /** Optional — required only by the gantri.update_customer_email tool.
+   *  When omitted, that tool fails with WRITE_DEPS_NOT_CONFIGURED. */
+  writesRepo?: import('../../storage/repositories/gantri-writes.js').GantriWritesRepo;
+  /** Optional — same. */
+  usersRepo?: import('../../storage/repositories/authorized-users.js').AuthorizedUsersRepo;
+  /** Optional — same. */
+  getActor?: () => import('../../orchestrator/orchestrator.js').ActorContext | undefined;
+  /** Optional — required when syncKlaviyo=true. */
+  klaviyoClient?: import('../klaviyo/client.js').KlaviyoApiClient;
 }
 
 /**
@@ -35,7 +44,10 @@ export class GantriPorterConnector implements Connector {
   private tokenFetchedAt = 0;
   private inflight: Promise<string> | null = null;
 
-  constructor(private readonly cfg: PorterApiConfig) {
+  readonly deps: GantriPorterConnectorDeps;
+
+  constructor(private readonly cfg: GantriPorterConnectorDeps) {
+    this.deps = cfg;
     this.rollupRepo = cfg.rollupRepo;
     this.tools = buildPorterTools(this);
   }
@@ -97,6 +109,55 @@ export class GantriPorterConnector implements Connector {
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       throw new Error(`Porter ${init.method ?? 'GET'} ${path} → HTTP ${res.status}: ${text.slice(0, 300)}`);
+    }
+    return (await res.json()) as T;
+  }
+
+  /** Per-request resolution of the write target. Read at request time (NOT
+   *  cached) so a `fly secrets set PORTER_WRITE_TARGET=prod` flips behavior
+   *  without redeploy. Default: staging. */
+  writeBaseUrl(): string {
+    return process.env.PORTER_WRITE_TARGET === 'prod'
+      ? this.cfg.baseUrl
+      : 'https://stage.api.gantri.com';
+  }
+
+  writeTargetLabel(): 'staging' | 'prod' {
+    return process.env.PORTER_WRITE_TARGET === 'prod' ? 'prod' : 'staging';
+  }
+
+  /** Low-level HTTP helper that supports BOTH a base-URL override (for
+   *  staging vs prod) AND a token override (for impersonation). Read paths
+   *  use this for staging-aware GETs; the impersonation paths use it for
+   *  the customer-token PUT. */
+  async porterFetch<T>(opts: {
+    method: string;
+    path: string;
+    body?: unknown;
+    baseUrl?: string;
+    token?: string;
+  }): Promise<T> {
+    const url = `${opts.baseUrl ?? this.cfg.baseUrl}${opts.path}`;
+    const token = opts.token ?? (await this.getToken());
+    const init: RequestInit = {
+      method: opts.method,
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+      },
+    };
+    if (opts.body !== undefined) {
+      (init as any).body = JSON.stringify(opts.body);
+    }
+    const res = await fetch(url, init);
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      let body: unknown = null;
+      try { body = JSON.parse(text); } catch { body = text.slice(0, 500); }
+      const err = new Error(`Porter ${opts.method} ${opts.path} → HTTP ${res.status}`) as Error & { status?: number; body?: unknown };
+      err.status = res.status;
+      err.body = body;
+      throw err;
     }
     return (await res.json()) as T;
   }

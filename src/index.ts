@@ -434,6 +434,26 @@ async function main() {
   // (the first DM the bot receives goes through a fully-initialized client).
   appRef = app;
 
+  // Resolve the bot's own user_id once at startup and stamp it onto the
+  // file_shared deps. The handler uses it to drop file_shared events
+  // triggered by the bot's own uploads (e.g. canvas attachments produced
+  // while answering analytics queries) — without this filter those events
+  // fall through to the role check and surface a misleading "requires
+  // admin or marketing role" reply to the human user.
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const authTest: any = await app.client.auth.test();
+    const botUserId = authTest?.user_id as string | undefined;
+    if (botUserId && klaviyoFileSharedDeps) {
+      klaviyoFileSharedDeps.botUserId = botUserId;
+      logger.info({ botUserId }, 'bot user_id resolved');
+    } else {
+      logger.warn({ authTest }, 'auth.test returned no user_id — file_shared self-ignore disabled');
+    }
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'auth.test failed at startup');
+  }
+
   // ReportsConnector hooks Slack's canvases API + the per-run actor context,
   // so it can only be built once `app.client` exists. The actor closure
   // reads from the AsyncLocalStorage-backed run context (see

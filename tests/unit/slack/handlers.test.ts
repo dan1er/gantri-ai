@@ -344,6 +344,22 @@ describe('handleFileShared', () => {
     expect(deps.orchestrator.runTool).not.toHaveBeenCalled();
   });
 
+  // Regression: when the bot uploads a canvas/CSV as part of an analytics
+  // reply, Slack fires a file_shared event with user_id = the bot's own
+  // user_id. Without this filter, that event hit the role check and surfaced
+  // a misleading "requires admin or marketing role" reply to the human user.
+  it('drops events triggered by the bot itself (canvas/CSV self-uploads)', async () => {
+    const deps = makeDeps();
+    await handleFileShared({
+      event: { channel_id: 'D1', user_id: 'U_BOT', file_id: 'F1' },
+      deps: { ...deps, botUserId: 'U_BOT' } as any,
+    });
+    expect(deps.usersRepo.getRole).not.toHaveBeenCalled();
+    expect(deps.slack.postMessage).not.toHaveBeenCalled();
+    expect(deps.slack.filesInfo).not.toHaveBeenCalled();
+    expect(deps.orchestrator.runTool).not.toHaveBeenCalled();
+  });
+
   it('rejects role=user with friendly DM', async () => {
     const deps = makeDeps({ role: 'user' });
     await handleFileShared({

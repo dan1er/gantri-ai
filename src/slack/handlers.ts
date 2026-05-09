@@ -403,6 +403,11 @@ export interface FileSharedEvent {
 }
 
 export interface FileSharedDeps {
+  /** The bot's own Slack user id (from auth.test at startup). Used to drop
+   *  file_shared events triggered by the bot's own uploads — those would
+   *  otherwise hit the role check below with a non-human user_id and surface
+   *  a misleading "requires admin or marketing role" reply. */
+  botUserId?: string | null;
   usersRepo: { getRole(slackUserId: string): Promise<string | null> };
   slack: {
     filesInfo(fileId: string): Promise<{
@@ -454,6 +459,16 @@ const ALLOWED_MIME = new Set(['text/csv', 'application/csv', 'text/plain']);
 export async function handleFileShared(input: { event: FileSharedEvent; deps: FileSharedDeps }) {
   const { event, deps } = input;
   if (!event.channel_id.startsWith('D')) return;
+
+  // Drop events triggered by the bot's own uploads (e.g. canvas / file
+  // attachments the bot creates while answering analytics queries). Without
+  // this, those events fall through to the role check below — the bot's own
+  // user_id has no row in authorized_users, so it surfaces a confusing
+  // "requires admin or marketing role" reply to the human caller.
+  if (deps.botUserId && event.user_id === deps.botUserId) {
+    logger.debug({ user: event.user_id, file: event.file_id }, 'file_shared from bot — ignored');
+    return;
+  }
 
   const role = await deps.usersRepo.getRole(event.user_id);
   if (!['admin', 'marketing'].includes(role ?? '')) {

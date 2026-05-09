@@ -243,26 +243,42 @@ export class GantriPorterConnector implements Connector {
       firstName = order?.firstName ?? '';
       lastName = order?.lastName ?? '';
     } else {
-      // New path: oldEmail → userId → most recent order → fetch full order to
-      // obtain authToken / klaviyoId (paginated-transactions strips those).
+      // New path: oldEmail → /api/admin/users/by-email returns the same
+      // adminUserInfo shape as by-id, including `shop.orders` (every order
+      // id this user has). Take the highest id (most recent), then fetch
+      // /api/admin/transactions/<id> to obtain the populated user
+      // (authToken / klaviyoId — both stripped from the shop.orders summary).
+      // After the GET, the rest of the flow is identical to the orderId path.
       const userRes = await this.resolveUserByEmail(args.oldEmail!, baseUrl, target);
       if (!userRes.ok) return { error: userRes.error };
 
-      const orderRes = await this.findMostRecentOrderByEmail(
-        userRes.currentEmail,
-        baseUrl,
-        target,
-      );
-      if (!orderRes.ok) return { error: orderRes.error };
-
-      orderId = orderRes.orderId;
-      userId = orderRes.userId;
+      let orderResp: { order: any };
+      try {
+        orderResp = await this.porterFetch<{ order: any }>({
+          method: 'GET',
+          path: `/api/admin/transactions/${userRes.mostRecentOrderId}`,
+          baseUrl,
+        });
+      } catch (err: any) {
+        if (err?.status === 404) {
+          return {
+            error: {
+              code: 'ORDER_NOT_FOUND',
+              message: `Order ${userRes.mostRecentOrderId} (most-recent for ${args.oldEmail}) not found in ${target}.`,
+            },
+          };
+        }
+        return { error: { code: 'PORTER_ERROR', status: err?.status, message: err?.message ?? String(err), body: err?.body } };
+      }
+      const order = orderResp.order;
+      orderId = userRes.mostRecentOrderId;
+      userId = userRes.userId;
+      customerToken = order?.user?.authToken;
+      klaviyoId = order?.user?.klaviyoId ?? userRes.klaviyoId ?? null;
       currentEmail = userRes.currentEmail;
-      customerToken = orderRes.authToken;
-      klaviyoId = userRes.klaviyoId ?? orderRes.klaviyoId ?? null;
-      firstName = orderRes.firstName || userRes.firstName;
-      lastName = orderRes.lastName || userRes.lastName;
-      totalOrdersFromResolver = orderRes.totalOrders;
+      firstName = order?.firstName ?? userRes.firstName ?? '';
+      lastName = order?.lastName ?? userRes.lastName ?? '';
+      totalOrdersFromResolver = userRes.totalOrders;
     }
 
     // 2. Preview
@@ -401,42 +417,46 @@ export class GantriPorterConnector implements Connector {
 
   /**
    * Resolve a customer by their CURRENT email via /api/admin/users/by-email
-   * (Porter PR #5114/#5115). Returns the user's id + a few profile fields, or
-   * a typed error if the user isn't found / Porter errors.
+   * (Porter PR #5114/#5115). The endpoint returns the same `adminUserInfo`
+   * shape the by-id route returns — `{ account, activity, credits, referrals,
+   * shop }` — so `shop.orders` already lists every order id this user has.
+   * We use that directly to find the most-recent order id (no need to call
+   * paginated-transactions, which has a fuzzy `search` tokenizer that breaks
+   * on `@` anyway).
+   *
+   * Returns the user's id + the most-recent order id + profile fields, or a
+   * typed error if the user isn't found / has no orders / Porter errors.
+   *
+   * The caller then issues a single `GET /api/admin/transactions/<id>` to
+   * obtain the populated user (authToken / klaviyoId — both stripped from
+   * the `shop.orders` summary entries). This unifies the two dispatch
+   * branches: in both cases the caller ends up with the same populated
+   * order response.
    */
   private async resolveUserByEmail(
     oldEmail: string,
     baseUrl: string,
     target: 'staging' | 'prod',
   ): Promise<
-    | { ok: true; userId: number; currentEmail: string; klaviyoId: string | null; firstName: string; lastName: string }
+    | {
+        ok: true;
+        userId: number;
+        currentEmail: string;
+        klaviyoId: string | null;
+        firstName: string;
+        lastName: string;
+        mostRecentOrderId: number;
+        totalOrders: number;
+      }
     | { ok: false; error: { code: string; message: string; status?: number; body?: unknown } }
   > {
+    let resp: { account?: any; shop?: { orders?: any[] } };
     try {
-      const resp = await this.porterFetch<{ account: any }>({
+      resp = await this.porterFetch<{ account?: any; shop?: { orders?: any[] } }>({
         method: 'GET',
         path: `/api/admin/users/by-email?email=${encodeURIComponent(oldEmail)}`,
         baseUrl,
       });
-      const account = resp?.account ?? {};
-      const userId = account.userId;
-      if (typeof userId !== 'number') {
-        return {
-          ok: false,
-          error: {
-            code: 'PORTER_ERROR',
-            message: `Unexpected /api/admin/users/by-email response: missing account.userId. Body keys: ${Object.keys(resp || {}).join(',')}`,
-          },
-        };
-      }
-      return {
-        ok: true,
-        userId,
-        currentEmail: account.email ?? oldEmail.toLowerCase().trim(),
-        klaviyoId: account.klaviyoId ?? null,
-        firstName: account.firstName ?? '',
-        lastName: account.lastName ?? '',
-      };
     } catch (err: any) {
       if (err?.status === 404) {
         return {
@@ -457,114 +477,44 @@ export class GantriPorterConnector implements Connector {
         },
       };
     }
-  }
-
-  /**
-   * Find the user's most recent order via paginated-transactions, filtered
-   * strictly by exact email match on the user object, then fetch the full
-   * order via /api/admin/transactions/<id> to get the populated user.user
-   * (authToken, klaviyoId — both stripped from the paginated response).
-   *
-   * Why we search by email local-part (not full email): Porter's `search`
-   * tokenizer treats `@` as a delimiter and returns ZERO matches for the full
-   * email address (verified against staging — `search='danny@gantri.com'` →
-   * 0 results, `search='danny'` → 92 results including the user's actual
-   * orders). We feed it the local-part and re-filter strictly client-side
-   * by exact lowercased email match — this both matches Porter's actual
-   * search behavior and prevents impersonating "alice2@example.com" when
-   * looking up "alice@example.com".
-   *
-   * Why the follow-up GET: Porter's getOrdersResponseData helper does
-   * `_.pick(order.user, ['id','email','firstName','lastName'])`, so the
-   * paginated-transactions response does NOT carry `authToken` or `klaviyoId`.
-   * The single-order endpoint /api/admin/transactions/<id> returns the full
-   * user record. This unifies the two paths: in both cases the caller ends
-   * up with the populated user from /api/admin/transactions/<id>.
-   */
-  private async findMostRecentOrderByEmail(
-    email: string,
-    baseUrl: string,
-    target: 'staging' | 'prod',
-  ): Promise<
-    | { ok: true; orderId: number; authToken: string | undefined; orderEmail: string; klaviyoId: string | null; firstName: string; lastName: string; userId: number; totalOrders: number }
-    | { ok: false; error: { code: string; message: string; status?: number; body?: unknown } }
-  > {
-    const searchTerm = email.split('@')[0];
-    let resp: { orders?: any[]; allOrders?: number };
-    try {
-      resp = await this.porterFetch<{ orders?: any[]; allOrders?: number }>({
-        method: 'POST',
-        path: '/api/admin/paginated-transactions',
-        baseUrl,
-        body: { start: 0, count: 50, search: searchTerm },
-      });
-    } catch (err: any) {
+    const account = resp?.account ?? {};
+    const userId = account.userId;
+    if (typeof userId !== 'number') {
       return {
         ok: false,
         error: {
           code: 'PORTER_ERROR',
-          status: err?.status,
-          message: err?.message ?? String(err),
-          body: err?.body,
+          message: `Unexpected /api/admin/users/by-email response: missing account.userId. Body keys: ${Object.keys(resp || {}).join(',')}`,
         },
       };
     }
-    const orders = resp.orders ?? [];
-    const lowered = email.toLowerCase().trim();
-    const candidates = orders
-      .filter((o) => (o?.user?.email ?? '').toLowerCase() === lowered)
-      .sort((a, b) => (b.id ?? 0) - (a.id ?? 0));
-    if (!candidates.length) {
+    const shopOrders = resp?.shop?.orders ?? [];
+    // Sort by id desc — id is monotonic in Porter so the highest id is the
+    // most recent order. Type filter is intentionally absent: any order
+    // (Order, Repair, Replacement, etc.) carries the user's authToken since
+    // the token is per-user not per-transaction.
+    const sortedOrders = [...shopOrders].sort(
+      (a, b) => (b?.id ?? 0) - (a?.id ?? 0),
+    );
+    const top = sortedOrders[0];
+    if (!top || typeof top.id !== 'number') {
       return {
         ok: false,
         error: {
           code: 'USER_HAS_NO_ORDERS',
-          message: `User ${email} has no orders matching that email in ${target}.`,
+          message: `User ${oldEmail} (id ${userId}) has no orders in ${target}; cannot impersonate to update email. Add a Tier-2 admin endpoint that updates email without impersonation.`,
         },
       };
     }
-    const top = candidates[0];
-    const topOrderId = top.id;
-
-    // Follow-up GET to obtain the populated user (authToken, klaviyoId).
-    let fullResp: { order: any };
-    try {
-      fullResp = await this.porterFetch<{ order: any }>({
-        method: 'GET',
-        path: `/api/admin/transactions/${topOrderId}`,
-        baseUrl,
-      });
-    } catch (err: any) {
-      if (err?.status === 404) {
-        return {
-          ok: false,
-          error: {
-            code: 'ORDER_NOT_FOUND',
-            message: `Order ${topOrderId} (most-recent for ${email}) not found in ${target}.`,
-          },
-        };
-      }
-      return {
-        ok: false,
-        error: {
-          code: 'PORTER_ERROR',
-          status: err?.status,
-          message: err?.message ?? String(err),
-          body: err?.body,
-        },
-      };
-    }
-    const fullOrder = fullResp.order;
     return {
       ok: true,
-      orderId: topOrderId,
-      authToken: fullOrder?.user?.authToken,
-      orderEmail: fullOrder?.user?.email ?? top.user?.email ?? email,
-      klaviyoId: fullOrder?.user?.klaviyoId ?? null,
-      firstName: fullOrder?.firstName ?? fullOrder?.user?.firstName ?? top.user?.firstName ?? '',
-      lastName: fullOrder?.lastName ?? fullOrder?.user?.lastName ?? top.user?.lastName ?? '',
-      userId: fullOrder?.user?.id ?? top.user?.id,
-      totalOrders: resp.allOrders ?? candidates.length,
+      userId,
+      currentEmail: account.email ?? oldEmail.toLowerCase().trim(),
+      klaviyoId: account.klaviyoId ?? null,
+      firstName: account.firstName ?? '',
+      lastName: account.lastName ?? '',
+      mostRecentOrderId: top.id,
+      totalOrders: shopOrders.length,
     };
   }
 }

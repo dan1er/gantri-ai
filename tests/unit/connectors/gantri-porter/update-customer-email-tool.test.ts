@@ -21,8 +21,14 @@ function makeOrderResponse(overrides: any = {}) {
 }
 
 function makePaginatedTransactionsResponse(count: number) {
+  // Porter returns `orders`, NOT `transactions`. The same endpoint is used by
+  // gantri.orders_query (see gantri-porter-connector.ts ~line 670 reading
+  // `data.orders`). Note that user objects in this paginated shape are
+  // _.pick-ed by Porter to id/email/firstName/lastName — authToken and
+  // klaviyoId are stripped, which is why the resolver does a follow-up
+  // GET /api/admin/transactions/<id>.
   return {
-    transactions: Array.from({ length: count }, (_, i) => ({ id: 1000 + i, type: 'Order' })),
+    orders: Array.from({ length: count }, (_, i) => ({ id: 1000 + i, type: 'Order' })),
     allOrders: count,
   };
 }
@@ -304,18 +310,17 @@ describe('gantri.update_customer_email', () => {
         };
       }
       if (callOpts.method === 'POST' && callOpts.path === '/api/admin/paginated-transactions') {
-        // The resolver fetches up to 50 with `search: email`. Return one match
-        // with an exact email + authToken so it picks it up, plus a noisy
-        // false-positive that should be filtered out.
+        // Porter returns `orders` (not `transactions`). User objects here are
+        // stripped to id/email/firstName/lastName — NO authToken, NO klaviyoId.
+        // The resolver picks the highest id and does a follow-up GET to the
+        // single-order endpoint to obtain the populated user.
         return {
-          transactions: [
+          orders: [
             {
               id: 43785,
               user: {
                 id: 59516,
                 email: 'xavi@example.com',
-                authToken: 'customer-jwt-token',
-                klaviyoId: '01JHPN57KPZFTJVN8D4D2WVK2H',
                 firstName: 'Xavi',
                 lastName: 'Ocana',
               },
@@ -325,11 +330,29 @@ describe('gantri.update_customer_email', () => {
               user: {
                 id: 70000,
                 email: 'xavi-but-different@example.com',
-                authToken: 'should-not-be-picked',
               },
             },
           ],
           allOrders: 4,
+        };
+      }
+      if (callOpts.method === 'GET' && callOpts.path === '/api/admin/transactions/43785') {
+        // Single-order endpoint DOES return the populated user.
+        return {
+          order: {
+            id: 43785,
+            email: 'xavi@example.com',
+            firstName: 'Xavi',
+            lastName: 'Ocana',
+            user: {
+              id: 59516,
+              email: 'xavi@example.com',
+              firstName: 'Xavi',
+              lastName: 'Ocana',
+              authToken: 'customer-jwt-token',
+              klaviyoId: '01JHPN57KPZFTJVN8D4D2WVK2H',
+            },
+          },
         };
       }
       throw new Error(`unexpected ${callOpts.method} ${callOpts.path}`);
@@ -374,7 +397,7 @@ describe('gantri.update_customer_email', () => {
     expect(insertedRows).toHaveLength(0);
   });
 
-  it('oldEmail-mode: returns USER_HAS_NO_ORDERS when paginated-transactions returns no matching order', async () => {
+  it('oldEmail-mode: returns USER_HAS_NO_ORDERS when paginated-transactions returns truly zero results', async () => {
     const customFetch = vi.fn(async (callOpts: any) => {
       if (
         callOpts.method === 'GET' &&
@@ -391,20 +414,56 @@ describe('gantri.update_customer_email', () => {
         };
       }
       if (callOpts.method === 'POST' && callOpts.path === '/api/admin/paginated-transactions') {
-        // No matching order — could be because allOrders=0, or because the
-        // fuzzy search returned only false positives (different email).
+        // The user exists in /api/admin/users/by-email but has literally no
+        // orders — empty `orders` array.
+        return { orders: [], allOrders: 0 };
+      }
+      throw new Error(`unexpected ${callOpts.method} ${callOpts.path}`);
+    });
+    const { conn, insertedRows } = makeDeps({ porterFetchImpl: customFetch });
+    const r = await getTool(conn).execute({
+      oldEmail: 'lonely@example.com',
+      newEmail: 'x@y.com',
+      confirm: false,
+    });
+    expect((r as any).error.code).toBe('USER_HAS_NO_ORDERS');
+    expect((r as any).error.message).not.toMatch(/authToken/i);
+    expect(insertedRows).toHaveLength(0);
+  });
+
+  it('oldEmail-mode: returns USER_HAS_NO_ORDERS when paginated-transactions returns only fuzzy-substring false positives', async () => {
+    const customFetch = vi.fn(async (callOpts: any) => {
+      if (
+        callOpts.method === 'GET' &&
+        callOpts.path === '/api/admin/users/by-email?email=lonely%40example.com'
+      ) {
         return {
-          transactions: [
+          account: {
+            userId: 80000,
+            email: 'lonely@example.com',
+            klaviyoId: null,
+            firstName: 'Lonely',
+            lastName: 'User',
+          },
+        };
+      }
+      if (callOpts.method === 'POST' && callOpts.path === '/api/admin/paginated-transactions') {
+        // Porter's `search` is fuzzy — substring matches return orders for
+        // OTHER customers whose email contains the same prefix. The exact-
+        // email post-filter must drop them all.
+        return {
+          orders: [
             {
               id: 12345,
               user: {
                 id: 99999,
-                email: 'someone-else@example.com',
-                authToken: 'irrelevant',
+                email: 'lonely-but-different@example.com',
+                firstName: 'Other',
+                lastName: 'Person',
               },
             },
           ],
-          allOrders: 0,
+          allOrders: 1,
         };
       }
       throw new Error(`unexpected ${callOpts.method} ${callOpts.path}`);
@@ -416,6 +475,7 @@ describe('gantri.update_customer_email', () => {
       confirm: false,
     });
     expect((r as any).error.code).toBe('USER_HAS_NO_ORDERS');
+    expect((r as any).error.message).not.toMatch(/authToken/i);
     expect(insertedRows).toHaveLength(0);
   });
 
@@ -458,21 +518,39 @@ describe('gantri.update_customer_email', () => {
         };
       }
       if (callOpts.method === 'POST' && callOpts.path === '/api/admin/paginated-transactions') {
+        // Stripped user (no authToken / klaviyoId) — matches real Porter.
         return {
-          transactions: [
+          orders: [
             {
               id: 43785,
               user: {
                 id: 59516,
                 email: 'xavi@example.com',
-                authToken: 'customer-jwt-token',
-                klaviyoId: '01JHPN57KPZFTJVN8D4D2WVK2H',
                 firstName: 'Xavi',
                 lastName: 'Ocana',
               },
             },
           ],
           allOrders: 1,
+        };
+      }
+      if (callOpts.method === 'GET' && callOpts.path === '/api/admin/transactions/43785') {
+        // Follow-up GET returns the populated user.
+        return {
+          order: {
+            id: 43785,
+            email: 'xavi@example.com',
+            firstName: 'Xavi',
+            lastName: 'Ocana',
+            user: {
+              id: 59516,
+              email: 'xavi@example.com',
+              firstName: 'Xavi',
+              lastName: 'Ocana',
+              authToken: 'customer-jwt-token',
+              klaviyoId: '01JHPN57KPZFTJVN8D4D2WVK2H',
+            },
+          },
         };
       }
       if (callOpts.method === 'GET' && callOpts.path === '/api/user') {

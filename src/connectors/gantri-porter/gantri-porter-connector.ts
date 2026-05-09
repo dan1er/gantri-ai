@@ -240,8 +240,12 @@ export class GantriPorterConnector implements Connector {
       userId = order?.user?.id;
       klaviyoId = order?.user?.klaviyoId ?? null;
       currentEmail = order?.email ?? '';
-      firstName = order?.firstName ?? '';
-      lastName = order?.lastName ?? '';
+      // Names live on `order.user`, not at the top level. The order shape has
+      // a `customerName` virtual field but no top-level `firstName/lastName`.
+      // Prefer `order.user.*` and fall back to top-level only as a paranoid
+      // last resort.
+      firstName = order?.user?.firstName ?? order?.firstName ?? '';
+      lastName = order?.user?.lastName ?? order?.lastName ?? '';
     } else {
       // New path: oldEmail → /api/admin/users/by-email returns the same
       // adminUserInfo shape as by-id, including `shop.orders` (every order
@@ -276,8 +280,8 @@ export class GantriPorterConnector implements Connector {
       customerToken = order?.user?.authToken;
       klaviyoId = order?.user?.klaviyoId ?? userRes.klaviyoId ?? null;
       currentEmail = userRes.currentEmail;
-      firstName = order?.firstName ?? userRes.firstName ?? '';
-      lastName = order?.lastName ?? userRes.lastName ?? '';
+      firstName = order?.user?.firstName ?? order?.firstName ?? userRes.firstName ?? '';
+      lastName = order?.user?.lastName ?? order?.lastName ?? userRes.lastName ?? '';
       totalOrdersFromResolver = userRes.totalOrders;
     }
 

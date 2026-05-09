@@ -68,6 +68,36 @@ Defaults to staging (`PORTER_WRITE_TARGET=staging`).
     "gantri_customer_email_(porter_updated|klaviyo_synced|klaviyo_skipped|klaviyo_failed|failed)"` — expect 1 success
     log per smoke run, zero failures.
 
+### oldEmail mode (added 2026-05-08)
+
+The `gantri.update_customer_email` tool also accepts `oldEmail` instead of
+`orderId` for the case where CX has only the customer's email. The
+resolution chain is: `/api/admin/users/by-email` → `userId` →
+`/api/admin/paginated-transactions` (most recent order) → `authToken` →
+existing impersonation flow. From the preview onward the user-facing
+behavior is identical to the orderId path.
+
+30. From Slack DM with the bot, as Zuzanna (role=cx) or Danny (role=admin):
+    _"modify email on `<staging-test-customer-email>` to
+    `smoke-old-<timestamp>@gantri-test.invalid`"_.
+31. Bot replies with a preview that includes: target prefix
+    (`_(staging mode)_`), `userId`, `customerName`, `currentEmail`,
+    `totalOrders`, `klaviyoLinked`, and the new email. Verify the resolved
+    `userId` and `totalOrders` look right (sanity-check against a Porter
+    admin search by email).
+32. Reply *yes*. Bot reports success.
+33. Verify in `gantri_writes` that the row has `porterOrderId` populated
+    (from the resolved most recent order — NOT null) and
+    `write_target='staging'`.
+34. Reset by changing the email back via the same flow (also oldEmail-mode,
+    using the new email as the input).
+35. Negative paths to spot-check (one per deploy is fine):
+    - _"modify email on `bogus-no-user@gantri-test.invalid` to
+      something@example.com"_ → expect `USER_NOT_FOUND_BY_EMAIL` relayed
+      to the user.
+    - _"modify email on `<some-staging-customer-with-zero-orders>` to
+      x@y.com"_ (if such a record exists) → expect `USER_HAS_NO_ORDERS`.
+
 When ready to flip to prod:
 - `fly secrets set PORTER_WRITE_TARGET=prod -a gantri-ai-bot`
 - Re-run step 24 to confirm the env reflects `prod`.

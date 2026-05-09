@@ -68,7 +68,12 @@ function makeDeps(opts: Opts = {}) {
   });
 
   const conn = new GantriPorterConnector({
-    baseUrl: 'https://api.gantri.com',
+    // Defensive default for tests: if a future test accidentally drops the
+    // porterFetch mock below, the worst-case fallthrough hits staging, not
+    // production. The real connector reads PORTER_WRITE_TARGET per-request
+    // (default 'staging'); this baseUrl only affects read paths and is
+    // shadowed in every test by the spy on line ~87.
+    baseUrl: 'https://stage.api.gantri.com',
     email: 'bot@gantri.com',
     password: 'pw',
     rollupRepo: { /* unused in these tests */ } as any,

@@ -243,7 +243,8 @@ export class GantriPorterConnector implements Connector {
       firstName = order?.firstName ?? '';
       lastName = order?.lastName ?? '';
     } else {
-      // New path: oldEmail → userId → most recent order → authToken.
+      // New path: oldEmail → userId → most recent order → fetch full order to
+      // obtain authToken / klaviyoId (paginated-transactions strips those).
       const userRes = await this.resolveUserByEmail(args.oldEmail!, baseUrl, target);
       if (!userRes.ok) return { error: userRes.error };
 
@@ -273,13 +274,13 @@ export class GantriPorterConnector implements Connector {
       } else {
         totalOrders = 1;
         try {
-          const tx = await this.porterFetch<{ allOrders?: number; transactions?: unknown[] }>({
+          const tx = await this.porterFetch<{ allOrders?: number; orders?: unknown[] }>({
             method: 'POST',
             path: '/api/admin/paginated-transactions',
             baseUrl,
             body: { start: 0, count: 100, search: currentEmail },
           });
-          totalOrders = tx.allOrders ?? tx.transactions?.length ?? 1;
+          totalOrders = tx.allOrders ?? tx.orders?.length ?? 1;
         } catch { /* fall back to 1 */ }
       }
       const willSyncKlaviyo = args.syncKlaviyo && !!klaviyoId;
@@ -460,25 +461,33 @@ export class GantriPorterConnector implements Connector {
 
   /**
    * Find the user's most recent order via paginated-transactions, filtered
-   * strictly by exact email match on the user object. Returns the orderId +
-   * the customer's authToken (for impersonation), plus the total order count.
+   * strictly by exact email match on the user object, then fetch the full
+   * order via /api/admin/transactions/<id> to get the populated user.user
+   * (authToken, klaviyoId — both stripped from the paginated response).
    *
    * Why we re-filter: Porter's `search` param is a fuzzy substring match, so
    * a search for "alice@example.com" can also return orders from
    * "alice2@example.com". Filtering client-side by exact email guarantees we
    * don't impersonate the wrong customer.
+   *
+   * Why the follow-up GET: Porter's getOrdersResponseData helper does
+   * `_.pick(order.user, ['id','email','firstName','lastName'])`, so the
+   * paginated-transactions response does NOT carry `authToken` or `klaviyoId`.
+   * The single-order endpoint /api/admin/transactions/<id> returns the full
+   * user record. This unifies the two paths: in both cases the caller ends
+   * up with the populated user from /api/admin/transactions/<id>.
    */
   private async findMostRecentOrderByEmail(
     email: string,
     baseUrl: string,
     target: 'staging' | 'prod',
   ): Promise<
-    | { ok: true; orderId: number; authToken: string; orderEmail: string; klaviyoId: string | null; firstName: string; lastName: string; userId: number; totalOrders: number }
+    | { ok: true; orderId: number; authToken: string | undefined; orderEmail: string; klaviyoId: string | null; firstName: string; lastName: string; userId: number; totalOrders: number }
     | { ok: false; error: { code: string; message: string; status?: number; body?: unknown } }
   > {
-    let resp: { transactions?: any[]; allOrders?: number };
+    let resp: { orders?: any[]; allOrders?: number };
     try {
-      resp = await this.porterFetch<{ transactions?: any[]; allOrders?: number }>({
+      resp = await this.porterFetch<{ orders?: any[]; allOrders?: number }>({
         method: 'POST',
         path: '/api/admin/paginated-transactions',
         baseUrl,
@@ -495,31 +504,61 @@ export class GantriPorterConnector implements Connector {
         },
       };
     }
-    const orders = resp.transactions ?? [];
+    const orders = resp.orders ?? [];
     const lowered = email.toLowerCase().trim();
     const candidates = orders
       .filter((o) => (o?.user?.email ?? '').toLowerCase() === lowered)
-      .filter((o) => !!o?.user?.authToken)
       .sort((a, b) => (b.id ?? 0) - (a.id ?? 0));
     if (!candidates.length) {
       return {
         ok: false,
         error: {
           code: 'USER_HAS_NO_ORDERS',
-          message: `User ${email} has no orders in ${target} (or none with a usable authToken). Cannot update email via impersonation. Add a Tier-2 admin endpoint to handle email-only users.`,
+          message: `User ${email} has no orders matching that email in ${target}.`,
         },
       };
     }
     const top = candidates[0];
+    const topOrderId = top.id;
+
+    // Follow-up GET to obtain the populated user (authToken, klaviyoId).
+    let fullResp: { order: any };
+    try {
+      fullResp = await this.porterFetch<{ order: any }>({
+        method: 'GET',
+        path: `/api/admin/transactions/${topOrderId}`,
+        baseUrl,
+      });
+    } catch (err: any) {
+      if (err?.status === 404) {
+        return {
+          ok: false,
+          error: {
+            code: 'ORDER_NOT_FOUND',
+            message: `Order ${topOrderId} (most-recent for ${email}) not found in ${target}.`,
+          },
+        };
+      }
+      return {
+        ok: false,
+        error: {
+          code: 'PORTER_ERROR',
+          status: err?.status,
+          message: err?.message ?? String(err),
+          body: err?.body,
+        },
+      };
+    }
+    const fullOrder = fullResp.order;
     return {
       ok: true,
-      orderId: top.id,
-      authToken: top.user.authToken,
-      orderEmail: top.user.email,
-      klaviyoId: top.user.klaviyoId ?? null,
-      firstName: top.user.firstName ?? '',
-      lastName: top.user.lastName ?? '',
-      userId: top.user.id,
+      orderId: topOrderId,
+      authToken: fullOrder?.user?.authToken,
+      orderEmail: fullOrder?.user?.email ?? top.user?.email ?? email,
+      klaviyoId: fullOrder?.user?.klaviyoId ?? null,
+      firstName: fullOrder?.firstName ?? fullOrder?.user?.firstName ?? top.user?.firstName ?? '',
+      lastName: fullOrder?.lastName ?? fullOrder?.user?.lastName ?? top.user?.lastName ?? '',
+      userId: fullOrder?.user?.id ?? top.user?.id,
       totalOrders: resp.allOrders ?? candidates.length,
     };
   }

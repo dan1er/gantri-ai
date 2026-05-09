@@ -465,10 +465,14 @@ export class GantriPorterConnector implements Connector {
    * order via /api/admin/transactions/<id> to get the populated user.user
    * (authToken, klaviyoId — both stripped from the paginated response).
    *
-   * Why we re-filter: Porter's `search` param is a fuzzy substring match, so
-   * a search for "alice@example.com" can also return orders from
-   * "alice2@example.com". Filtering client-side by exact email guarantees we
-   * don't impersonate the wrong customer.
+   * Why we search by email local-part (not full email): Porter's `search`
+   * tokenizer treats `@` as a delimiter and returns ZERO matches for the full
+   * email address (verified against staging — `search='danny@gantri.com'` →
+   * 0 results, `search='danny'` → 92 results including the user's actual
+   * orders). We feed it the local-part and re-filter strictly client-side
+   * by exact lowercased email match — this both matches Porter's actual
+   * search behavior and prevents impersonating "alice2@example.com" when
+   * looking up "alice@example.com".
    *
    * Why the follow-up GET: Porter's getOrdersResponseData helper does
    * `_.pick(order.user, ['id','email','firstName','lastName'])`, so the
@@ -485,13 +489,14 @@ export class GantriPorterConnector implements Connector {
     | { ok: true; orderId: number; authToken: string | undefined; orderEmail: string; klaviyoId: string | null; firstName: string; lastName: string; userId: number; totalOrders: number }
     | { ok: false; error: { code: string; message: string; status?: number; body?: unknown } }
   > {
+    const searchTerm = email.split('@')[0];
     let resp: { orders?: any[]; allOrders?: number };
     try {
       resp = await this.porterFetch<{ orders?: any[]; allOrders?: number }>({
         method: 'POST',
         path: '/api/admin/paginated-transactions',
         baseUrl,
-        body: { start: 0, count: 50, search: email },
+        body: { start: 0, count: 50, search: searchTerm },
       });
     } catch (err: any) {
       return {

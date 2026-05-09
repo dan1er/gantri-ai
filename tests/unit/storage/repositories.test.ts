@@ -88,6 +88,78 @@ describe('AuthorizedUsersRepo', () => {
       await expect(repo.updateRole('U1', 'admin')).rejects.toThrow(/permission denied/);
     });
   });
+
+  describe('upsertUser', () => {
+    it('persists `name` when provided and returns it on the user object', async () => {
+      const upsert = vi.fn().mockReturnValue({
+        select: () => ({
+          single: () => Promise.resolve({
+            data: {
+              slack_user_id: 'U1',
+              slack_workspace_id: null,
+              email: 'lana@gantri.com',
+              role: 'user',
+              name: 'Lana',
+              created_at: '2026-05-08T00:00:00.000Z',
+            },
+            error: null,
+          }),
+        }),
+      });
+      const client = clientWithTable({
+        authorized_users: {
+          // existence probe → no existing row
+          select: () => ({
+            eq: () => ({ maybeSingle: () => Promise.resolve({ data: null, error: null }) }),
+          }),
+          upsert,
+        },
+      });
+      const repo = new AuthorizedUsersRepo(client);
+      const result = await repo.upsertUser({
+        slackUserId: 'U1',
+        email: 'lana@gantri.com',
+        role: 'user',
+        name: 'Lana',
+      });
+      expect(result.created).toBe(true);
+      expect(result.user.name).toBe('Lana');
+      expect(upsert).toHaveBeenCalledWith(
+        expect.objectContaining({ slack_user_id: 'U1', name: 'Lana', email: 'lana@gantri.com', role: 'user' }),
+        expect.objectContaining({ onConflict: 'slack_user_id' }),
+      );
+    });
+
+    it('omits `name` from the upsert payload when caller does not pass it', async () => {
+      const upsert = vi.fn().mockReturnValue({
+        select: () => ({
+          single: () => Promise.resolve({
+            data: {
+              slack_user_id: 'U1',
+              slack_workspace_id: null,
+              email: null,
+              role: 'user',
+              name: null,
+              created_at: '2026-05-08T00:00:00.000Z',
+            },
+            error: null,
+          }),
+        }),
+      });
+      const client = clientWithTable({
+        authorized_users: {
+          select: () => ({
+            eq: () => ({ maybeSingle: () => Promise.resolve({ data: null, error: null }) }),
+          }),
+          upsert,
+        },
+      });
+      const repo = new AuthorizedUsersRepo(client);
+      await repo.upsertUser({ slackUserId: 'U1', role: 'user' });
+      const payload = upsert.mock.calls[0][0];
+      expect('name' in payload).toBe(false);
+    });
+  });
 });
 
 describe('ConversationsRepo', () => {

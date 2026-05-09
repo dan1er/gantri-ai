@@ -301,6 +301,90 @@ describe('BroadcastConnector → bot.add_user', () => {
       expect.objectContaining({ role: 'marketing' }),
     );
   });
+
+  it('always calls users.info and forwards profile.display_name as name (even when email path is used)', async () => {
+    const slackClient = makeSlackClient();
+    slackClient.users.lookupByEmail.mockResolvedValue({ ok: true, user: { id: 'U_BROOK' } });
+    // Mirrors the brooklyn@gantri.com case from the live workspace: display_name
+    // diverges from real_name. We want display_name.
+    slackClient.users.info.mockResolvedValue({
+      ok: true,
+      user: {
+        real_name: 'Brooklyn S.',
+        profile: {
+          display_name: 'Zuzanna (Brooklyn S.)',
+          real_name: 'Brooklyn S.',
+          email: 'brooklyn@gantri.com',
+        },
+      },
+    });
+
+    const { conn, usersRepo } = makeDeps({ users: [], callerRole: 'admin', slackClient });
+    const tool = getTool(conn, 'bot.add_user');
+    const args = tool.schema.parse({ email: 'brooklyn@gantri.com', sendIntro: false });
+    await tool.execute(args);
+
+    expect(slackClient.users.info).toHaveBeenCalledWith({ user: 'U_BROOK' });
+    expect(usersRepo.upsertUser).toHaveBeenCalledWith(
+      expect.objectContaining({ slackUserId: 'U_BROOK', name: 'Zuzanna (Brooklyn S.)' }),
+    );
+  });
+
+  it('falls back to profile.real_name when display_name is empty', async () => {
+    const slackClient = makeSlackClient();
+    slackClient.users.info.mockResolvedValue({
+      ok: true,
+      user: {
+        real_name: 'Top Level Name',
+        profile: { display_name: '', real_name: 'Profile Real Name', email: 'x@gantri.com' },
+      },
+    });
+
+    const { conn, usersRepo } = makeDeps({ users: [], callerRole: 'admin', slackClient });
+    const tool = getTool(conn, 'bot.add_user');
+    const args = tool.schema.parse({ slackUserId: 'U_FALLBACK', sendIntro: false });
+    await tool.execute(args);
+
+    expect(usersRepo.upsertUser).toHaveBeenCalledWith(
+      expect.objectContaining({ slackUserId: 'U_FALLBACK', name: 'Profile Real Name' }),
+    );
+  });
+
+  it('falls back to top-level real_name when both profile fields are empty', async () => {
+    const slackClient = makeSlackClient();
+    slackClient.users.info.mockResolvedValue({
+      ok: true,
+      user: {
+        real_name: 'Top Level Name',
+        profile: { display_name: '', real_name: '', email: null },
+      },
+    });
+
+    const { conn, usersRepo } = makeDeps({ users: [], callerRole: 'admin', slackClient });
+    const tool = getTool(conn, 'bot.add_user');
+    const args = tool.schema.parse({ slackUserId: 'U_TOP', sendIntro: false });
+    await tool.execute(args);
+
+    expect(usersRepo.upsertUser).toHaveBeenCalledWith(
+      expect.objectContaining({ slackUserId: 'U_TOP', name: 'Top Level Name' }),
+    );
+  });
+
+  it('users.info failure does not break add_user — name is just omitted', async () => {
+    const slackClient = makeSlackClient();
+    slackClient.users.lookupByEmail.mockResolvedValue({ ok: true, user: { id: 'U_OOPS' } });
+    slackClient.users.info.mockRejectedValue(new Error('slack down'));
+
+    const { conn, usersRepo } = makeDeps({ users: [], callerRole: 'admin', slackClient });
+    const tool = getTool(conn, 'bot.add_user');
+    const args = tool.schema.parse({ email: 'foo@gantri.com', sendIntro: false });
+    const res: any = await tool.execute(args);
+
+    expect(res.error).toBeUndefined();
+    const callArgs = usersRepo.upsertUser.mock.calls[0][0];
+    expect(callArgs.slackUserId).toBe('U_OOPS');
+    expect(callArgs.name).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------

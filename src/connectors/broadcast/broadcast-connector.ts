@@ -192,15 +192,33 @@ export class BroadcastConnector implements Connector {
         const msg = err instanceof Error ? err.message : String(err);
         return { error: { code: 'EMAIL_LOOKUP_FAILED', message: msg } };
       }
-    } else if (!resolvedEmail) {
-      // Best-effort: backfill the email from Slack so we store it.
-      try {
-        const info = await this.deps.slackClient.users.info({ user: slackUserId });
-        const email = (info as { user?: { profile?: { email?: string } } }).user?.profile?.email;
+    }
+
+    // Always fetch users.info now that we know slackUserId, regardless of how
+    // we got there. We extract a human-readable name (display_name >
+    // real_name) and opportunistically backfill the email if it's still null
+    // (preserves the previous best-effort behavior). Any error here is
+    // non-fatal — we still upsert the user without a name.
+    let resolvedName: string | null = null;
+    try {
+      const info = await this.deps.slackClient.users.info({ user: slackUserId });
+      const user = (info as {
+        user?: {
+          profile?: { display_name?: string; real_name?: string; email?: string };
+          real_name?: string;
+        };
+      }).user;
+      const profileDisplay = user?.profile?.display_name?.trim();
+      const profileReal = user?.profile?.real_name?.trim();
+      const topReal = user?.real_name?.trim();
+      resolvedName = profileDisplay || profileReal || topReal || null;
+      if (!resolvedEmail) {
+        const email = user?.profile?.email;
         if (email) resolvedEmail = email;
-      } catch {
-        // Non-fatal; continue without email.
       }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn({ slackUserId, err: msg }, 'add_user: users.info failed; proceeding without name');
     }
 
     const wasAuthorized = await this.deps.usersRepo.isAuthorized(slackUserId);
@@ -208,6 +226,7 @@ export class BroadcastConnector implements Connector {
       slackUserId,
       email: resolvedEmail ?? undefined,
       role: args.role,
+      name: resolvedName ?? undefined,
     });
 
     let introSent = false;

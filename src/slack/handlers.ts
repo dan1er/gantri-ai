@@ -11,6 +11,7 @@ import { loadEnv } from '../config/env.js';
 import { parseRawCsv } from '../connectors/klaviyo/csv-parser.js';
 import { validateAndMapForKlaviyo, type HeaderMapperDeps } from '../connectors/klaviyo/header-mapper.js';
 import { AnthropicCapacityExhausted } from '../llm/resilient-claude.js';
+import { friendlyCapacityMessage } from '../llm/friendly-error.js';
 
 /**
  * Upload a text file to a Slack channel using the external-upload API (three
@@ -375,7 +376,7 @@ export function createDmHandler(deps: HandlerDeps) {
       // can debug from the conversations table.
       const isCapacity = err instanceof AnthropicCapacityExhausted;
       const userText = isCapacity
-        ? '⚠️ Anthropic está saturada por un momento — probá de nuevo en unos minutos. Si urge, podés DMear a Danny.'
+        ? friendlyCapacityMessage(event.text || '')
         : `⚠️ Something went wrong: ${msg}`;
       logger.error({ err: msg, isCapacity }, 'orchestrator failed');
       await client.chat.update({

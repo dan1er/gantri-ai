@@ -84,35 +84,46 @@ describe('createDmHandler', () => {
     expect(ctx.spies.postMessage).not.toHaveBeenCalled();
   });
 
-  it('shows a friendly Spanish message (not raw JSON) when Anthropic capacity is exhausted', async () => {
+  it('shows a friendly English message (not raw JSON) when Anthropic capacity is exhausted and user spoke English', async () => {
     const ctx = makeContext(true);
-    // Simulate the resilient wrapper bubbling up an AnthropicCapacityExhausted
-    // after 3 primary retries + 3 fallback retries all failed with 529s.
+    // event.text is "how much did we spend" → English → English friendly text.
     const capErr = new AnthropicCapacityExhausted(new Error('529 overloaded_error'), [
       { model: 'claude-sonnet-4-6', attempt: 1, error: 'status=529' },
-      { model: 'claude-sonnet-4-6', attempt: 2, error: 'status=529' },
-      { model: 'claude-sonnet-4-6', attempt: 3, error: 'status=529' },
       { model: 'claude-haiku-4-5-20251001', attempt: 1, error: 'status=529' },
-      { model: 'claude-haiku-4-5-20251001', attempt: 2, error: 'status=529' },
-      { model: 'claude-haiku-4-5-20251001', attempt: 3, error: 'status=529' },
     ]);
     (ctx.spies.runSpy as any).mockRejectedValueOnce(capErr);
 
     const handler = createDmHandler(ctx.deps as any);
     await handler({ event: ctx.event as any, client: ctx.client, say: ctx.say } as any);
 
-    // The user-facing chat.update should carry the friendly Spanish text,
-    // NOT the raw JSON / status code.
     expect(ctx.spies.update).toHaveBeenCalledTimes(1);
     const updateCall = (ctx.spies.update.mock.calls[0] as any)[0];
-    expect(updateCall.text).toMatch(/Anthropic está saturada/);
+    expect(updateCall.text).toMatch(/Anthropic is overloaded/);
+    expect(updateCall.text).not.toMatch(/Anthropic está saturada/);
     expect(updateCall.text).not.toMatch(/529/);
     expect(updateCall.text).not.toMatch(/overloaded_error/);
 
-    // The audit row still captures the raw error message so Danny can debug.
     expect(ctx.spies.insertSpy).toHaveBeenCalledTimes(1);
     const auditRow = (ctx.spies.insertSpy.mock.calls[0] as any)[0];
     expect(auditRow.error).toContain('Anthropic capacity exhausted');
+  });
+
+  it('shows a friendly Spanish message when user spoke Spanish and Anthropic capacity is exhausted', async () => {
+    const ctx = makeContext(true);
+    // Override event text with Spanish phrasing — friendlyCapacityMessage
+    // should detect this and reply in Spanish.
+    const eventEs = { ...ctx.event, text: '¿cuánto gastamos este mes en marketing?' };
+    const capErr = new AnthropicCapacityExhausted(new Error('529 overloaded_error'), [
+      { model: 'claude-sonnet-4-6', attempt: 1, error: 'status=529' },
+    ]);
+    (ctx.spies.runSpy as any).mockRejectedValueOnce(capErr);
+
+    const handler = createDmHandler(ctx.deps as any);
+    await handler({ event: eventEs as any, client: ctx.client, say: ctx.say } as any);
+
+    const updateCall = (ctx.spies.update.mock.calls[0] as any)[0];
+    expect(updateCall.text).toMatch(/Anthropic está saturada/);
+    expect(updateCall.text).not.toMatch(/Anthropic is overloaded/);
   });
 
   it('still shows the raw error message for non-capacity errors', async () => {

@@ -1,6 +1,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { z } from 'zod';
 import { logger } from '../../logger.js';
+import { callClaudeWithResilience } from '../../llm/resilient-claude.js';
 import type { ParsedCsvRow, RawCsvParseResult } from './csv-parser.js';
 
 /**
@@ -21,6 +22,10 @@ import type { ParsedCsvRow, RawCsvParseResult } from './csv-parser.js';
  */
 
 const HEADER_MAPPER_MODEL = 'claude-haiku-4-5';
+/** Cross-pool fallback used when Haiku capacity is saturated. Sonnet costs
+ *  more per token but the header-mapper prompt is <500 tokens so the cost
+ *  delta is negligible — and a successful import beats a failed one. */
+const HEADER_MAPPER_FALLBACK_MODELS = ['claude-sonnet-4-6'];
 
 const MappingResultSchema = z.discriminatedUnion('ok', [
   z.object({
@@ -166,11 +171,23 @@ async function callMapper(
     sample.map((r) => `- ${JSON.stringify(r)}`).join('\n'),
   ].join('\n');
 
-  const response = await claude.messages.create({
-    model: HEADER_MAPPER_MODEL,
-    max_tokens: 512,
-    messages: [{ role: 'user', content: prompt }],
-  });
+  const { response, modelUsed, attemptsUsed, failedOver } = await callClaudeWithResilience(
+    {
+      claude,
+      model: HEADER_MAPPER_MODEL,
+      fallbackModels: HEADER_MAPPER_FALLBACK_MODELS,
+    },
+    {
+      max_tokens: 512,
+      messages: [{ role: 'user', content: prompt }],
+    },
+  );
+  if (failedOver || attemptsUsed > 1) {
+    logger.info(
+      { event: 'anthropic_resilient_call', site: 'klaviyo_header_mapper', modelUsed, attemptsUsed, failedOver },
+      'header mapper Anthropic call required retries/failover',
+    );
+  }
 
   const text = extractText(response.content);
   let parsedJson: unknown;

@@ -17,6 +17,9 @@ export interface LiveReportsConnectorDeps {
   repo: PublishedReportsRepo;
   claude: Anthropic;
   model: string;
+  /** Cross-pool fallback models for the LLM compile call. Forwarded into
+   *  `compileLiveReport`'s resilient Anthropic wrapper. */
+  fallbackModels?: string[];
   registry: Pick<ConnectorRegistry, 'execute'>;
   getToolCatalog: () => string;
   publicBaseUrl: string;
@@ -210,6 +213,7 @@ export class LiveReportsConnector implements Connector {
           intent: args.intent,
           claude: this.deps.claude,
           model: this.deps.model,
+          fallbackModels: this.deps.fallbackModels,
           toolCatalog: this.deps.getToolCatalog(),
           liveCatalogs: this.deps.liveCatalogs,
         });
@@ -271,6 +275,7 @@ export class LiveReportsConnector implements Connector {
             intent: `${args.intent}\n\n--- VERIFICATION FEEDBACK FROM PREVIOUS ATTEMPT ---\n${feedback}`,
             claude: this.deps.claude,
             model: this.deps.model,
+            fallbackModels: this.deps.fallbackModels,
             toolCatalog: this.deps.getToolCatalog(),
           liveCatalogs: this.deps.liveCatalogs,
             maxAttempts: 1,
@@ -467,6 +472,7 @@ export class LiveReportsConnector implements Connector {
       intent: args.newIntent,
       claude: this.deps.claude,
       model: this.deps.model,
+      fallbackModels: this.deps.fallbackModels,
       toolCatalog: this.deps.getToolCatalog(),
           liveCatalogs: this.deps.liveCatalogs,
     });

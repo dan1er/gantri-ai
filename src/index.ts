@@ -368,6 +368,9 @@ async function main() {
     registry,
     claude,
     model: 'claude-sonnet-4-6',
+    // Cross-pool failover: when the Sonnet pool is overloaded (529s),
+    // fall through to Haiku rather than surfacing a raw JSON error.
+    fallbackModels: ['claude-haiku-4-5-20251001'],
     maxIterations: 8,
     maxOutputTokens: 16384,
   });
@@ -386,6 +389,7 @@ async function main() {
         registry,
         claude,
         model: 'claude-sonnet-4-6',
+        fallbackModels: ['claude-haiku-4-5-20251001'],
       }),
     execute: (plan, runAt, timezone) => executePlan({ plan, registry, runAt, timezone }),
     nextFireAt: (cron, tz, after) => computeNextFireAt(cron, tz, after),
@@ -500,6 +504,7 @@ async function main() {
       repo: publishedReportsRepo,
       claude,
       model: 'claude-sonnet-4-6',
+      fallbackModels: ['claude-haiku-4-5-20251001'],
       registry: registry,                    // will be wrapped by cachingRegistry below; fine for tool execution
       getToolCatalog: () => registry.getAllTools()
         .map((t) => `${t.name}:\n${JSON.stringify(t.jsonSchema, null, 2)}`)
@@ -551,6 +556,7 @@ async function main() {
     slackBotToken: env.SLACK_BOT_TOKEN,
     claude,
     compilerModel: 'claude-sonnet-4-6',
+    compilerFallbackModels: ['claude-haiku-4-5-20251001'],
   });
 
   receiver.router.post('/internal/run-due-reports', async (req, res) => {

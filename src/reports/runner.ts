@@ -16,6 +16,9 @@ export interface RunnerDeps {
   slackBotToken: string;
   claude: Anthropic;
   compilerModel: string;
+  /** Cross-pool fallback models for the LLM re-compile on stale plans.
+   *  Forwarded into `compilePlan`'s resilient Anthropic wrapper. */
+  compilerFallbackModels?: string[];
   /** How often the in-process loop ticks. Default 30000ms. */
   tickIntervalMs?: number;
   /** Max subscriptions claimed per tick. Default 50. */
@@ -81,6 +84,7 @@ export class ReportsRunner {
             registry: this.deps.registry,
             claude: this.deps.claude,
             model: this.deps.compilerModel,
+            fallbackModels: this.deps.compilerFallbackModels,
             validationRunAt: runAt,
             timezone: sub.timezone,
           }),

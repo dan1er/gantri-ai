@@ -4,6 +4,7 @@ import type { ConnectorRegistry } from '../connectors/base/registry.js';
 import { buildSystemPrompt } from './prompts.js';
 import { describeCatalog } from '../connectors/northbeam/catalog.js';
 import type { ReportAttachment } from '../connectors/reports/reports-connector.js';
+import { callClaudeWithResilience } from '../llm/resilient-claude.js';
 import { logger } from '../logger.js';
 
 export interface ActorContext {
@@ -102,6 +103,11 @@ export interface OrchestratorOptions {
   registry: ConnectorRegistry;
   claude: Anthropic;
   model: string;
+  /** Fallback model ids tried (in order) when the primary model exhausts its
+   *  retry budget. Anthropic provisions capacity per model family, so a
+   *  cross-family fallback (e.g. Sonnet -> Haiku) survives an overloaded
+   *  Sonnet pool. Empty / undefined = no failover. */
+  fallbackModels?: string[];
   maxIterations?: number;
   maxOutputTokens?: number;
 }
@@ -202,13 +208,25 @@ export class Orchestrator {
       let lastModel = this.opts.model;
 
       for (let iter = 1; iter <= this.maxIterations; iter++) {
-        const resp = await this.opts.claude.messages.create({
-          model: this.opts.model,
-          max_tokens: this.maxOutputTokens,
-          system,
-          tools: claudeTools,
-          messages,
-        });
+        const { response: resp, modelUsed, attemptsUsed, failedOver } = await callClaudeWithResilience(
+          {
+            claude: this.opts.claude,
+            model: this.opts.model,
+            fallbackModels: this.opts.fallbackModels,
+          },
+          {
+            max_tokens: this.maxOutputTokens,
+            system,
+            tools: claudeTools,
+            messages,
+          } as Anthropic.MessageCreateParamsNonStreaming,
+        );
+        if (failedOver || attemptsUsed > 1) {
+          logger.info(
+            { event: 'anthropic_resilient_call', iter, modelUsed, attemptsUsed, failedOver },
+            'orchestrator Anthropic call required retries/failover',
+          );
+        }
         tokensInput += resp.usage.input_tokens;
         tokensOutput += resp.usage.output_tokens;
         lastModel = resp.model;

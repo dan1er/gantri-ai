@@ -4,6 +4,7 @@ import type { ReportPlan, BlockSpec } from './plan-types.js';
 import { PLAN_SCHEMA_VERSION } from './plan-types.js';
 import { executePlan, type ExecutePlanResult } from './plan-executor.js';
 import { getByPath } from './step-refs.js';
+import { callClaudeWithResilience } from '../llm/resilient-claude.js';
 import { logger } from '../logger.js';
 
 export interface CompilePlanOptions {
@@ -11,6 +12,9 @@ export interface CompilePlanOptions {
   registry: ConnectorRegistry;
   claude: Anthropic;
   model: string;
+  /** Cross-pool fallback models tried (in order) if the primary model
+   *  exhausts its retries against Anthropic's overloaded_error / 5xx. */
+  fallbackModels?: string[];
   /** When validating, the runAt used to resolve TimeRefs. */
   validationRunAt?: Date;
   timezone?: string;
@@ -55,11 +59,23 @@ export async function compilePlan(opts: CompilePlanOptions): Promise<CompilePlan
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const prompt = buildCompilerPrompt({ intent: opts.intent, toolCatalog, feedback });
-    const resp = await opts.claude.messages.create({
-      model: opts.model,
-      max_tokens: 4000,
-      messages: [{ role: 'user', content: prompt }],
-    });
+    const { response: resp, modelUsed, attemptsUsed, failedOver } = await callClaudeWithResilience(
+      {
+        claude: opts.claude,
+        model: opts.model,
+        fallbackModels: opts.fallbackModels,
+      },
+      {
+        max_tokens: 4000,
+        messages: [{ role: 'user', content: prompt }],
+      },
+    );
+    if (failedOver || attemptsUsed > 1) {
+      logger.info(
+        { event: 'anthropic_resilient_call', site: 'plan_compiler', attempt, modelUsed, attemptsUsed, failedOver },
+        'plan compiler Anthropic call required retries/failover',
+      );
+    }
     const text = extractText(resp.content);
     const plan = parsePlanJson(text);
     lastPlan = plan;

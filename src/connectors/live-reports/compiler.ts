@@ -1,5 +1,6 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { logger } from '../../logger.js';
+import { callClaudeWithResilience } from '../../llm/resilient-claude.js';
 import { LiveReportSpec, type LiveReportSpec as Spec } from '../../reports/live/spec.js';
 import { renderToolOutputShapes } from './tool-output-shapes.js';
 import type { LiveCatalogs } from './live-catalogs.js';
@@ -111,6 +112,9 @@ export interface CompileLiveReportInput {
   intent: string;
   claude: Anthropic;
   model: string;
+  /** Cross-pool fallback models tried (in order) if the primary model
+   *  exhausts its retries against Anthropic's overloaded_error / 5xx. */
+  fallbackModels?: string[];
   toolCatalog: string;
   liveCatalogs?: LiveCatalogs;
   maxAttempts?: number;
@@ -132,15 +136,27 @@ export async function compileLiveReport(input: CompileLiveReportInput): Promise<
     const userMsg = lastError
       ? `${input.intent}\n\n--\nPREVIOUS ATTEMPT FAILED VALIDATION: ${lastError}\nReturn a corrected JSON spec.`
       : input.intent;
-    const resp = await input.claude.messages.create({
-      model: input.model,
-      max_tokens: 4096,
-      system: SYSTEM_PROMPT
-        .replace('{TOOL_CATALOG}', input.toolCatalog)
-        .replace('{TOOL_OUTPUT_SHAPES}', renderToolOutputShapes())
-        .replace('{LIVE_CATALOGS}', input.liveCatalogs ? renderLiveCatalogs(await input.liveCatalogs.get()) : '# NB LIVE CATALOGS — not provided in this run.'),
-      messages: [{ role: 'user', content: userMsg }],
-    });
+    const { response: resp, modelUsed, attemptsUsed, failedOver } = await callClaudeWithResilience(
+      {
+        claude: input.claude,
+        model: input.model,
+        fallbackModels: input.fallbackModels,
+      },
+      {
+        max_tokens: 4096,
+        system: SYSTEM_PROMPT
+          .replace('{TOOL_CATALOG}', input.toolCatalog)
+          .replace('{TOOL_OUTPUT_SHAPES}', renderToolOutputShapes())
+          .replace('{LIVE_CATALOGS}', input.liveCatalogs ? renderLiveCatalogs(await input.liveCatalogs.get()) : '# NB LIVE CATALOGS — not provided in this run.'),
+        messages: [{ role: 'user', content: userMsg }],
+      },
+    );
+    if (failedOver || attemptsUsed > 1) {
+      logger.info(
+        { event: 'anthropic_resilient_call', site: 'live_report_compiler', attempt, modelUsed, attemptsUsed, failedOver },
+        'live-report compiler Anthropic call required retries/failover',
+      );
+    }
     totalIn += resp.usage?.input_tokens ?? 0;
     totalOut += resp.usage?.output_tokens ?? 0;
     const text = (resp.content.find((b: { type: string }) => b.type === 'text') as { text?: string } | undefined)?.text ?? '';

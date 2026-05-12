@@ -10,6 +10,7 @@ import { logger } from '../logger.js';
 import { loadEnv } from '../config/env.js';
 import { parseRawCsv } from '../connectors/klaviyo/csv-parser.js';
 import { validateAndMapForKlaviyo, type HeaderMapperDeps } from '../connectors/klaviyo/header-mapper.js';
+import { AnthropicCapacityExhausted } from '../llm/resilient-claude.js';
 
 /**
  * Upload a text file to a Slack channel using the external-upload API (three
@@ -367,11 +368,20 @@ export function createDmHandler(deps: HandlerDeps) {
       stopIdleTicker();
       if (pendingUpdate) { clearTimeout(pendingUpdate); pendingUpdate = null; }
       const msg = err instanceof Error ? err.message : String(err);
-      logger.error({ err: msg }, 'orchestrator failed');
+      // When Anthropic capacity is exhausted (all retries + fallback model
+      // failed), show the user a friendly message instead of leaking raw
+      // SDK JSON ("⚠️ Something went wrong: 529 {...overloaded_error...}").
+      // The audit row below still records the full err.message so Danny
+      // can debug from the conversations table.
+      const isCapacity = err instanceof AnthropicCapacityExhausted;
+      const userText = isCapacity
+        ? '⚠️ Anthropic está saturada por un momento — probá de nuevo en unos minutos. Si urge, podés DMear a Danny.'
+        : `⚠️ Something went wrong: ${msg}`;
+      logger.error({ err: msg, isCapacity }, 'orchestrator failed');
       await client.chat.update({
         channel: event.channel,
         ts: placeholder.ts,
-        text: `⚠️ Something went wrong: ${msg}`,
+        text: userText,
       });
       await deps.conversationsRepo.insert({
         slack_thread_ts: threadTs,

@@ -552,6 +552,8 @@ const OrdersQueryArgs = z.object({
     .describe('Free-text search matched against order id, customer name, email, etc.'),
   dateRange: DateRangeArg.optional(),
   late: z.boolean().optional(),
+  hasPreOrderItemsAtCreation: z.boolean().optional()
+    .describe('Filter for orders that contained at least one pre-order item at the moment of checkout (Transactions.hasPreOrderItemsAtCreation = true). Pass `true` to return ONLY pre-order orders, `false` to exclude them. Omit to return both. The flag is set at order-creation time and never recomputed, so it answers "which orders were pre-orders when placed?", not "which orders currently contain unfulfilled pre-order items".'),
   sortingField: z.enum(['id', 'createdAt', 'completedAt', 'amount']).default('id'),
   sortingType: z.enum(['ASC', 'DESC']).default('DESC'),
   page: z.number().int().min(1).default(1),
@@ -624,7 +626,7 @@ function buildPorterTools(conn: GantriPorterConnector): ToolDef[] {
   const ordersQuery: ToolDef<OrdersQueryArgs> = {
     name: 'gantri.orders_query',
     description:
-      'Query orders from Gantri\'s own Porter system (source of truth, authenticated admin API). Supports filtering by transaction type(s), status(es), date range (Pacific Time), free-text search (order id / customer name / email), and a "late" flag. Returns paginated order records with normalized dollar amounts. This is the internal system of record; Northbeam tools are for attribution. Every order in the response has an `adminLink` pointing at admin.gantri.com.',
+      'Query orders from Gantri\'s own Porter system (source of truth, authenticated admin API). Supports filtering by transaction type(s), status(es), date range (Pacific Time), free-text search (order id / customer name / email), a "late" flag, and `hasPreOrderItemsAtCreation` (pass true for pre-order orders only, false to exclude them, omit for both). Returns paginated order records with normalized dollar amounts. This is the internal system of record; Northbeam tools are for attribution. Every order in the response has an `adminLink` pointing at admin.gantri.com.',
     schema: OrdersQueryArgs as z.ZodType<OrdersQueryArgs>,
     jsonSchema: {
       type: 'object',
@@ -642,6 +644,7 @@ function buildPorterTools(conn: GantriPorterConnector): ToolDef[] {
           ],
         },
         late: { type: 'boolean' },
+        hasPreOrderItemsAtCreation: { type: 'boolean', description: 'Filter for orders that contained pre-order items at creation. true = pre-order orders only, false = exclude pre-orders, omit = both.' },
         sortingField: { type: 'string', enum: ['id', 'createdAt', 'completedAt', 'amount'] },
         sortingType: { type: 'string', enum: ['ASC', 'DESC'] },
         page: { type: 'integer', minimum: 1 },
@@ -659,6 +662,9 @@ function buildPorterTools(conn: GantriPorterConnector): ToolDef[] {
       if (args.statuses?.length) body.statuses = args.statuses;
       if (args.search) body.search = args.search;
       if (args.late) body.late = true;
+      if (typeof args.hasPreOrderItemsAtCreation === 'boolean') {
+        body.hasPreOrderItemsAtCreation = args.hasPreOrderItemsAtCreation;
+      }
       if (args.dateRange) {
         const range = normalizeDateRange(args.dateRange);
         body.startDate = toPorterDate(range.startDate);

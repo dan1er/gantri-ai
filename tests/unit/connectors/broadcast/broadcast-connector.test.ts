@@ -57,6 +57,8 @@ function makeDeps(opts: {
   callerRole?: string | null;
   actorUid?: string;
   slackClient?: ReturnType<typeof makeSlackClient>;
+  conversationRows?: any[];
+  maintainerSlackUserId?: string;
 }) {
   const slackClient = opts.slackClient ?? makeSlackClient();
   const usersRepo = makeUsersRepo(opts.users, opts.callerRole ?? 'admin');
@@ -69,12 +71,20 @@ function makeDeps(opts: {
     return found ? found.role : null;
   });
 
+  const conversationsRepo = {
+    insert: vi.fn(async () => 'conv-id'),
+    loadRecentByThread: vi.fn(async () => []),
+    loadInRange: vi.fn(async () => opts.conversationRows ?? []),
+  };
+
   const conn = new BroadcastConnector({
     slackClient: slackClient as any,
     usersRepo: usersRepo as any,
+    conversationsRepo: conversationsRepo as any,
+    maintainerSlackUserId: opts.maintainerSlackUserId,
     getActor: () => ({ slackUserId: actorUid }),
   });
-  return { conn, slackClient, usersRepo };
+  return { conn, slackClient, usersRepo, conversationsRepo };
 }
 
 function getTool(conn: BroadcastConnector, name: string) {
@@ -505,5 +515,121 @@ describe('BroadcastConnector → bot.list_users', () => {
     const { conn } = makeDeps({ users: fiveUsers, callerRole: 'admin' });
     const tool = getTool(conn, 'bot.list_users');
     expect(() => tool.schema.parse({ role: 'wizard' })).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// usage_summary tests
+// ---------------------------------------------------------------------------
+
+describe('BroadcastConnector → bot.usage_summary', () => {
+  const sampleRows = [
+    { slackUserId: 'U_DANNY', question: 'orders last week', toolCalls: [{ name: 'gantri.orders_query', ok: true }], model: 'sonnet', tokensInput: 100, tokensOutput: 50, durationMs: 1500, hadError: false, createdAt: '2026-05-14T15:00:00Z' },
+    { slackUserId: 'U_DANNY', question: 'how many active customers', toolCalls: [{ name: 'gantri.order_stats', ok: true }], model: 'sonnet', tokensInput: 120, tokensOutput: 60, durationMs: 1800, hadError: false, createdAt: '2026-05-14T16:00:00Z' },
+    { slackUserId: 'U_BROOK', question: 'modify email on order 43785', toolCalls: [{ name: 'gantri.update_customer_email', ok: true }], model: 'sonnet', tokensInput: 200, tokensOutput: 80, durationMs: 2500, hadError: false, createdAt: '2026-05-13T10:00:00Z' },
+    { slackUserId: 'U_BROOK', question: 'broken query', toolCalls: null, model: 'sonnet', tokensInput: 80, tokensOutput: 20, durationMs: 500, hadError: true, createdAt: '2026-05-12T09:00:00Z' },
+  ];
+
+  it('non-maintainer caller is forbidden (even when role=admin)', async () => {
+    const { conn } = makeDeps({
+      users: [{ slackUserId: 'U_OTHER_ADMIN', email: 'admin@gantri.com', role: 'admin', createdAt: 't' }],
+      callerRole: 'admin',
+      actorUid: 'U_OTHER_ADMIN',
+      maintainerSlackUserId: 'U_DANNY',
+      conversationRows: sampleRows,
+    });
+    const tool = getTool(conn, 'bot.usage_summary');
+    const result: any = await tool.execute({ groupBy: 'user', limit: 50, includeQuestions: false });
+    expect(result.error?.code).toBe('FORBIDDEN');
+  });
+
+  it('returns MAINTAINER_NOT_CONFIGURED when env var is unset', async () => {
+    const { conn } = makeDeps({
+      users: [],
+      callerRole: 'admin',
+      actorUid: 'U_DANNY',
+      maintainerSlackUserId: undefined,
+      conversationRows: sampleRows,
+    });
+    const tool = getTool(conn, 'bot.usage_summary');
+    const result: any = await tool.execute({ groupBy: 'user', limit: 50, includeQuestions: false });
+    expect(result.error?.code).toBe('MAINTAINER_NOT_CONFIGURED');
+  });
+
+  it('maintainer can call and gets a per-user aggregate sorted by message count', async () => {
+    const { conn, conversationsRepo } = makeDeps({
+      users: [
+        { slackUserId: 'U_DANNY', email: 'danny@gantri.com', role: 'admin', createdAt: 't' },
+        { slackUserId: 'U_BROOK', email: 'brooklyn@gantri.com', role: 'cx', createdAt: 't' },
+      ],
+      callerRole: 'admin',
+      actorUid: 'U_DANNY',
+      maintainerSlackUserId: 'U_DANNY',
+      conversationRows: sampleRows,
+    });
+    const tool = getTool(conn, 'bot.usage_summary');
+    const result: any = await tool.execute({ groupBy: 'user', limit: 50, includeQuestions: false });
+    expect(result.error).toBeUndefined();
+    expect(result.totalMessages).toBe(4);
+    expect(result.uniqueUsers).toBe(2);
+    expect(result.rows).toHaveLength(2);
+    // Both users have 2 messages each — order ties; just assert content correctness.
+    const danny = result.rows.find((r: any) => r.slackUserId === 'U_DANNY');
+    expect(danny.email).toBe('danny@gantri.com');
+    expect(danny.messages).toBe(2);
+    expect(danny.errors).toBe(0);
+    expect(danny.topTools.map((t: any) => t.name).sort()).toEqual(['gantri.order_stats', 'gantri.orders_query']);
+    const brook = result.rows.find((r: any) => r.slackUserId === 'U_BROOK');
+    expect(brook.errors).toBe(1);
+    expect(conversationsRepo.loadInRange).toHaveBeenCalledOnce();
+  });
+
+  it('groupBy=tool returns calls per tool name', async () => {
+    const { conn } = makeDeps({
+      users: [],
+      callerRole: 'admin',
+      actorUid: 'U_DANNY',
+      maintainerSlackUserId: 'U_DANNY',
+      conversationRows: sampleRows,
+    });
+    const tool = getTool(conn, 'bot.usage_summary');
+    const result: any = await tool.execute({ groupBy: 'tool', limit: 50, includeQuestions: false });
+    expect(result.error).toBeUndefined();
+    expect(result.rows.map((r: any) => r.name).sort()).toEqual(['gantri.order_stats', 'gantri.orders_query', 'gantri.update_customer_email']);
+    const ucEmail = result.rows.find((r: any) => r.name === 'gantri.update_customer_email');
+    expect(ucEmail.calls).toBe(1);
+    expect(ucEmail.uniqueUsers).toBe(1);
+  });
+
+  it('groupBy=day buckets by YYYY-MM-DD and sorts newest first', async () => {
+    const { conn } = makeDeps({
+      users: [],
+      callerRole: 'admin',
+      actorUid: 'U_DANNY',
+      maintainerSlackUserId: 'U_DANNY',
+      conversationRows: sampleRows,
+    });
+    const tool = getTool(conn, 'bot.usage_summary');
+    const result: any = await tool.execute({ groupBy: 'day', limit: 50, includeQuestions: false });
+    expect(result.error).toBeUndefined();
+    expect(result.rows.map((r: any) => r.day)).toEqual(['2026-05-14', '2026-05-13', '2026-05-12']);
+    expect(result.rows[0].messages).toBe(2);
+  });
+
+  it('includeQuestions=true returns truncated question snippets', async () => {
+    const longQ = 'a'.repeat(200);
+    const { conn } = makeDeps({
+      users: [],
+      callerRole: 'admin',
+      actorUid: 'U_DANNY',
+      maintainerSlackUserId: 'U_DANNY',
+      conversationRows: [
+        { slackUserId: 'U_DANNY', question: longQ, toolCalls: null, model: 'sonnet', tokensInput: 0, tokensOutput: 0, durationMs: 0, hadError: false, createdAt: '2026-05-14T15:00:00Z' },
+      ],
+    });
+    const tool = getTool(conn, 'bot.usage_summary');
+    const result: any = await tool.execute({ groupBy: 'user', limit: 50, includeQuestions: true });
+    expect(result.rows[0].recentQuestions[0].question).toMatch(/\.\.\.$/);
+    expect(result.rows[0].recentQuestions[0].question.length).toBe(120);
   });
 });

@@ -475,6 +475,8 @@ async function main() {
     new BroadcastConnector({
       slackClient: app.client,
       usersRepo,
+      conversationsRepo,
+      maintainerSlackUserId: env.MAINTAINER_SLACK_USER_ID,
       getActor: () => {
         const a = getActiveActor();
         if (!a) throw new Error('bot.broadcast_notification called without an actor context');

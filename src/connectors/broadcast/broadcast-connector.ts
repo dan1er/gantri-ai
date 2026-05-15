@@ -2,7 +2,9 @@ import { z } from 'zod';
 import type { WebClient } from '@slack/web-api';
 import type { Connector, ToolDef } from '../base/connector.js';
 import { zodToJsonSchema } from '../base/zod-to-json-schema.js';
+import { DateRangeArg, normalizeDateRange } from '../base/date-range.js';
 import type { AuthorizedUsersRepo } from '../../storage/repositories/authorized-users.js';
+import type { ConversationsRepo, ConversationUsageRow } from '../../storage/repositories/conversations.js';
 import type { ActorContext } from '../../orchestrator/orchestrator.js';
 import { logger } from '../../logger.js';
 import { INTRO_MESSAGE } from './intro-message.js';
@@ -35,9 +37,26 @@ const ListUsersArgs = z.object({
 });
 type ListUsersArgs = z.infer<typeof ListUsersArgs>;
 
+const UsageSummaryArgs = z.object({
+  dateRange: DateRangeArg.optional()
+    .describe('Time window in Pacific Time. Defaults to the last 7 days if omitted. Accepts presets (e.g. "last_7_days", "last_30_days") or explicit { startDate, endDate } (YYYY-MM-DD inclusive).'),
+  groupBy: z.enum(['user', 'tool', 'day']).default('user')
+    .describe('"user" (default) → one row per Slack user with their question count, last activity, top tools, errors, tokens. "tool" → one row per tool name with usage count across all users. "day" → one row per day with the daily volume.'),
+  limit: z.number().int().min(1).max(100).default(50)
+    .describe('Max rows to return in the aggregated result. Default 50, max 100.'),
+  includeQuestions: z.boolean().default(false)
+    .describe('When true, the user-grouped response includes the top 5 most recent question snippets per user (truncated to 120 chars). Off by default to keep responses small.'),
+});
+type UsageSummaryArgs = z.infer<typeof UsageSummaryArgs>;
+
 export interface BroadcastConnectorDeps {
   slackClient: WebClient;
   usersRepo: AuthorizedUsersRepo;
+  conversationsRepo: ConversationsRepo;
+  /** The single maintainer's Slack user id (env MAINTAINER_SLACK_USER_ID). The
+   *  usage_summary tool is gated on this — only Danny can see who used the bot
+   *  and what they asked. If unset, usage_summary returns MAINTAINER_NOT_CONFIGURED. */
+  maintainerSlackUserId: string | undefined;
   getActor: () => ActorContext | undefined;
 }
 
@@ -114,7 +133,89 @@ export class BroadcastConnector implements Connector {
       jsonSchema: zodToJsonSchema(ListUsersArgs),
       execute: (args) => this.listUsers(args),
     };
-    return [broadcast, addUser, updateRole, listUsers];
+    const usageSummary: ToolDef<UsageSummaryArgs> = {
+      name: 'bot.usage_summary',
+      description: [
+        'MAINTAINER-ONLY analytics on bot activity from the conversations log. Surfaces who has used the bot, what they asked, which tools fired, errors, and per-day volume.',
+        'Gated on the SINGLE maintainer (MAINTAINER_SLACK_USER_ID env). Not just admin — only the maintainer can see other users\' questions, since they may contain customer PII (emails, order ids, etc.). Non-maintainer callers get FORBIDDEN even if their role is "admin".',
+        'Args: `dateRange` (default last 7 days, accepts presets like "last_7_days" / "last_30_days" or {startDate,endDate}), `groupBy` ("user" default | "tool" | "day"), `limit` (default 50), `includeQuestions` (default false; when true, the user-grouped response includes the 5 most recent question snippets per user truncated to 120 chars).',
+        'Trigger words: "who has used the bot", "bot usage this week", "show me what people asked", "actividad del bot", "quién usó el bot", "bot analytics", "uso del bot última semana".',
+        'Returns: `{ period, groupBy, totalMessages, uniqueUsers, rows: [...], note? }`. Each row shape depends on groupBy. Includes a `note` when the row cap was hit so we know we truncated.',
+      ].join(' '),
+      schema: UsageSummaryArgs as z.ZodType<UsageSummaryArgs>,
+      jsonSchema: zodToJsonSchema(UsageSummaryArgs),
+      execute: (args) => this.usageSummary(args),
+    };
+    return [broadcast, addUser, updateRole, listUsers, usageSummary];
+  }
+
+  private async usageSummary(args: UsageSummaryArgs) {
+    const actor = this.deps.getActor();
+    if (!actor) {
+      return { error: { code: 'NO_ACTOR', message: 'bot.usage_summary requires an active actor.' } };
+    }
+    if (!this.deps.maintainerSlackUserId) {
+      return {
+        error: {
+          code: 'MAINTAINER_NOT_CONFIGURED',
+          message: 'No maintainer Slack user is configured (MAINTAINER_SLACK_USER_ID env var). Bot owner needs to set this before usage_summary can be called.',
+        },
+      };
+    }
+    if (actor.slackUserId !== this.deps.maintainerSlackUserId) {
+      logger.warn({ caller: actor.slackUserId }, 'usage_summary denied: non-maintainer');
+      return {
+        error: {
+          code: 'FORBIDDEN',
+          message: 'bot.usage_summary is restricted to the maintainer (single user). This tool exposes other users\' questions which may contain PII.',
+        },
+      };
+    }
+
+    // Resolve date range — default to last 7 days when omitted.
+    const range = args.dateRange
+      ? normalizeDateRange(args.dateRange)
+      : normalizeDateRange('last_7_days');
+    // Convert YYYY-MM-DD (PT) → ISO timestamps covering the full day in PT.
+    // `gte from 00:00 PT`, `lte to 23:59:59.999 PT`. We use UTC equivalents:
+    // PT is UTC-7 (PDT) or UTC-8 (PST) — `created_at` is stored as UTC, so we
+    // widen by a full day to be safe. The downstream UI quotes the PT range.
+    const from = new Date(`${range.startDate}T00:00:00-08:00`).toISOString();
+    const to = new Date(`${range.endDate}T23:59:59.999-07:00`).toISOString();
+
+    const MAX_ROWS = 5000;
+    const rows = await this.deps.conversationsRepo.loadInRange({ from, to, maxRows: MAX_ROWS });
+    const truncated = rows.length >= MAX_ROWS;
+
+    // Hydrate user emails so the response is human-readable.
+    const allAuthorized = await this.deps.usersRepo.listAll();
+    const emailBySlackId = new Map<string, string | null>();
+    const nameBySlackId = new Map<string, string | null>();
+    for (const u of allAuthorized) {
+      emailBySlackId.set(u.slackUserId, u.email);
+      // `name` is on AuthorizedUser but TS doesn't see it on the type yet — read defensively.
+      nameBySlackId.set(u.slackUserId, (u as { name?: string | null }).name ?? null);
+    }
+
+    let resultRows: unknown[] = [];
+    if (args.groupBy === 'user') {
+      resultRows = aggregateByUser(rows, emailBySlackId, nameBySlackId, args.includeQuestions, args.limit);
+    } else if (args.groupBy === 'tool') {
+      resultRows = aggregateByTool(rows, args.limit);
+    } else {
+      resultRows = aggregateByDay(rows, args.limit);
+    }
+
+    return {
+      period: { startDate: range.startDate, endDate: range.endDate, timezone: 'America/Los_Angeles' },
+      groupBy: args.groupBy,
+      totalMessages: rows.length,
+      uniqueUsers: new Set(rows.map((r) => r.slackUserId)).size,
+      rows: resultRows,
+      ...(truncated
+        ? { note: `Result truncated at ${MAX_ROWS} rows. Narrow the date range for an exact count.` }
+        : {}),
+    };
   }
 
   private async listUsers(args: ListUsersArgs) {
@@ -355,4 +456,147 @@ export class BroadcastConnector implements Connector {
       message: decoratedMessage,
     };
   }
+}
+
+/** Per-user aggregation for `bot.usage_summary` (groupBy='user'). */
+function aggregateByUser(
+  rows: ConversationUsageRow[],
+  emailBySlackId: Map<string, string | null>,
+  nameBySlackId: Map<string, string | null>,
+  includeQuestions: boolean,
+  limit: number,
+): unknown[] {
+  const buckets = new Map<
+    string,
+    {
+      slackUserId: string;
+      messages: number;
+      errors: number;
+      threads: Set<string>;
+      tools: Map<string, number>;
+      tokensInput: number;
+      tokensOutput: number;
+      durations: number[];
+      firstAt: string;
+      lastAt: string;
+      questionSamples: { createdAt: string; question: string }[];
+    }
+  >();
+
+  for (const r of rows) {
+    let b = buckets.get(r.slackUserId);
+    if (!b) {
+      b = {
+        slackUserId: r.slackUserId,
+        messages: 0,
+        errors: 0,
+        threads: new Set(),
+        tools: new Map(),
+        tokensInput: 0,
+        tokensOutput: 0,
+        durations: [],
+        firstAt: r.createdAt,
+        lastAt: r.createdAt,
+        questionSamples: [],
+      };
+      buckets.set(r.slackUserId, b);
+    }
+    b.messages += 1;
+    if (r.hadError) b.errors += 1;
+    if (r.tokensInput) b.tokensInput += r.tokensInput;
+    if (r.tokensOutput) b.tokensOutput += r.tokensOutput;
+    if (typeof r.durationMs === 'number') b.durations.push(r.durationMs);
+    if (r.toolCalls && Array.isArray(r.toolCalls)) {
+      for (const t of r.toolCalls) {
+        if (t?.name) b.tools.set(t.name, (b.tools.get(t.name) ?? 0) + 1);
+      }
+    }
+    if (r.createdAt < b.firstAt) b.firstAt = r.createdAt;
+    if (r.createdAt > b.lastAt) b.lastAt = r.createdAt;
+    if (includeQuestions) {
+      b.questionSamples.push({ createdAt: r.createdAt, question: r.question });
+    }
+  }
+
+  const out = Array.from(buckets.values())
+    .sort((a, b) => b.messages - a.messages)
+    .slice(0, limit)
+    .map((b) => {
+      const topTools = Array.from(b.tools.entries())
+        .sort((a, c) => c[1] - a[1])
+        .slice(0, 5)
+        .map(([name, count]) => ({ name, count }));
+      const meanDurationMs = b.durations.length
+        ? Math.round(b.durations.reduce((s, x) => s + x, 0) / b.durations.length)
+        : null;
+      return {
+        slackUserId: b.slackUserId,
+        email: emailBySlackId.get(b.slackUserId) ?? null,
+        name: nameBySlackId.get(b.slackUserId) ?? null,
+        messages: b.messages,
+        threads: b.threads.size > 0 ? b.threads.size : undefined,
+        errors: b.errors,
+        topTools,
+        tokensInput: b.tokensInput,
+        tokensOutput: b.tokensOutput,
+        meanDurationMs,
+        firstAt: b.firstAt,
+        lastAt: b.lastAt,
+        ...(includeQuestions
+          ? {
+              recentQuestions: b.questionSamples
+                .sort((a, c) => (a.createdAt > c.createdAt ? -1 : 1))
+                .slice(0, 5)
+                .map((q) => ({
+                  createdAt: q.createdAt,
+                  question: q.question.length > 120 ? `${q.question.slice(0, 117)}...` : q.question,
+                })),
+            }
+          : {}),
+      };
+    });
+  return out;
+}
+
+/** Per-tool aggregation for `bot.usage_summary` (groupBy='tool'). */
+function aggregateByTool(rows: ConversationUsageRow[], limit: number): unknown[] {
+  const counts = new Map<string, { calls: number; errors: number; users: Set<string> }>();
+  for (const r of rows) {
+    if (!r.toolCalls || !Array.isArray(r.toolCalls)) continue;
+    for (const t of r.toolCalls) {
+      if (!t?.name) continue;
+      let c = counts.get(t.name);
+      if (!c) {
+        c = { calls: 0, errors: 0, users: new Set() };
+        counts.set(t.name, c);
+      }
+      c.calls += 1;
+      if (t.ok === false) c.errors += 1;
+      c.users.add(r.slackUserId);
+    }
+  }
+  return Array.from(counts.entries())
+    .sort((a, b) => b[1].calls - a[1].calls)
+    .slice(0, limit)
+    .map(([name, c]) => ({ name, calls: c.calls, errors: c.errors, uniqueUsers: c.users.size }));
+}
+
+/** Per-day aggregation for `bot.usage_summary` (groupBy='day'). */
+function aggregateByDay(rows: ConversationUsageRow[], limit: number): unknown[] {
+  const buckets = new Map<string, { day: string; messages: number; users: Set<string>; errors: number }>();
+  for (const r of rows) {
+    const day = r.createdAt.slice(0, 10); // YYYY-MM-DD (UTC) — good enough for daily trend.
+    let b = buckets.get(day);
+    if (!b) {
+      b = { day, messages: 0, users: new Set(), errors: 0 };
+      buckets.set(day, b);
+    }
+    b.messages += 1;
+    if (r.hadError) b.errors += 1;
+    b.users.add(r.slackUserId);
+  }
+  return Array.from(buckets.values())
+    .sort((a, b) => (a.day < b.day ? 1 : -1))
+    .slice(0, limit)
+    .map((b) => ({ day: b.day, messages: b.messages, uniqueUsers: b.users.size, errors: b.errors }));
 }

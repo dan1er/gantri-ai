@@ -420,6 +420,221 @@ export class GantriPorterConnector implements Connector {
   }
 
   /**
+   * Merge two customer accounts. The "old" account's transactions are moved
+   * to the "new" account by Porter's POST /api/admin/users/merge endpoint,
+   * which also soft-deletes the old account (`active=false`/`deletedAt`) and
+   * copies firstName/lastName to the new account ONLY if the new account's
+   * profile is empty.
+   *
+   * Mirrors `runUpdateCustomerEmail`'s two-step confirm: confirm:false
+   * returns a preview (resolves both users by-email, counts orders, checks
+   * for klaviyo conflict); confirm:true POSTs to Porter and audits the
+   * result.
+   *
+   * Klaviyo merge is OUT OF SCOPE for v1 — if both accounts have linked
+   * Klaviyo profiles we surface a warning in the preview but never call
+   * Klaviyo from here.
+   */
+  async runMergeCustomerAccounts(rawArgs: {
+    oldEmail: string;
+    newEmail: string;
+    confirm?: boolean;
+  }): Promise<unknown> {
+    const args = {
+      oldEmail: rawArgs.oldEmail,
+      newEmail: rawArgs.newEmail,
+      confirm: rawArgs.confirm ?? false,
+    };
+    const { writesRepo, usersRepo, getActor } = this.deps;
+    if (!writesRepo || !usersRepo || !getActor) {
+      return { error: { code: 'WRITE_DEPS_NOT_CONFIGURED', message: 'gantri.merge_customer_accounts requires writesRepo + usersRepo + getActor in connector deps.' } };
+    }
+    const actor = getActor();
+    if (!actor) return { error: { code: 'NO_ACTOR', message: 'gantri.merge_customer_accounts requires an active actor.' } };
+    const role = await usersRepo.getRole(actor.slackUserId);
+    if (role !== 'cx' && role !== 'admin') {
+      return { error: { code: 'FORBIDDEN', message: 'gantri.merge_customer_accounts requires role=cx or role=admin.' } };
+    }
+
+    const baseUrl = this.writeBaseUrl();
+    const target = this.writeTargetLabel();
+
+    // 1. Resolve both users via /api/admin/users/by-email. The merge endpoint
+    // doesn't impersonate the customer (it's a direct admin write), so we
+    // don't need an authToken — only userId + klaviyoId + profile fields.
+    // Both accounts may have zero orders; that's a legitimate merge.
+    const oldRes = await this.resolveUserByEmailNoOrders(args.oldEmail, baseUrl, target);
+    if (!oldRes.ok) {
+      if (oldRes.error.code === 'USER_NOT_FOUND_BY_EMAIL') {
+        return { error: { code: 'OLD_USER_NOT_FOUND', message: `No user with email ${args.oldEmail} found in ${target}.` } };
+      }
+      return { error: oldRes.error };
+    }
+
+    const newRes = await this.resolveUserByEmailNoOrders(args.newEmail, baseUrl, target);
+    if (!newRes.ok) {
+      if (newRes.error.code === 'USER_NOT_FOUND_BY_EMAIL') {
+        return { error: { code: 'NEW_USER_NOT_FOUND', message: `No user with email ${args.newEmail} found in ${target}.` } };
+      }
+      return { error: newRes.error };
+    }
+
+    if (oldRes.userId === newRes.userId) {
+      return { error: { code: 'EMAILS_IDENTICAL', message: `Both emails resolve to the same Porter user (id ${oldRes.userId}). Nothing to merge.` } };
+    }
+
+    const oldUserId = oldRes.userId;
+    const newUserId = newRes.userId;
+    const oldFirstName = oldRes.firstName;
+    const oldLastName = oldRes.lastName;
+    const oldKlaviyoId = oldRes.klaviyoId;
+    const newKlaviyoId = newRes.klaviyoId;
+    const oldOrderCount = oldRes.totalOrders;
+
+    // 2. Preview
+    if (!args.confirm) {
+      const customerName = (oldFirstName || oldLastName) ? `${oldFirstName} ${oldLastName}`.trim() : '(unnamed)';
+      const targetPrefix = target === 'staging'
+        ? '_(staging mode — change applies to stage.api.gantri.com only)_\n'
+        : '_(PROD MODE — change applies to live customer data)_\n';
+      const klaviyoConflict = !!oldKlaviyoId && !!newKlaviyoId;
+      const klaviyoWarning = klaviyoConflict
+        ? `\n⚠️ Both accounts have linked Klaviyo profiles (old=${oldKlaviyoId}, new=${newKlaviyoId}). Klaviyo merge is NOT done by this tool — manual reconciliation needed.`
+        : '';
+      const message = `${targetPrefix}About to merge \`${args.oldEmail}\` (${customerName}, *${oldOrderCount} order${oldOrderCount === 1 ? '' : 's'}* + any credits) INTO \`${args.newEmail}\`. Old account will be soft-deleted (\`active=false\`). Profile (firstName/lastName) copied to new account ONLY if new account's profile is empty.${klaviyoWarning}\nReply *yes* to confirm.`;
+      return {
+        kind: 'awaiting_confirmation' as const,
+        target,
+        oldUserId,
+        newUserId,
+        oldEmail: args.oldEmail,
+        newEmail: args.newEmail,
+        ordersToMove: oldOrderCount,
+        klaviyoConflict,
+        message,
+      };
+    }
+
+    // 3. Execute — POST /api/admin/users/merge with the bot's admin token.
+    let resp: any;
+    try {
+      resp = await this.porterFetch<any>({
+        method: 'POST',
+        path: '/api/admin/users/merge',
+        baseUrl,
+        body: { oldEmail: args.oldEmail, newEmail: args.newEmail },
+      });
+    } catch (err: any) {
+      const status = err?.status as number | undefined;
+      const body = err?.body;
+      // Map Porter typed error codes through unchanged when present in the
+      // response body (NEW_ALREADY_SOFT_DELETED, OLD_ALREADY_SOFT_DELETED,
+      // etc.). Fall back to PORTER_ERROR with the raw status otherwise.
+      const code = (body && typeof body === 'object' && typeof (body as any).code === 'string')
+        ? (body as any).code
+        : 'PORTER_ERROR';
+      const message = err instanceof Error ? err.message : String(err);
+      await writesRepo.insert({
+        callerSlackId: actor.slackUserId,
+        action: 'merge_customer_accounts',
+        porterUserId: newUserId,
+        porterOrderId: null,
+        klaviyoProfileId: null,
+        requestPayload: { ...args, oldUserId, newUserId },
+        responsePayload: { error: { code, status, message, body } },
+        status: 'failure',
+        writeTarget: target,
+      }).catch(() => {});
+      logger.warn({ caller: actor.slackUserId, old_user_id: oldUserId, new_user_id: newUserId, error_code: code, status }, 'gantri_merge_accounts_failed');
+      return { error: { code, status, message, body } };
+    }
+
+    // Porter returns: { success, oldUserId, newUserId, ordersMoved,
+    // creditsMoved, userCreditsBalanceMoved, giftCardCreditsBalanceMoved,
+    // profileCopied, oldAccountSoftDeleted, klaviyoIds }.
+    const ordersMoved: number = resp.ordersMoved ?? 0;
+    const creditsMoved: number = resp.creditsMoved ?? 0;
+    const userCreditsBalanceMoved: number = resp.userCreditsBalanceMoved ?? 0;
+    const giftCardCreditsBalanceMoved: number = resp.giftCardCreditsBalanceMoved ?? 0;
+
+    await writesRepo.insert({
+      callerSlackId: actor.slackUserId,
+      action: 'merge_customer_accounts',
+      porterUserId: newUserId,
+      porterOrderId: null,
+      klaviyoProfileId: null,
+      requestPayload: { ...args, oldUserId, newUserId },
+      responsePayload: resp,
+      status: 'success',
+      writeTarget: target,
+    });
+    logger.info({ caller: actor.slackUserId, old_user_id: oldUserId, new_user_id: newUserId, target, orders_moved: ordersMoved }, 'gantri_merge_accounts_succeeded');
+
+    const targetPrefix = target === 'staging' ? '_(staging)_ ' : '_(PROD)_ ';
+    const creditsSummary = (userCreditsBalanceMoved || giftCardCreditsBalanceMoved)
+      ? ` ($${userCreditsBalanceMoved.toFixed(2)} user credits + $${giftCardCreditsBalanceMoved.toFixed(2)} gift card credits)`
+      : '';
+    const message = `${targetPrefix}Done. Moved *${ordersMoved} order${ordersMoved === 1 ? '' : 's'}* and *${creditsMoved} credit ledger row${creditsMoved === 1 ? '' : 's'}*${creditsSummary} from \`${args.oldEmail}\` to \`${args.newEmail}\`. Old account is now inactive.`;
+    return {
+      ok: true as const,
+      target,
+      oldUserId,
+      newUserId,
+      ordersMoved,
+      creditsMoved,
+      userCreditsBalanceMoved,
+      giftCardCreditsBalanceMoved,
+      profileCopied: resp.profileCopied ?? null,
+      oldAccountSoftDeleted: resp.oldAccountSoftDeleted ?? true,
+      klaviyoIds: resp.klaviyoIds ?? null,
+      message,
+    };
+  }
+
+  /**
+   * Variant of resolveUserByEmail that doesn't require the user to have any
+   * orders. Used by merge — both source and destination accounts may have
+   * zero orders (the merge endpoint accepts that). Returns the same shape
+   * minus mostRecentOrderId.
+   */
+  private async resolveUserByEmailNoOrders(
+    email: string,
+    baseUrl: string,
+    target: 'staging' | 'prod',
+  ): Promise<
+    | { ok: true; userId: number; currentEmail: string; klaviyoId: string | null; firstName: string; lastName: string; totalOrders: number }
+    | { ok: false; error: { code: string; message: string; status?: number; body?: unknown } }
+  > {
+    let resp: { account?: any; shop?: { orders?: any[] } };
+    try {
+      resp = await this.porterFetch<{ account?: any; shop?: { orders?: any[] } }>({
+        method: 'GET',
+        path: `/api/admin/users/by-email?email=${encodeURIComponent(email)}`,
+        baseUrl,
+      });
+    } catch (err: any) {
+      if (err?.status === 404) {
+        return { ok: false, error: { code: 'USER_NOT_FOUND_BY_EMAIL', message: `No user with email ${email} found in ${target}.` } };
+      }
+      return { ok: false, error: { code: 'PORTER_ERROR', status: err?.status, message: err?.message ?? String(err), body: err?.body } };
+    }
+    const account = resp?.account ?? {};
+    const userId = account.userId;
+    if (typeof userId !== 'number') {
+      return { ok: false, error: { code: 'PORTER_ERROR', message: `Unexpected /api/admin/users/by-email response: missing account.userId. Body keys: ${Object.keys(resp || {}).join(',')}` } };
+    }
+    return {
+      ok: true,
+      userId,
+      currentEmail: account.email ?? email.toLowerCase().trim(),
+      klaviyoId: account.klaviyoId ?? null,
+      firstName: account.firstName ?? '',
+      lastName: account.lastName ?? '',
+      totalOrders: (resp?.shop?.orders ?? []).length,
+    };
+  }
+
+  /**
    * Resolve a customer by their CURRENT email via /api/admin/users/by-email
    * (Porter PR #5114/#5115). The endpoint returns the same `adminUserInfo`
    * shape the by-id route returns — `{ account, activity, credits, referrals,
@@ -1006,7 +1221,39 @@ function buildPorterTools(conn: GantriPorterConnector): ToolDef[] {
     execute: (args) => conn.runUpdateCustomerEmail(args as UpdateCustomerEmailArgs),
   };
 
-  return [ordersQuery, orderGet, orderStats, updateCustomerEmailTool];
+  const MergeCustomerAccountsArgs = z.object({
+    oldEmail: z
+      .string()
+      .email()
+      .describe("The customer's CURRENT email on the duplicate / soft-to-be-deleted account. This account's transactions + credits will be moved to the newEmail account, then this account is soft-deleted (active=false)."),
+    newEmail: z
+      .string()
+      .email()
+      .describe('The email of the SURVIVING account — the one the customer will keep using. Transactions and credits from the oldEmail account will be reassigned to this user.'),
+    confirm: z
+      .boolean()
+      .default(false)
+      .describe(
+        'Pass true ONLY after the user has explicitly confirmed (e.g. replied "yes" / "si"). On the first call (confirm=false) the tool returns a preview asking for confirmation; do NOT auto-confirm.',
+      ),
+  });
+  type MergeCustomerAccountsArgs = z.infer<typeof MergeCustomerAccountsArgs>;
+  const mergeCustomerAccountsTool: ToolDef<MergeCustomerAccountsArgs> = {
+    name: 'gantri.merge_customer_accounts',
+    description: [
+      'Merge two duplicate Gantri customer accounts. Moves all of `oldEmail`\'s transactions + credit ledger rows onto `newEmail`\'s account, copies firstName/lastName ONLY if the destination is empty, and soft-deletes the old account (active=false). Atomic — Porter wraps the whole thing in a DB transaction.',
+      'CX or ADMIN role only — fails with FORBIDDEN otherwise.',
+      'TWO-STEP CONFIRM: first call without confirm:true returns a preview (both userIds, order count, klaviyo-conflict flag); relay the preview to the user, wait for explicit "yes" / "si" in the NEXT message, then re-call with confirm:true. NEVER auto-confirm.',
+      'Use when CX says: "merge accounts", "cuentas duplicadas", "duplicate account", "she has two accounts", "fusionar cuentas", "Han Nguyen needs his order moved to his new account", "merge old@x.com into new@y.com", "cliente creó cuenta de nuevo con email correcto, mueve los pedidos", or relays a CX ticket about an account dedup.',
+      'Klaviyo merge is NOT done by this tool. If both accounts have linked Klaviyo profiles the preview includes a warning so the operator knows manual reconciliation is needed in Klaviyo.',
+      'When PORTER_WRITE_TARGET=staging (default), writes hit stage.api.gantri.com. When set to prod, writes hit production. Surface the target prominently in the user-facing reply.',
+    ].join(' '),
+    schema: MergeCustomerAccountsArgs as z.ZodType<MergeCustomerAccountsArgs>,
+    jsonSchema: zodToJsonSchema(MergeCustomerAccountsArgs),
+    execute: (args) => conn.runMergeCustomerAccounts(args as MergeCustomerAccountsArgs),
+  };
+
+  return [ordersQuery, orderGet, orderStats, updateCustomerEmailTool, mergeCustomerAccountsTool];
 }
 
 function round2(n: number): number {

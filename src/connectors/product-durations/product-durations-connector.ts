@@ -5,23 +5,44 @@ import type { GrafanaConnector } from '../grafana/grafana-connector.js';
 
 /**
  * `gantri.product_durations` — labor-minute breakdown per product, sourced
- * from `ProductJobBlocks` (the canonical store, covers ~211 active products)
- * instead of `JobTemplates` (legacy, only covers 167).
+ * from a 3-table chain so the answer matches what the running system would
+ * use when it creates Jobs:
  *
- * Two row shapes live in `ProductJobBlocks` per product version:
- *   - type='Part'  → one per part, joined via productPartTemplateId →
- *                    ProductPartTemplates.versionId → Versions.productId.
- *                    Carries `finishBlock` JSON and `printBlock` (text[] of
- *                    JSON strings with `estimatedPrintDuration`).
- *   - type='Stock' → one per product, joined via versionId → Versions directly.
- *                    Carries `stockBlock` JSON (assemble/stage/pack/qcDuration).
+ *   1. `DefaultJobTemplates`    — system-wide fallback defaults, keyed by
+ *      `groupType` (e.g. `stock-job-flush_mount`, `stock-job-floor`) + step + type.
+ *      Used when a per-product duration is missing on `ProductJobBlocks`.
  *
- * Single-product mode returns the full per-part breakdown + stockJobs + totals.
- * List mode returns one row per product, sorted by total labor minutes DESC.
+ *   2. `ProductPartTemplates`   — per-product part metadata, joined into the
+ *      chain via `productPartTemplateId → versionId → Versions.productId`
+ *      for the Part rows.
  *
- * Caveat surfaced on every payload: these are base template durations only —
- * per-SKU variant overrides (e.g. rod-finish color) are NOT applied. Cost-tab
- * style answers diverge here.
+ *   3. `ProductJobBlocks`       — per-product overrides. Two row shapes:
+ *        - type='Part'   → carries `finishBlock` JSON (sandRaw, sandPrimed) +
+ *                          `printBlock` (text[] of JSON strings with
+ *                          `estimatedPrintDuration`).
+ *        - type='Stock'  → carries `stockBlock` JSON (assemble/stage/pack/qc +
+ *                          `groupType`).
+ *
+ * Resolution order per duration field:
+ *     final = ProductJobBlocks.<field> ?? DefaultJobTemplates(groupType,step,type).duration ?? null
+ *
+ * The output exposes a `*MinSource` companion field for each resolved duration
+ * (`'product'` | `'default'` | `'unset'`) so callers can attribute numbers
+ * accurately.
+ *
+ * Stock-side fallback is wired (groupType is explicit in `stockBlock`).
+ *
+ * Finish-side fallback is NOT wired: `finishBlock` only ever stores
+ * `sandRawDuration` + `sandPrimedDuration` per part — prime/paint/qc/stage
+ * keys are not present in the JSON, and `ProductJobBlocks` does not carry a
+ * finish-side `groupType` that we can use to pick a `DefaultJobTemplates` row
+ * unambiguously. Porter computes finish-side defaults at runtime from
+ * `paintedStatus` + `hasBondo` + `material`, business logic this tool does
+ * not replicate. Finish-side prime/paint/qc/stage therefore appear as null
+ * with `source='unset'`.
+ *
+ * Caveat surfaced on every payload: per-SKU variant overrides (e.g.
+ * rod-finish color) are NOT applied. The admin Cost tab may diverge.
  */
 export interface ProductDurationsConnectorDeps {
   grafana: GrafanaConnector;
@@ -48,23 +69,37 @@ type Args = z.infer<typeof Args>;
 // Output types
 // ---------------------------------------------------------------------------
 
+/** Where a resolved duration value came from. */
+export type DurationSource = 'product' | 'default' | 'unset';
+
 interface PartBreakdown {
   partName: string | null;
   sandRawMin: number | null;
+  sandRawMinSource: DurationSource;
   sandPrimedMin: number | null;
+  sandPrimedMinSource: DurationSource;
   primeMin: number | null;
+  primeMinSource: DurationSource;
   paintMin: number | null;
+  paintMinSource: DurationSource;
   finishQcMin: number | null;
+  finishQcMinSource: DurationSource;
   finishStageMin: number | null;
+  finishStageMinSource: DurationSource;
   estimatedPrintDurationMin: number | null;
   printBlockCount: number;
 }
 
 interface StockJobs {
+  groupType: string | null;
   assembleMin: number | null;
+  assembleMinSource: DurationSource;
   stageMin: number | null;
+  stageMinSource: DurationSource;
   packMin: number | null;
+  packMinSource: DurationSource;
   qaQcMin: number | null;
+  qaQcMinSource: DurationSource;
 }
 
 interface Totals {
@@ -100,10 +135,16 @@ interface ListRow {
   productId: number;
   productName: string;
   category: string | null;
+  groupType: string | null;
   partCount: number;
   assembleMin: number | null;
+  assembleMinSource: DurationSource;
   packMin: number | null;
+  packMinSource: DurationSource;
   qaQcMin: number | null;
+  qaQcMinSource: DurationSource;
+  stageMin: number | null;
+  stageMinSource: DurationSource;
   finishSandRawMinSum: number;
   finishSandPrimedMinSum: number;
   totalLaborMin: number;
@@ -127,15 +168,39 @@ interface ErrorResult {
 type Result = SingleResult | ListResult | ErrorResult;
 
 // ---------------------------------------------------------------------------
+// DefaultJobTemplates cache shape
+// ---------------------------------------------------------------------------
+
+/**
+ * Composite key: `${groupType}|${step}|${type}` → duration (or null).
+ *
+ * `null` here means the row exists in `DefaultJobTemplates` but its duration
+ * column is NULL (e.g. Assemble for stock-job-*, where the system expects a
+ * per-product override). A missing key means the (groupType, step, type)
+ * combination has no row at all.
+ */
+export type DefaultJobTemplatesMap = Map<string, number | null>;
+
+/**
+ * Encode the composite key used by `DefaultJobTemplatesMap`. Exposed for
+ * tests so they can populate the map directly without going through SQL.
+ */
+export function djtKey(groupType: string | null | undefined, step: string, type: string): string {
+  return `${groupType ?? ''}|${step}|${type}`;
+}
+
+// ---------------------------------------------------------------------------
 // Connector
 // ---------------------------------------------------------------------------
 
 const CAVEATS = [
+  'Durations resolve from per-product templates first (`ProductJobBlocks`), falling back to system defaults (`DefaultJobTemplates`) indexed by groupType. The `*MinSource` fields tell you which layer each value came from: `product` (per-product override), `default` (system default), or `unset` (no template duration set; the system applies runtime defaults at job creation).',
+  'Stock-side fallback (assemble/stage/pack/qc) IS wired against `DefaultJobTemplates` because `stockBlock.groupType` is explicit. Finish-side prime/paint/qc/stage are NOT in `ProductJobBlocks.finishBlock` and have no per-product groupType key — Porter computes those at runtime from `paintedStatus`+`material`. This tool reports them as null with `source=unset` rather than guessing.',
   'Per-SKU variant overrides (rod-finish color, alternate paint paths, etc.) are NOT applied — these are base template durations.',
   'estimatedPrintDurationMin is derived from gcode estimates and reflects machine time, not human labor.',
 ];
 
-const SOURCE = 'ProductJobBlocks (Published version)';
+const SOURCE = 'ProductJobBlocks (Published version) + DefaultJobTemplates (system defaults)';
 
 export class ProductDurationsConnector implements Connector {
   readonly name = 'product-durations';
@@ -153,7 +218,9 @@ export class ProductDurationsConnector implements Connector {
     const tool: ToolDef<Args, Result> = {
       name: 'gantri.product_durations',
       description: [
-        'Labor-minute breakdown per product from `ProductJobBlocks` — the canonical source of expected job durations (assemble, pack, qc, sand-raw, sand-primed, prime, paint, stage, print).',
+        'Labor-minute breakdown per product. Resolves each duration through the canonical 3-table chain (`DefaultJobTemplates` ← `ProductPartTemplates` ← `ProductJobBlocks`): per-product overrides first, falling back to system defaults keyed by stockBlock `groupType`. Covers assemble, pack, qc, sand-raw, sand-primed, stage, plus machine print time.',
+        '',
+        'Each duration in the response is paired with a `*MinSource` field: `product` | `default` | `unset` — so the LLM can phrase the answer correctly ("per the product template" vs "per system defaults").',
         '',
         'Two modes:',
         '  - Single-product mode: pass `productId` (preferred) OR `productName` (case-insensitive exact match). Returns per-part finishBlock + product-level stockBlock + summed totals.',
@@ -161,9 +228,11 @@ export class ProductDurationsConnector implements Connector {
         '',
         'Use for: "how long does it take to assemble Canopy", "expected job duration for Lune", "labor minutes for X", "cuánto se tarda en ensamblar X", "duración esperada de Y", "labor breakdown for Marea".',
         '',
-        '**DO NOT use `grafana.sql` to read ProductJobBlocks directly.** The two-path join (Part rows via ProductPartTemplates.versionId, Stock rows via pjb.versionId, COALESCE-merged into Versions), the JSON path extraction across finishBlock / stockBlock / printBlock (which is a text[] of JSON strings), and the per-part roll-up are non-trivial and the LLM gets the join wrong every time. Always use this tool.',
+        '**DO NOT use `grafana.sql` to read these tables directly.** The two-path join (Part rows via `ProductPartTemplates.versionId`, Stock rows via `pjb.versionId`, COALESCE-merged into `Versions`), the JSON path extraction across finishBlock / stockBlock / printBlock (which is a text[] of JSON strings), the per-part roll-up, AND the `DefaultJobTemplates` fallback by `(groupType, step, type)` are all non-trivial and the LLM gets the join wrong every time. Always use this tool.',
         '',
         'Coverage caveat: this returns base template durations. Per-SKU variant overrides (rod-finish color, alternate paint paths) are NOT applied — the Cost tab in admin shows variant-specific numbers that may differ.',
+        '',
+        'Finish-side caveat: prime/paint/finishQc/finishStage are not stored in `ProductJobBlocks.finishBlock` and Porter resolves them at runtime from `paintedStatus`+`hasBondo`+`material`. This tool reports them as null with `source=unset` rather than replicating that branching logic incorrectly.',
         '',
         'Error codes returned via `{ error: { code, message?, candidates? } }`:',
         '  - AMBIGUOUS_ARGS — both productId AND productName were passed.',
@@ -194,13 +263,35 @@ export class ProductDurationsConnector implements Connector {
     const fromMs = Date.now() - 86_400_000;
     const toMs = Date.now() + 86_400_000;
 
+    // Load DefaultJobTemplates once per invocation. The table is small (~80
+    // rows in prod) and the fallback layer needs every (groupType, step, type)
+    // combination, so a single SELECT is cheaper than per-product lookups.
+    const defaults = await this.loadDefaults(fromMs, toMs);
+
     if (args.productId == null && args.productName == null) {
-      return this.runList(args, fromMs, toMs);
+      return this.runList(args, fromMs, toMs, defaults);
     }
-    return this.runSingle(args, fromMs, toMs);
+    return this.runSingle(args, fromMs, toMs, defaults);
   }
 
-  private async runSingle(args: Args, fromMs: number, toMs: number): Promise<Result> {
+  private async loadDefaults(fromMs: number, toMs: number): Promise<DefaultJobTemplatesMap> {
+    const sql = `
+SELECT "groupType", step, type, duration
+FROM "DefaultJobTemplates"
+WHERE "groupType" IS NOT NULL
+  AND step IS NOT NULL
+  AND type IS NOT NULL
+`;
+    const { fields, rows } = await this.deps.grafana.runSql({ sql, fromMs, toMs, maxRows: 1000 });
+    return parseDefaultJobTemplatesRows(fields, rows);
+  }
+
+  private async runSingle(
+    args: Args,
+    fromMs: number,
+    toMs: number,
+    defaults: DefaultJobTemplatesMap,
+  ): Promise<Result> {
     let productId: number;
     if (args.productId != null) {
       productId = args.productId;
@@ -238,7 +329,7 @@ export class ProductDurationsConnector implements Connector {
       };
     }
 
-    return rowsToSingle(fields, rows, args.versionStatus);
+    return rowsToSingle(fields, rows, args.versionStatus, defaults);
   }
 
   private async resolveByName(
@@ -289,7 +380,12 @@ LIMIT 50
     };
   }
 
-  private async runList(args: Args, fromMs: number, toMs: number): Promise<ListResult> {
+  private async runList(
+    args: Args,
+    fromMs: number,
+    toMs: number,
+    defaults: DefaultJobTemplatesMap,
+  ): Promise<ListResult> {
     const sql = buildListSql(args);
     const { fields, rows } = await this.deps.grafana.runSql({
       sql,
@@ -297,7 +393,7 @@ LIMIT 50
       toMs,
       maxRows: args.limit + 5,
     });
-    const out = rowsToList(fields, rows);
+    const out = rowsToList(fields, rows, defaults);
     return {
       scope: `${args.status} products with ${args.versionStatus} templates${args.category ? ` in category "${args.category}"` : ''}`,
       count: out.length,
@@ -328,17 +424,18 @@ SELECT
   v.status                                             AS version_status,
   pjb.type                                             AS block_type,
   ppt.name                                             AS part_name,
-  (pjb."finishBlock"->>'sandRawDuration')::int         AS sand_raw_min,
-  (pjb."finishBlock"->>'sandPrimedDuration')::int      AS sand_primed_min,
-  (pjb."finishBlock"->>'primeDuration')::int           AS prime_min,
-  (pjb."finishBlock"->>'paintDuration')::int           AS paint_min,
-  (pjb."finishBlock"->>'qcDuration')::int              AS finish_qc_min,
-  (pjb."finishBlock"->>'stageDuration')::int           AS finish_stage_min,
+  (pjb."finishBlock"->>'sandRawDuration')::numeric     AS sand_raw_min,
+  (pjb."finishBlock"->>'sandPrimedDuration')::numeric  AS sand_primed_min,
+  (pjb."finishBlock"->>'primeDuration')::numeric       AS prime_min,
+  (pjb."finishBlock"->>'paintDuration')::numeric       AS paint_min,
+  (pjb."finishBlock"->>'qcDuration')::numeric          AS finish_qc_min,
+  (pjb."finishBlock"->>'stageDuration')::numeric       AS finish_stage_min,
   pjb."printBlock"                                     AS print_block_raw,
-  (pjb."stockBlock"->>'assembleDuration')::int         AS assemble_min,
-  (pjb."stockBlock"->>'stageDuration')::int            AS stock_stage_min,
-  (pjb."stockBlock"->>'packDuration')::int             AS pack_min,
-  (pjb."stockBlock"->>'qcDuration')::int               AS qa_qc_min
+  pjb."stockBlock"->>'groupType'                       AS stock_group_type,
+  (pjb."stockBlock"->>'assembleDuration')::numeric     AS assemble_min,
+  (pjb."stockBlock"->>'stageDuration')::numeric        AS stock_stage_min,
+  (pjb."stockBlock"->>'packDuration')::numeric         AS pack_min,
+  (pjb."stockBlock"->>'qcDuration')::numeric           AS qa_qc_min
 FROM "ProductJobBlocks" pjb
 LEFT JOIN "ProductPartTemplates" ppt ON ppt.id = pjb."productPartTemplateId"
 JOIN "Versions" v ON v.id = COALESCE(pjb."versionId", ppt."versionId")
@@ -357,6 +454,10 @@ export function buildListSql(args: Args): string {
   // The aggregate sums per part fields (since they apply once per part), and
   // takes MAX of stock fields (each product has only one Stock row, so MAX
   // and MIN produce the same value — MAX is just convenient under GROUP BY).
+  //
+  // We also expose the stock-side groupType (string column) so the JS layer
+  // can apply the DefaultJobTemplates fallback for any stock-side duration
+  // that comes back null from `stockBlock`.
   return `
 WITH per_block AS (
   SELECT
@@ -364,19 +465,22 @@ WITH per_block AS (
     p.name                                             AS product_name,
     p.category                                         AS category,
     pjb.type                                           AS block_type,
+    pjb."stockBlock"->>'groupType'                     AS stock_group_type,
     -- Finish (per part) — summed across parts in the outer query.
-    COALESCE((pjb."finishBlock"->>'sandRawDuration')::int, 0)    AS sand_raw_min,
-    COALESCE((pjb."finishBlock"->>'sandPrimedDuration')::int, 0) AS sand_primed_min,
-    COALESCE((pjb."finishBlock"->>'primeDuration')::int, 0)      AS prime_min,
-    COALESCE((pjb."finishBlock"->>'paintDuration')::int, 0)      AS paint_min,
-    COALESCE((pjb."finishBlock"->>'qcDuration')::int, 0)         AS finish_qc_min,
-    COALESCE((pjb."finishBlock"->>'stageDuration')::int, 0)      AS finish_stage_min,
+    COALESCE((pjb."finishBlock"->>'sandRawDuration')::numeric, 0)    AS sand_raw_min,
+    COALESCE((pjb."finishBlock"->>'sandPrimedDuration')::numeric, 0) AS sand_primed_min,
+    COALESCE((pjb."finishBlock"->>'primeDuration')::numeric, 0)      AS prime_min,
+    COALESCE((pjb."finishBlock"->>'paintDuration')::numeric, 0)      AS paint_min,
+    COALESCE((pjb."finishBlock"->>'qcDuration')::numeric, 0)         AS finish_qc_min,
+    COALESCE((pjb."finishBlock"->>'stageDuration')::numeric, 0)      AS finish_stage_min,
     -- Stock (per product — same value duplicated onto each Part row would
     -- double-count, so we tag with block_type and aggregate conditionally).
-    (pjb."stockBlock"->>'assembleDuration')::int       AS assemble_min,
-    (pjb."stockBlock"->>'stageDuration')::int          AS stock_stage_min,
-    (pjb."stockBlock"->>'packDuration')::int           AS pack_min,
-    (pjb."stockBlock"->>'qcDuration')::int             AS qa_qc_min
+    -- Cast to numeric (not int) so we don't truncate fractional defaults
+    -- like the 1.5-min "stage" duration in DefaultJobTemplates.
+    (pjb."stockBlock"->>'assembleDuration')::numeric   AS assemble_min,
+    (pjb."stockBlock"->>'stageDuration')::numeric      AS stock_stage_min,
+    (pjb."stockBlock"->>'packDuration')::numeric       AS pack_min,
+    (pjb."stockBlock"->>'qcDuration')::numeric         AS qa_qc_min
   FROM "ProductJobBlocks" pjb
   LEFT JOIN "ProductPartTemplates" ppt ON ppt.id = pjb."productPartTemplateId"
   JOIN "Versions" v ON v.id = COALESCE(pjb."versionId", ppt."versionId")
@@ -389,19 +493,26 @@ SELECT
   product_id,
   product_name,
   category,
-  COUNT(*) FILTER (WHERE block_type = 'Part')::int    AS part_count,
-  COALESCE(SUM(sand_raw_min)     FILTER (WHERE block_type = 'Part'), 0)::int AS finish_sand_raw_sum,
-  COALESCE(SUM(sand_primed_min)  FILTER (WHERE block_type = 'Part'), 0)::int AS finish_sand_primed_sum,
-  COALESCE(SUM(prime_min)        FILTER (WHERE block_type = 'Part'), 0)::int AS finish_prime_sum,
-  COALESCE(SUM(paint_min)        FILTER (WHERE block_type = 'Part'), 0)::int AS finish_paint_sum,
-  COALESCE(SUM(finish_qc_min)    FILTER (WHERE block_type = 'Part'), 0)::int AS finish_qc_sum,
-  COALESCE(SUM(finish_stage_min) FILTER (WHERE block_type = 'Part'), 0)::int AS finish_stage_sum,
+  MAX(stock_group_type) FILTER (WHERE block_type = 'Stock')   AS stock_group_type,
+  COUNT(*) FILTER (WHERE block_type = 'Part')::int            AS part_count,
+  COALESCE(SUM(sand_raw_min)     FILTER (WHERE block_type = 'Part'), 0)::numeric AS finish_sand_raw_sum,
+  COALESCE(SUM(sand_primed_min)  FILTER (WHERE block_type = 'Part'), 0)::numeric AS finish_sand_primed_sum,
+  COALESCE(SUM(prime_min)        FILTER (WHERE block_type = 'Part'), 0)::numeric AS finish_prime_sum,
+  COALESCE(SUM(paint_min)        FILTER (WHERE block_type = 'Part'), 0)::numeric AS finish_paint_sum,
+  COALESCE(SUM(finish_qc_min)    FILTER (WHERE block_type = 'Part'), 0)::numeric AS finish_qc_sum,
+  COALESCE(SUM(finish_stage_min) FILTER (WHERE block_type = 'Part'), 0)::numeric AS finish_stage_sum,
   MAX(assemble_min)    FILTER (WHERE block_type = 'Stock') AS assemble_min,
   MAX(stock_stage_min) FILTER (WHERE block_type = 'Stock') AS stock_stage_min,
   MAX(pack_min)        FILTER (WHERE block_type = 'Stock') AS pack_min,
   MAX(qa_qc_min)       FILTER (WHERE block_type = 'Stock') AS qa_qc_min
 FROM per_block
 GROUP BY product_id, product_name, category
+-- The DefaultJobTemplates fallback happens in JS post-aggregation (we'd need
+-- a second LEFT JOIN keyed by groupType+step+type, but the underlying values
+-- are still NULL-able and we'd duplicate the resolution logic between SQL and
+-- the single-mode JS path). Sort by the raw per-product total here; the JS
+-- mapper re-sorts after applying the fallback so the final ordering reflects
+-- resolved totals.
 ORDER BY
   (COALESCE(SUM(sand_raw_min)     FILTER (WHERE block_type = 'Part'), 0)
  + COALESCE(SUM(sand_primed_min)  FILTER (WHERE block_type = 'Part'), 0)
@@ -416,6 +527,72 @@ ORDER BY
   ) DESC
 LIMIT ${limit}
 `;
+}
+
+// ---------------------------------------------------------------------------
+// DefaultJobTemplates parsing + resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * Convert the raw `DefaultJobTemplates` SELECT rows into the composite-key map
+ * the connector uses for fallback lookups.
+ *
+ * Each map entry preserves the row's `duration` column verbatim — including
+ * the case where it is NULL (e.g. Assemble for stock-job-flush_mount, where
+ * the system expects a per-product override and has no global default). A
+ * missing key means the (groupType, step, type) combination has no row.
+ */
+export function parseDefaultJobTemplatesRows(
+  fields: string[],
+  rows: unknown[][],
+): DefaultJobTemplatesMap {
+  const map: DefaultJobTemplatesMap = new Map();
+  const gIdx = fields.indexOf('groupType');
+  const sIdx = fields.indexOf('step');
+  const tIdx = fields.indexOf('type');
+  const dIdx = fields.indexOf('duration');
+  for (const row of rows) {
+    const groupType = row[gIdx] != null ? String(row[gIdx]) : null;
+    const step = row[sIdx] != null ? String(row[sIdx]) : '';
+    const type = row[tIdx] != null ? String(row[tIdx]) : '';
+    if (!groupType || !step || !type) continue;
+    const rawDur = row[dIdx];
+    const duration = rawDur == null ? null : Number(rawDur);
+    const dedupedDuration = duration != null && Number.isFinite(duration) ? duration : null;
+    const key = djtKey(groupType, step, type);
+    // If the same (groupType, step, type) appears multiple times (e.g. per-material
+    // duplicates with identical duration), keep the first non-null we see;
+    // null wins only if we never see a real value.
+    const prior = map.get(key);
+    if (prior === undefined) {
+      map.set(key, dedupedDuration);
+    } else if (prior == null && dedupedDuration != null) {
+      map.set(key, dedupedDuration);
+    }
+  }
+  return map;
+}
+
+/**
+ * Resolve a stock-side duration through the 3-table fallback chain:
+ *   1. product override (from `stockBlock`) — returns `{value, source:'product'}`
+ *   2. DefaultJobTemplates row for (groupType, step, type) with a non-null
+ *      duration — returns `{value, source:'default'}`
+ *   3. neither has a value — returns `{value:null, source:'unset'}`
+ */
+export function resolveStockDuration(
+  productValue: number | null,
+  defaults: DefaultJobTemplatesMap,
+  groupType: string | null,
+  step: string,
+  type: string,
+): { value: number | null; source: DurationSource } {
+  if (productValue != null) return { value: productValue, source: 'product' };
+  if (groupType) {
+    const fallback = defaults.get(djtKey(groupType, step, type));
+    if (fallback != null) return { value: fallback, source: 'default' };
+  }
+  return { value: null, source: 'unset' };
 }
 
 // ---------------------------------------------------------------------------
@@ -497,16 +674,27 @@ function splitPgArrayLiteral(inner: string): string[] {
   return out;
 }
 
-function toIntOrNull(v: unknown): number | null {
+function toNumberOrNull(v: unknown): number | null {
   if (v == null) return null;
   const n = Number(v);
-  return Number.isFinite(n) ? Math.trunc(n) : null;
+  return Number.isFinite(n) ? n : null;
 }
 
-export function rowsToSingle(fields: string[], rows: unknown[][], versionStatus: string): SingleResult {
+export function rowsToSingle(
+  fields: string[],
+  rows: unknown[][],
+  versionStatus: string,
+  defaults: DefaultJobTemplatesMap,
+): SingleResult {
   const idx = (name: string) => fields.indexOf(name);
   const parts: PartBreakdown[] = [];
-  let stockJobs: StockJobs | null = null;
+  let rawStock: {
+    groupType: string | null;
+    assemble: number | null;
+    stockStage: number | null;
+    pack: number | null;
+    qaQc: number | null;
+  } | null = null;
   let productId = 0;
   let productName = '';
   let category: string | null = null;
@@ -528,25 +716,70 @@ export function rowsToSingle(fields: string[], rows: unknown[][], versionStatus:
     if (blockType === 'Part') {
       const printRaw = row[idx('print_block_raw')];
       const print = parsePrintBlock(printRaw);
+
+      // Finish-side values come from finishBlock only. We do NOT fall back to
+      // DefaultJobTemplates here because (a) finishBlock has no groupType key
+      // and (b) Porter's runtime mapping (paintedStatus + hasBondo + material →
+      // finish groupType) is business logic we can't reliably replicate here.
+      const sandRaw = toNumberOrNull(row[idx('sand_raw_min')]);
+      const sandPrimed = toNumberOrNull(row[idx('sand_primed_min')]);
+      const prime = toNumberOrNull(row[idx('prime_min')]);
+      const paint = toNumberOrNull(row[idx('paint_min')]);
+      const finishQc = toNumberOrNull(row[idx('finish_qc_min')]);
+      const finishStage = toNumberOrNull(row[idx('finish_stage_min')]);
+
       parts.push({
         partName: row[idx('part_name')] != null ? String(row[idx('part_name')]) : null,
-        sandRawMin: toIntOrNull(row[idx('sand_raw_min')]),
-        sandPrimedMin: toIntOrNull(row[idx('sand_primed_min')]),
-        primeMin: toIntOrNull(row[idx('prime_min')]),
-        paintMin: toIntOrNull(row[idx('paint_min')]),
-        finishQcMin: toIntOrNull(row[idx('finish_qc_min')]),
-        finishStageMin: toIntOrNull(row[idx('finish_stage_min')]),
+        sandRawMin: sandRaw,
+        sandRawMinSource: sandRaw != null ? 'product' : 'unset',
+        sandPrimedMin: sandPrimed,
+        sandPrimedMinSource: sandPrimed != null ? 'product' : 'unset',
+        primeMin: prime,
+        primeMinSource: prime != null ? 'product' : 'unset',
+        paintMin: paint,
+        paintMinSource: paint != null ? 'product' : 'unset',
+        finishQcMin: finishQc,
+        finishQcMinSource: finishQc != null ? 'product' : 'unset',
+        finishStageMin: finishStage,
+        finishStageMinSource: finishStage != null ? 'product' : 'unset',
         estimatedPrintDurationMin: print.totalMin > 0 || print.count > 0 ? print.totalMin : null,
         printBlockCount: print.count,
       });
     } else if (blockType === 'Stock') {
-      stockJobs = {
-        assembleMin: toIntOrNull(row[idx('assemble_min')]),
-        stageMin: toIntOrNull(row[idx('stock_stage_min')]),
-        packMin: toIntOrNull(row[idx('pack_min')]),
-        qaQcMin: toIntOrNull(row[idx('qa_qc_min')]),
+      rawStock = {
+        groupType: row[idx('stock_group_type')] != null ? String(row[idx('stock_group_type')]) : null,
+        assemble: toNumberOrNull(row[idx('assemble_min')]),
+        stockStage: toNumberOrNull(row[idx('stock_stage_min')]),
+        pack: toNumberOrNull(row[idx('pack_min')]),
+        qaQc: toNumberOrNull(row[idx('qa_qc_min')]),
       };
     }
+  }
+
+  // Apply the DefaultJobTemplates fallback to the stock-side fields. The
+  // canonical mapping (matches Porter's job-creation logic):
+  //   - assemble  → step='Assemble', type='Assemble'
+  //   - stage     → step='Assemble', type='Stage'
+  //   - pack      → step='Pack',     type='Pack'
+  //   - qa qc     → step='QA',       type='QC'
+  let stockJobs: StockJobs | null = null;
+  if (rawStock) {
+    const groupType = rawStock.groupType;
+    const assemble = resolveStockDuration(rawStock.assemble, defaults, groupType, 'Assemble', 'Assemble');
+    const stage = resolveStockDuration(rawStock.stockStage, defaults, groupType, 'Assemble', 'Stage');
+    const pack = resolveStockDuration(rawStock.pack, defaults, groupType, 'Pack', 'Pack');
+    const qaQc = resolveStockDuration(rawStock.qaQc, defaults, groupType, 'QA', 'QC');
+    stockJobs = {
+      groupType,
+      assembleMin: assemble.value,
+      assembleMinSource: assemble.source,
+      stageMin: stage.value,
+      stageMinSource: stage.source,
+      packMin: pack.value,
+      packMinSource: pack.source,
+      qaQcMin: qaQc.value,
+      qaQcMinSource: qaQc.source,
+    };
   }
 
   const totals = computeSingleTotals(parts, stockJobs);
@@ -599,33 +832,58 @@ export function computeSingleTotals(parts: PartBreakdown[], stock: StockJobs | n
   return totals;
 }
 
-export function rowsToList(fields: string[], rows: unknown[][]): ListRow[] {
+export function rowsToList(
+  fields: string[],
+  rows: unknown[][],
+  defaults: DefaultJobTemplatesMap,
+): ListRow[] {
   const idx = (name: string) => fields.indexOf(name);
-  return rows.map((row) => {
+  const mapped = rows.map((row): ListRow => {
     const sandRaw = Number(row[idx('finish_sand_raw_sum')] ?? 0);
     const sandPrimed = Number(row[idx('finish_sand_primed_sum')] ?? 0);
     const prime = Number(row[idx('finish_prime_sum')] ?? 0);
     const paint = Number(row[idx('finish_paint_sum')] ?? 0);
     const finishQc = Number(row[idx('finish_qc_sum')] ?? 0);
     const finishStage = Number(row[idx('finish_stage_sum')] ?? 0);
-    const assemble = toIntOrNull(row[idx('assemble_min')]);
-    const stockStage = toIntOrNull(row[idx('stock_stage_min')]);
-    const pack = toIntOrNull(row[idx('pack_min')]);
-    const qaQc = toIntOrNull(row[idx('qa_qc_min')]);
+
+    const rawAssemble = toNumberOrNull(row[idx('assemble_min')]);
+    const rawStockStage = toNumberOrNull(row[idx('stock_stage_min')]);
+    const rawPack = toNumberOrNull(row[idx('pack_min')]);
+    const rawQaQc = toNumberOrNull(row[idx('qa_qc_min')]);
+    const groupType =
+      row[idx('stock_group_type')] != null ? String(row[idx('stock_group_type')]) : null;
+
+    const assemble = resolveStockDuration(rawAssemble, defaults, groupType, 'Assemble', 'Assemble');
+    const stage = resolveStockDuration(rawStockStage, defaults, groupType, 'Assemble', 'Stage');
+    const pack = resolveStockDuration(rawPack, defaults, groupType, 'Pack', 'Pack');
+    const qaQc = resolveStockDuration(rawQaQc, defaults, groupType, 'QA', 'QC');
+
     const totalLaborMin =
       sandRaw + sandPrimed + prime + paint + finishQc + finishStage +
-      (assemble ?? 0) + (stockStage ?? 0) + (pack ?? 0) + (qaQc ?? 0);
+      (assemble.value ?? 0) + (stage.value ?? 0) + (pack.value ?? 0) + (qaQc.value ?? 0);
     return {
       productId: Number(row[idx('product_id')]),
       productName: String(row[idx('product_name')] ?? ''),
       category: row[idx('category')] != null ? String(row[idx('category')]) : null,
+      groupType,
       partCount: Number(row[idx('part_count')] ?? 0),
-      assembleMin: assemble,
-      packMin: pack,
-      qaQcMin: qaQc,
+      assembleMin: assemble.value,
+      assembleMinSource: assemble.source,
+      packMin: pack.value,
+      packMinSource: pack.source,
+      qaQcMin: qaQc.value,
+      qaQcMinSource: qaQc.source,
+      stageMin: stage.value,
+      stageMinSource: stage.source,
       finishSandRawMinSum: sandRaw,
       finishSandPrimedMinSum: sandPrimed,
       totalLaborMin,
     };
   });
+  // Re-sort by post-fallback total — the SQL ordered by raw per-product
+  // totals, but a product whose stock-side values came in null and got
+  // replaced by DefaultJobTemplates would otherwise show up lower than
+  // it should.
+  mapped.sort((a, b) => b.totalLaborMin - a.totalLaborMin);
+  return mapped;
 }

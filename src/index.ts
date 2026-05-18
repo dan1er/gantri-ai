@@ -14,6 +14,7 @@ import { SalesReportConnector } from './connectors/sales-report/sales-report-con
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import { RollupConnector as _DeprecatedRollupConnector } from './connectors/rollup/rollup-connector.js';
 import { LateOrdersConnector } from './connectors/late-orders/late-orders-connector.js';
+import { ProductDurationsConnector } from './connectors/product-durations/product-durations-connector.js';
 import { NorthbeamConnector } from './connectors/northbeam/northbeam-connector.js';
 import { NorthbeamApiConnector } from './connectors/northbeam-api/connector.js';
 import { NorthbeamApiClient } from './connectors/northbeam-api/client.js';
@@ -164,6 +165,7 @@ async function main() {
   registry.register(new MarketingAnalysisConnector({ nb: nbClient }));
 
   registry.register(new LateOrdersConnector({ grafana }));
+  registry.register(new ProductDurationsConnector({ grafana }));
 
   if (ga4PropertyId && ga4ServiceAccountKey) {
     const ga4 = new Ga4Connector({

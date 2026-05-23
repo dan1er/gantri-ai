@@ -549,13 +549,35 @@ export class GantriPorterConnector implements Connector {
       return { error: { code, status, message, body } };
     }
 
-    // Porter returns: { success, oldUserId, newUserId, ordersMoved,
+    // Porter Phase 2 returns: { success, oldUserId, newUserId, ordersMoved,
     // creditsMoved, userCreditsBalanceMoved, giftCardCreditsBalanceMoved,
-    // profileCopied, oldAccountSoftDeleted, klaviyoIds }.
+    // profileCopied, oldAccountSoftDeleted, klaviyoIds,
+    // stocksMoved, addressesMoved, paymentsMoved, invitesMoved,
+    // productReviewsMoved, npsReviewsMoved, giftsMoved, giftCardsMoved,
+    // giftCodeTransactionsMoved, referralInvitesMoved, amazonCreditLogsMoved,
+    // purchasesCounterMoved, referralsCounterMoved, referredUsersRepointed,
+    // designerMoved, unmergedDueToConflict }.
     const ordersMoved: number = resp.ordersMoved ?? 0;
     const creditsMoved: number = resp.creditsMoved ?? 0;
     const userCreditsBalanceMoved: number = resp.userCreditsBalanceMoved ?? 0;
     const giftCardCreditsBalanceMoved: number = resp.giftCardCreditsBalanceMoved ?? 0;
+    const stocksMoved: number = resp.stocksMoved ?? 0;
+    const addressesMoved: number = resp.addressesMoved ?? 0;
+    const paymentsMoved: number = resp.paymentsMoved ?? 0;
+    const invitesMoved: number = resp.invitesMoved ?? 0;
+    const productReviewsMoved: number = resp.productReviewsMoved ?? 0;
+    const npsReviewsMoved: number = resp.npsReviewsMoved ?? 0;
+    const giftsMoved: number = resp.giftsMoved ?? 0;
+    const giftCardsMoved: number = resp.giftCardsMoved ?? 0;
+    const giftCodeTransactionsMoved: number = resp.giftCodeTransactionsMoved ?? 0;
+    const referralInvitesMoved: number = resp.referralInvitesMoved ?? 0;
+    const amazonCreditLogsMoved: number = resp.amazonCreditLogsMoved ?? 0;
+    const purchasesCounterMoved: number = resp.purchasesCounterMoved ?? 0;
+    const referralsCounterMoved: number = resp.referralsCounterMoved ?? 0;
+    const referredUsersRepointed: number = resp.referredUsersRepointed ?? 0;
+    const designerMoved: boolean = resp.designerMoved === true;
+    const unmergedDueToConflict: Array<{ table: string; oldId: number; newId: number }> =
+      Array.isArray(resp.unmergedDueToConflict) ? resp.unmergedDueToConflict : [];
 
     await writesRepo.insert({
       callerSlackId: actor.slackUserId,
@@ -568,13 +590,60 @@ export class GantriPorterConnector implements Connector {
       status: 'success',
       writeTarget: target,
     });
-    logger.info({ caller: actor.slackUserId, old_user_id: oldUserId, new_user_id: newUserId, target, orders_moved: ordersMoved }, 'gantri_merge_accounts_succeeded');
+    logger.info(
+      {
+        caller: actor.slackUserId, old_user_id: oldUserId, new_user_id: newUserId, target,
+        orders_moved: ordersMoved, stocks_moved: stocksMoved, addresses_moved: addressesMoved,
+        purchases_counter_moved: purchasesCounterMoved, designer_moved: designerMoved,
+        conflicts: unmergedDueToConflict.length,
+      },
+      'gantri_merge_accounts_succeeded',
+    );
+
+    // Build a breakdown line that only mentions tables that actually moved
+    // rows. Skip zero-counts so the message stays readable when the merge
+    // was for a light customer (typical case: orders + maybe an address).
+    const movedParts: string[] = [];
+    if (ordersMoved) movedParts.push(`*${ordersMoved} order${ordersMoved === 1 ? '' : 's'}*`);
+    if (stocksMoved) movedParts.push(`*${stocksMoved} stock${stocksMoved === 1 ? '' : 's'}*`);
+    if (addressesMoved) movedParts.push(`*${addressesMoved} address${addressesMoved === 1 ? '' : 'es'}*`);
+    if (paymentsMoved) movedParts.push(`*${paymentsMoved} payment${paymentsMoved === 1 ? '' : 's'}*`);
+    if (productReviewsMoved) movedParts.push(`*${productReviewsMoved} product review${productReviewsMoved === 1 ? '' : 's'}*`);
+    if (npsReviewsMoved) movedParts.push(`*${npsReviewsMoved} NPS review${npsReviewsMoved === 1 ? '' : 's'}*`);
+    if (giftsMoved) movedParts.push(`*${giftsMoved} gift${giftsMoved === 1 ? '' : 's'}*`);
+    if (giftCardsMoved) movedParts.push(`*${giftCardsMoved} gift card${giftCardsMoved === 1 ? '' : 's'}*`);
+    if (giftCodeTransactionsMoved) movedParts.push(`*${giftCodeTransactionsMoved} gift code txn${giftCodeTransactionsMoved === 1 ? '' : 's'}*`);
+    if (invitesMoved) movedParts.push(`*${invitesMoved} invite${invitesMoved === 1 ? '' : 's'}*`);
+    if (referralInvitesMoved) movedParts.push(`*${referralInvitesMoved} referral invite${referralInvitesMoved === 1 ? '' : 's'}*`);
+    if (amazonCreditLogsMoved) movedParts.push(`*${amazonCreditLogsMoved} Amazon credit log${amazonCreditLogsMoved === 1 ? '' : 's'}*`);
+    if (creditsMoved) movedParts.push(`*${creditsMoved} credit ledger row${creditsMoved === 1 ? '' : 's'}*`);
 
     const targetPrefix = target === 'staging' ? '_(staging)_ ' : '_(PROD)_ ';
     const creditsSummary = (userCreditsBalanceMoved || giftCardCreditsBalanceMoved)
-      ? ` ($${userCreditsBalanceMoved.toFixed(2)} user credits + $${giftCardCreditsBalanceMoved.toFixed(2)} gift card credits)`
+      ? ` (cached balances: $${userCreditsBalanceMoved.toFixed(2)} user credits + $${giftCardCreditsBalanceMoved.toFixed(2)} gift card credits)`
       : '';
-    const message = `${targetPrefix}Done. Moved *${ordersMoved} order${ordersMoved === 1 ? '' : 's'}* and *${creditsMoved} credit ledger row${creditsMoved === 1 ? '' : 's'}*${creditsSummary} from \`${args.oldEmail}\` to \`${args.newEmail}\`. Old account is now inactive.`;
+
+    // Cached counter line — only show when something moved.
+    const counterParts: string[] = [];
+    if (purchasesCounterMoved) counterParts.push(`+${purchasesCounterMoved} purchases counter`);
+    if (referralsCounterMoved) counterParts.push(`+${referralsCounterMoved} referrals counter`);
+    if (referredUsersRepointed) counterParts.push(`${referredUsersRepointed} downstream referral${referredUsersRepointed === 1 ? '' : 's'} re-pointed`);
+    const countersLine = counterParts.length ? `\n• Reconciled: ${counterParts.join(', ')}.` : '';
+
+    const designerLine = designerMoved ? `\n• Designer record moved to the surviving account.` : '';
+
+    const conflictsLine = unmergedDueToConflict.length
+      ? `\n• ⚠️ *Not collapsed (manual reconciliation needed)*: ${unmergedDueToConflict
+          .map((c) => `${c.table} (old #${c.oldId} vs new #${c.newId})`)
+          .join(', ')}.`
+      : '';
+
+    const movedSummary = movedParts.length
+      ? `Moved ${movedParts.join(', ')}${creditsSummary} from \`${args.oldEmail}\` to \`${args.newEmail}\`.`
+      : `No customer-side rows on \`${args.oldEmail}\` needed to be moved.`;
+
+    const message = `${targetPrefix}Done. ${movedSummary}${countersLine}${designerLine}${conflictsLine}\nOld account is now inactive.`;
+
     return {
       ok: true as const,
       target,
@@ -584,6 +653,22 @@ export class GantriPorterConnector implements Connector {
       creditsMoved,
       userCreditsBalanceMoved,
       giftCardCreditsBalanceMoved,
+      stocksMoved,
+      addressesMoved,
+      paymentsMoved,
+      invitesMoved,
+      productReviewsMoved,
+      npsReviewsMoved,
+      giftsMoved,
+      giftCardsMoved,
+      giftCodeTransactionsMoved,
+      referralInvitesMoved,
+      amazonCreditLogsMoved,
+      purchasesCounterMoved,
+      referralsCounterMoved,
+      referredUsersRepointed,
+      designerMoved,
+      unmergedDueToConflict,
       profileCopied: resp.profileCopied ?? null,
       oldAccountSoftDeleted: resp.oldAccountSoftDeleted ?? true,
       klaviyoIds: resp.klaviyoIds ?? null,

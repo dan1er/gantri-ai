@@ -3,7 +3,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 export interface GantriWriteRow {
   id: string;
   callerSlackId: string;
-  action: 'update_customer_email' | 'merge_customer_accounts';
+  action: 'update_customer_email' | 'merge_customer_accounts' | 'delete_list';
   porterUserId: number | null;
   porterOrderId: number | null;
   klaviyoProfileId: string | null;

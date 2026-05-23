@@ -628,6 +628,25 @@ export class KlaviyoApiClient {
     return { id: resp.data.id, name: resp.data.attributes.name };
   }
 
+  /** DELETE /api/lists/{id} — permanently delete a Klaviyo list. The list's
+   *  profile memberships are dropped (the profiles themselves are NOT deleted)
+   *  but everything else (the list resource, automations referencing it as
+   *  trigger/filter, flows scoped to it) is gone with no Klaviyo undelete.
+   *  Throws KlaviyoApiError on 4xx/5xx. 204 No Content on success. */
+  async deleteList(id: string): Promise<void> {
+    const url = `${this.baseUrl}/lists/${encodeURIComponent(id)}`;
+    const t0 = Date.now();
+    const res = await this.fetchImpl(url, { method: 'DELETE', headers: this.headers() });
+    const elapsed = Date.now() - t0;
+    if (!res.ok) {
+      let body: unknown = null;
+      try { body = await res.json(); } catch { body = await res.text().catch(() => null); }
+      logger.warn({ path: `/lists/${id}`, status: res.status, elapsed, body }, 'klaviyo api error');
+      throw new KlaviyoApiError(`DELETE /lists/${id} -> ${res.status}`, res.status, body);
+    }
+    logger.info({ path: `/lists/${id}`, status: res.status, elapsed }, 'klaviyo api ok');
+  }
+
   /** GET /lists — flat id+name directory used by `klaviyo.import_profiles`
    *  to resolve a human-readable list name to the list id required by the
    *  bulk-subscribe job. Klaviyo's `/api/lists` endpoint caps page size at 10

@@ -215,6 +215,7 @@ async function main() {
       deletionsRepo: klaviyoDeletionsRepo,
       pendingRepo: klaviyoPendingRepo,
       usersRepo: klaviyoUsersRepo,
+      writesRepo: gantriWritesRepo,
       getActor: () => getActiveActor(),
       getActiveThread: () => getActiveThread(),
     }));
@@ -235,6 +236,7 @@ async function main() {
       deletionsRepo: klaviyoDeletionsRepo,
       client: klaviyoClient,
       slack: klaviyoSlackAdapter,
+      writesRepo: gantriWritesRepo,
     });
 
     klaviyoImportPoller = new KlaviyoImportPollerJob({

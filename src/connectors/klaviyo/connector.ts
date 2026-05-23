@@ -13,6 +13,7 @@ import type { KlaviyoImportsRepo } from '../../storage/repositories/klaviyo-impo
 import type { KlaviyoDeletionsRepo } from '../../storage/repositories/klaviyo-deletions.js';
 import type { PendingConfirmationsRepo } from '../../storage/repositories/pending-confirmations.js';
 import type { AuthorizedUsersRepo } from '../../storage/repositories/authorized-users.js';
+import type { GantriWritesRepo } from '../../storage/repositories/gantri-writes.js';
 import type { ActorContext, ThreadContext } from '../../orchestrator/orchestrator.js';
 
 /**
@@ -40,6 +41,12 @@ export interface KlaviyoConnectorDeps {
   deletionsRepo: KlaviyoDeletionsRepo;
   pendingRepo: PendingConfirmationsRepo;
   usersRepo: AuthorizedUsersRepo;
+  /** Optional — gates audit-row writes for klaviyo.delete_list. The
+   *  confirmation handler is responsible for the actual insert; the
+   *  connector only needs this for run-time validation that audit storage
+   *  is available before booking a pending confirmation. Wired from
+   *  src/index.ts to the shared GantriWritesRepo. */
+  writesRepo?: GantriWritesRepo;
   getActor: () => ActorContext | undefined;
   getActiveThread: () => ThreadContext | undefined;
 }
@@ -144,6 +151,16 @@ const CreateListArgs = z.object({
     .describe("'single_opt_in' = subscribers go straight to Subscribed; 'double_opt_in' = Klaviyo sends a confirmation email and they only become Subscribed after clicking it. Defaults to Klaviyo's account default (usually double_opt_in)."),
 });
 type CreateListArgs = z.infer<typeof CreateListArgs>;
+
+const DeleteListArgs = z.object({
+  id: z.string().min(1).optional()
+    .describe('Klaviyo list id (alphanumeric, e.g. "Y4Bzqg"). Use when the caller pasted an id directly.'),
+  name: z.string().min(1).max(120).optional()
+    .describe('Exact case-insensitive list name. If multiple lists share this name, the tool returns AMBIGUOUS — caller must specify by id.'),
+}).refine((d) => (d.id ? 1 : 0) + (d.name ? 1 : 0) === 1, {
+  message: 'Provide exactly one of id or name.',
+});
+type DeleteListArgs = z.infer<typeof DeleteListArgs>;
 
 export class KlaviyoConnector implements Connector {
   readonly name = 'klaviyo';
@@ -468,6 +485,20 @@ export class KlaviyoConnector implements Connector {
         execute: (args) => this.runDelete(args as DeleteProfilesArgs),
       } as ToolDef<DeleteProfilesArgs>,
       {
+        name: 'klaviyo.delete_list',
+        description: [
+          'Permanently delete a single Klaviyo list (the list resource itself — the profiles on it are NOT deleted, only their membership in the list).',
+          'ADMIN or MARKETING role only — fails with FORBIDDEN otherwise.',
+          'ALWAYS asks for confirmation — never auto-executes. Returns kind:"awaiting_confirmation" with the resolved list id + name; caller replies "yes" to proceed or "cancel" to abort.',
+          'Destructive and irreversible — Klaviyo provides no undelete for lists, and any automations, flows, or filters referencing this list lose that reference.',
+          'Resolves the target list by EITHER `id` (e.g. "Y4Bzqg") OR `name` (case-insensitive, exact match). When resolving by name and multiple lists share that name, returns error AMBIGUOUS with the matching ids — the caller must re-call with the specific `id` they want.',
+          'Trigger phrases: "delete list", "remove list", "borrar lista", "eliminar lista".',
+        ].join(' '),
+        schema: DeleteListArgs as z.ZodType<DeleteListArgs>,
+        jsonSchema: zodToJsonSchema(DeleteListArgs),
+        execute: (args) => this.runDeleteList(args as DeleteListArgs),
+      } as ToolDef<DeleteListArgs>,
+      {
         name: 'klaviyo.list_lists',
         description: [
           'Enumerate all Klaviyo lists (id + name).',
@@ -581,6 +612,52 @@ export class KlaviyoConnector implements Connector {
       logger.warn({ caller: actor.slackUserId, role }, 'klaviyo_create_list_denied');
       return { error: { code: 'FORBIDDEN', message: 'klaviyo.create_list requires role=admin or role=marketing.' } };
     }
+    // Idempotency guard: Klaviyo's /api/lists POST does NOT enforce name
+    // uniqueness (you can create two lists called "Trade Show Leads" and both
+    // get distinct ids). Users have hit this by re-asking the bot to "create
+    // list X" when X already exists. Pre-check listLists() and reuse an
+    // existing match rather than ever creating a duplicate.
+    try {
+      const existing = await this.client.listLists();
+      const needle = args.name.trim().toLowerCase();
+      const matches = existing.filter((l) => l.name.trim().toLowerCase() === needle);
+      if (matches.length === 1) {
+        const hit = matches[0];
+        logger.info({ caller: actor.slackUserId, list_id: hit.id, list_name: hit.name }, 'klaviyo_list_create_reused_existing');
+        return {
+          ok: true as const,
+          id: hit.id,
+          name: hit.name,
+          already_existed: true,
+          message: `A Klaviyo list named "${hit.name}" already exists; reusing it (id: ${hit.id}). No duplicate was created.`,
+        };
+      }
+      if (matches.length > 1) {
+        // Account already corrupted by prior duplicates — surface the count so
+        // the LLM (and operator) can see it and decide whether to clean up.
+        // Return the most recently-created match (Klaviyo ids sort lexically
+        // by creation, newer at the end), but flag the problem.
+        const sorted = [...matches].sort((a, b) => (a.id > b.id ? 1 : a.id < b.id ? -1 : 0));
+        const winner = sorted[sorted.length - 1];
+        logger.warn(
+          { caller: actor.slackUserId, name: args.name, duplicate_ids: matches.map((m) => m.id) },
+          'klaviyo_list_create_duplicates_detected',
+        );
+        return {
+          ok: true as const,
+          id: winner.id,
+          name: winner.name,
+          already_existed: true,
+          duplicates_count: matches.length,
+          message: `Found ${matches.length} Klaviyo lists named "${winner.name}" — using the most recent one (id: ${winner.id}). No new list was created. (Account has duplicates from prior runs; ids: ${matches.map((m) => m.id).join(', ')}.)`,
+        };
+      }
+    } catch (err: any) {
+      // If the pre-check itself fails (e.g. transient 5xx on /lists), fall
+      // through to the createList path — better to risk a duplicate than to
+      // block the user when Klaviyo is briefly flaky.
+      logger.warn({ err: String(err?.message ?? err), name: args.name }, 'klaviyo_list_create_precheck_failed');
+    }
     try {
       const list = await this.client.createList({ name: args.name, optInProcess: args.opt_in_process });
       logger.info({ caller: actor.slackUserId, list_id: list.id, list_name: list.name }, 'klaviyo_list_created');
@@ -594,6 +671,76 @@ export class KlaviyoConnector implements Connector {
       }
       return { error: { code: 'KLAVIYO_ERROR', message: detail, details: { status } } };
     }
+  }
+
+  private async runDeleteList(args: DeleteListArgs) {
+    const actor = this.deps.getActor();
+    if (!actor) return { error: { code: 'NO_ACTOR', message: 'klaviyo.delete_list requires an active actor.' } };
+    const role = await this.deps.usersRepo.getRole(actor.slackUserId);
+    if (role !== 'admin' && role !== 'marketing') {
+      logger.warn({ caller: actor.slackUserId, role }, 'klaviyo_delete_list_denied');
+      return { error: { code: 'FORBIDDEN', message: 'klaviyo.delete_list requires role=admin or role=marketing.' } };
+    }
+
+    const pending = await this.deps.pendingRepo.countOutstanding(actor.slackUserId);
+    if (pending >= 3) return { error: { code: 'PENDING_LIMIT', message: '3 pending confirmations outstanding; resolve them first.' } };
+
+    // Resolve target list. Both paths hit listLists() — for id, we still need
+    // the name for the preview shown to the user; for name we need the id
+    // to delete by. listLists() is cached 10 min in the client so the cost is
+    // amortized across normal usage.
+    let listId: string | null = null;
+    let listName: string | null = null;
+    try {
+      const lists = await this.deps.client.listLists();
+      if (args.id) {
+        const hit = lists.find((l) => l.id === args.id);
+        if (!hit) {
+          return { error: { code: 'NOT_FOUND', message: `No Klaviyo list with id "${args.id}".` } };
+        }
+        listId = hit.id;
+        listName = hit.name;
+      } else if (args.name) {
+        const needle = args.name.trim().toLowerCase();
+        const matches = lists.filter((l) => l.name.trim().toLowerCase() === needle);
+        if (matches.length === 0) {
+          return { error: { code: 'NOT_FOUND', message: `No Klaviyo list named "${args.name}".` } };
+        }
+        if (matches.length > 1) {
+          return {
+            error: {
+              code: 'AMBIGUOUS',
+              message: `Multiple Klaviyo lists named "${args.name}" (${matches.length}). Re-call with the specific id you want to delete.`,
+              details: { matches: matches.map((m) => ({ id: m.id, name: m.name })) },
+            },
+          };
+        }
+        listId = matches[0].id;
+        listName = matches[0].name;
+      } else {
+        // Zod refinement should have caught this — defensive.
+        return { error: { code: 'INVALID_ARGS', message: 'Provide exactly one of id or name.' } };
+      }
+    } catch (err: any) {
+      return { error: { code: 'KLAVIYO_ERROR', message: String(err?.message ?? err) } };
+    }
+
+    const thread = this.deps.getActiveThread();
+    const pendingRow = await this.deps.pendingRepo.insert({
+      callerSlackId: actor.slackUserId,
+      channelId: thread?.channelId ?? actor.slackChannelId ?? '',
+      threadTs: thread?.threadTs ?? '',
+      kind: 'klaviyo_delete_list',
+      payload: { list_id: listId, list_name: listName },
+    });
+
+    return {
+      kind: 'awaiting_confirmation' as const,
+      confirmation_token: pendingRow.confirmationToken,
+      list_id: listId,
+      list_name: listName,
+      message: `Delete Klaviyo list "${listName}" (id: ${listId})? Reply "yes" to proceed or "cancel" to abort. This cannot be undone — profiles stay but lose their membership in this list, and any automations referencing it break.`,
+    };
   }
 
   private async runDelete(args: DeleteProfilesArgs) {

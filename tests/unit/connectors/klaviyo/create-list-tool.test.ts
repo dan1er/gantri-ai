@@ -4,6 +4,7 @@ import { KlaviyoConnector } from '../../../../src/connectors/klaviyo/connector.j
 interface DepsOpts {
   callerRole?: 'admin' | 'marketing' | 'user' | null;
   createList?: any;
+  listLists?: any;
 }
 
 function makeDeps(opts: DepsOpts = {}) {
@@ -13,7 +14,8 @@ function makeDeps(opts: DepsOpts = {}) {
       // unused but typed
       bulkSubscribeProfiles: vi.fn(), getBulkImportJobStatus: vi.fn(),
       findProfileByEmail: vi.fn(), requestProfileDeletion: vi.fn(),
-      listLists: vi.fn().mockResolvedValue([]),
+      listLists: opts.listLists ?? vi.fn().mockResolvedValue([]),
+      deleteList: vi.fn(),
     } as any,
     importsRepo: { countInFlight: vi.fn(), countInLastHour: vi.fn(), insert: vi.fn(), getById: vi.fn(), getByJobId: vi.fn() } as any,
     deletionsRepo: { countInLastHour: vi.fn(), insert: vi.fn() } as any,
@@ -65,6 +67,8 @@ describe('klaviyo.create_list', () => {
   });
 
   it('NAME_TAKEN error when Klaviyo says duplicate', async () => {
+    // Pre-check returns no match so we fall through to createList, which Klaviyo
+    // rejects with 400 "already exists" — the connector maps that to NAME_TAKEN.
     const err: any = new Error('name already exists');
     err.status = 400;
     const deps = makeDeps({ createList: vi.fn().mockRejectedValue(err) });
@@ -78,5 +82,54 @@ describe('klaviyo.create_list', () => {
     const deps = makeDeps({ createList: vi.fn().mockRejectedValue(err) });
     const r = await getTool(deps).execute({ name: 'X' });
     expect((r as any).error.code).toBe('KLAVIYO_ERROR');
+  });
+
+  it('idempotent — returns already_existed when a list with same name exists', async () => {
+    // Same name (case-insensitive) → reuse, do NOT call createList.
+    const deps = makeDeps({
+      listLists: vi.fn().mockResolvedValue([
+        { id: 'EXISTING1', name: 'My List' },
+        { id: 'OTHER', name: 'Unrelated' },
+      ]),
+    });
+    const r = await getTool(deps).execute({ name: 'my list' });
+    expect((r as any).ok).toBe(true);
+    expect((r as any).id).toBe('EXISTING1');
+    expect((r as any).already_existed).toBe(true);
+    expect((r as any).message).toMatch(/already exists/i);
+    expect(deps.client.createList).not.toHaveBeenCalled();
+  });
+
+  it('creates when no match exists in pre-check', async () => {
+    const deps = makeDeps({
+      listLists: vi.fn().mockResolvedValue([{ id: 'OTHER', name: 'Unrelated' }]),
+    });
+    const r = await getTool(deps).execute({ name: 'Brand New' });
+    expect((r as any).ok).toBe(true);
+    expect(deps.client.createList).toHaveBeenCalledOnce();
+  });
+
+  it('reports duplicates_count when multiple lists share the name', async () => {
+    const deps = makeDeps({
+      listLists: vi.fn().mockResolvedValue([
+        { id: 'DUP1', name: 'My List' },
+        { id: 'DUP2', name: 'My List' },
+        { id: 'DUP3', name: 'My List' },
+      ]),
+    });
+    const r = await getTool(deps).execute({ name: 'My List' });
+    expect((r as any).ok).toBe(true);
+    expect((r as any).already_existed).toBe(true);
+    expect((r as any).duplicates_count).toBe(3);
+    expect(deps.client.createList).not.toHaveBeenCalled();
+  });
+
+  it('falls through to createList if pre-check fails (resilient to transient Klaviyo errors)', async () => {
+    const deps = makeDeps({
+      listLists: vi.fn().mockRejectedValue(new Error('5xx')),
+    });
+    const r = await getTool(deps).execute({ name: 'New' });
+    expect((r as any).ok).toBe(true);
+    expect(deps.client.createList).toHaveBeenCalledOnce();
   });
 });

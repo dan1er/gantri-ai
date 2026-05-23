@@ -3,14 +3,19 @@ import type { KlaviyoApiClient } from '../connectors/klaviyo/client.js';
 import type { KlaviyoImportsRepo } from '../storage/repositories/klaviyo-imports.js';
 import type { KlaviyoDeletionsRepo } from '../storage/repositories/klaviyo-deletions.js';
 import type { PendingConfirmationsRepo, PendingConfirmationRow } from '../storage/repositories/pending-confirmations.js';
+import type { GantriWritesRepo } from '../storage/repositories/gantri-writes.js';
 
 export interface ConfirmationHandlerDeps {
   pendingRepo: PendingConfirmationsRepo;
   importsRepo: KlaviyoImportsRepo;
   deletionsRepo: KlaviyoDeletionsRepo;
-  client: Pick<KlaviyoApiClient, 'bulkSubscribeProfiles' | 'requestProfileDeletion'>;
+  client: Pick<KlaviyoApiClient, 'bulkSubscribeProfiles' | 'requestProfileDeletion' | 'deleteList'>;
   slack: { postMessage(channel: string, text: string, threadTs?: string): Promise<void> };
   sleep?: (ms: number) => Promise<void>;
+  /** Optional — when present, klaviyo_delete_list confirmations append an
+   *  audit row to `gantri_writes` so we have a single place to look up
+   *  destructive Klaviyo actions alongside the other gantri.* writes. */
+  writesRepo?: GantriWritesRepo;
 }
 
 export interface IncomingMessage {
@@ -88,6 +93,7 @@ export class ConfirmationHandler {
     try {
       if (pending.kind === 'klaviyo_import') await this.executeImport(pending, msg);
       else if (pending.kind === 'klaviyo_delete') await this.executeDelete(pending, msg);
+      else if (pending.kind === 'klaviyo_delete_list') await this.executeDeleteList(pending, msg);
     } catch (err: any) {
       logger.error({ pendingId: pending.id, err: String(err?.message ?? err) }, 'klaviyo_confirmation_exec_failed');
       await this.deps.slack.postMessage(
@@ -201,5 +207,63 @@ export class ConfirmationHandler {
       { auditId: audit.id, requested: p.requested.length, found: p.found.length, deleted: deletedCount, failed: failedDetails.length },
       'klaviyo_delete_submitted',
     );
+  }
+
+  /** Execute a confirmed klaviyo_delete_list pending row. Hits Klaviyo's
+   *  DELETE /api/lists/{id}, posts a result message back to the thread, and
+   *  records the attempt in gantri_writes when `writesRepo` is wired. We
+   *  insert the audit row on BOTH success and failure paths so the operator
+   *  can see attempts that hit Klaviyo errors too — matches the audit pattern
+   *  used by gantri.merge_customer_accounts. */
+  private async executeDeleteList(pending: PendingConfirmationRow, msg: IncomingMessage) {
+    const p = pending.payload as { list_id: string; list_name: string };
+    try {
+      await this.deps.client.deleteList(p.list_id);
+      if (this.deps.writesRepo) {
+        await this.deps.writesRepo.insert({
+          callerSlackId: pending.callerSlackId,
+          action: 'delete_list',
+          porterUserId: null,
+          porterOrderId: null,
+          klaviyoProfileId: null,
+          requestPayload: { list_id: p.list_id, list_name: p.list_name },
+          responsePayload: { ok: true },
+          status: 'success',
+          // klaviyo.delete_list always hits the live Klaviyo account — there is no
+          // staging Klaviyo, so we always log this as 'prod'. The other gantri.* writes
+          // toggle on PORTER_WRITE_TARGET because they have a staging Porter; Klaviyo
+          // doesn't.
+          writeTarget: 'prod',
+        }).catch((err) => logger.warn({ err: String(err?.message ?? err), pendingId: pending.id }, 'klaviyo_delete_list_audit_failed'));
+      }
+      await this.deps.slack.postMessage(
+        msg.channelId,
+        `Deleted Klaviyo list "${p.list_name}" (id: ${p.list_id}).`,
+        safeThreadTs(msg.threadTs),
+      );
+      logger.info({ pendingId: pending.id, list_id: p.list_id, list_name: p.list_name, caller: pending.callerSlackId }, 'klaviyo_list_deleted');
+    } catch (err: any) {
+      const status = err?.status as number | undefined;
+      const detail = String(err?.message ?? err);
+      if (this.deps.writesRepo) {
+        await this.deps.writesRepo.insert({
+          callerSlackId: pending.callerSlackId,
+          action: 'delete_list',
+          porterUserId: null,
+          porterOrderId: null,
+          klaviyoProfileId: null,
+          requestPayload: { list_id: p.list_id, list_name: p.list_name },
+          responsePayload: { ok: false, status, error: detail },
+          status: 'failure',
+          writeTarget: 'prod',
+        }).catch((auditErr) => logger.warn({ err: String(auditErr?.message ?? auditErr), pendingId: pending.id }, 'klaviyo_delete_list_audit_failed'));
+      }
+      await this.deps.slack.postMessage(
+        msg.channelId,
+        `Failed to delete Klaviyo list "${p.list_name}" (id: ${p.list_id}): ${detail}`,
+        safeThreadTs(msg.threadTs),
+      );
+      logger.error({ pendingId: pending.id, list_id: p.list_id, status, err: detail }, 'klaviyo_list_delete_failed');
+    }
   }
 }

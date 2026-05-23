@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
-export type PendingKind = 'klaviyo_import' | 'klaviyo_delete' | 'klaviyo_csv_pending';
+export type PendingKind = 'klaviyo_import' | 'klaviyo_delete' | 'klaviyo_csv_pending' | 'klaviyo_delete_list';
 
 export interface PendingConfirmationRow {
   id: string;

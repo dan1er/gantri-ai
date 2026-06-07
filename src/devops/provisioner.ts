@@ -1,6 +1,7 @@
 import type { Job, JobSpec, JobStatus, FrontendRepo } from './types.js';
 import { backendUrl } from './slug.js';
 import type { GithubDispatcher } from './github.js';
+import type { QaseReader } from './qase.js';
 
 export interface VercelReader {
   previewUrlForBranch(repo: FrontendRepo, ref: string): Promise<string>;
@@ -14,6 +15,7 @@ export interface VercelReader {
 export interface ProvisionerDeps {
   gh: GithubDispatcher;
   vercel?: VercelReader;
+  qase?: QaseReader;
 }
 
 export interface JobPatch {

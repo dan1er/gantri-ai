@@ -42,7 +42,8 @@ export interface JobSpec {
   e2e?: {
     scope: 'smoke' | 'both';
     project?: string;          // gantri-e2e Playwright project (marketplace/factoryOs/madeOs)
-    runId?: number | null;
+    runId?: number | null;     // the GitHub Actions run
+    qaseRunId?: number | null; // the Qase TestOps run the bot created up front
     passed?: boolean;
     dispatched?: boolean;      // guards against re-dispatch on a failed state update
   };

@@ -27,10 +27,17 @@ export async function advanceDeployJob(job: Job, deps: ProvisionerDeps): Promise
     }
     if (job.status === 'e2e_running' && !e2e.dispatched) {
       const project = E2E_PROJECT[fes[0]?.repo ?? ''] ?? 'marketplace';
-      await deps.gh.dispatch(E2E_REPO, E2E_WF, 'main', {
+      // Create the Qase run up front so we know its exact URL; qase-trigger
+      // appends the Playwright results to it via qase_run_id.
+      const qaseRunId = deps.qase
+        ? await deps.qase.createRun(`Deploy gate · ${project} · ${e2e.scope}`)
+        : null;
+      const inputs: Record<string, string> = {
         project, scope: e2e.scope === 'both' ? 'all' : 'smoke', marker: job.id,
-      });
-      return { spec: { ...job.spec, e2e: { ...e2e, dispatched: true, project } } };
+      };
+      if (qaseRunId) inputs.qase_run_id = String(qaseRunId);
+      await deps.gh.dispatch(E2E_REPO, E2E_WF, 'main', inputs);
+      return { spec: { ...job.spec, e2e: { ...e2e, dispatched: true, project, qaseRunId } } };
     }
     if (job.status === 'e2e_running' && e2e.dispatched && e2e.runId == null) {
       const runId = await deps.gh.findRunByMarker(E2E_REPO, E2E_WF, job.id);

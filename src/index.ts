@@ -55,6 +55,7 @@ import { GithubDispatcher } from './devops/github.js';
 import { advancePreviewJob } from './devops/provisioner.js';
 import { JobsRunner } from './devops/jobs-runner.js';
 import { VercelClient } from './devops/vercel.js';
+import { QaseClient } from './devops/qase.js';
 import { registerPreviewCommand } from './slack/devops/preview-command.js';
 import { advanceDeployJob } from './devops/deploy-provisioner.js';
 import { registerDeployCommand } from './slack/devops/deploy-command.js';
@@ -443,6 +444,8 @@ async function main() {
   const vercel = vercelToken && env.VERCEL_TEAM_ID
     ? new VercelClient({ token: vercelToken, teamId: env.VERCEL_TEAM_ID })
     : null;
+  const qaseToken = env.QASE_API_TOKEN ?? (await readVaultSecret(supabase, 'QASE_API_TOKEN').catch(() => null));
+  const qase = qaseToken ? new QaseClient(qaseToken) : null;
 
   const { app, receiver } = buildSlackApp({
     orchestrator,
@@ -643,7 +646,7 @@ async function main() {
 
   if (devopsEnabled && gh) {
     const jobsRunner = new JobsRunner({
-      repo: jobsRepo, slack: app.client, gh, vercel: vercel ?? undefined,
+      repo: jobsRepo, slack: app.client, gh, vercel: vercel ?? undefined, qase: qase ?? undefined,
       advance: (job, d) => (job.kind === 'deploy' ? advanceDeployJob(job, d) : advancePreviewJob(job, d)),
     });
     jobsRunner.start();

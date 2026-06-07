@@ -41,7 +41,10 @@ function renderDeploy(job: Job): unknown[] {
     const run = e.runId
       ? `<https://github.com/gantri/gantri-e2e/actions/runs/${e.runId}|GitHub run>`
       : '_dispatching…_';
-    blocks.push(section(`🧪 E2E gate (${scope}) — ${run} · <https://app.qase.io/run/GANTRI|Qase> — deploy waits for green`));
+    const qase = e.qaseRunId
+      ? `<https://app.qase.io/run/GANTRI/${e.qaseRunId}|Qase>`
+      : '<https://app.qase.io/run/GANTRI|Qase>';
+    blocks.push(section(`🧪 E2E gate (${scope}) — ${run} · ${qase} — deploy waits for green`));
   }
   const b = job.spec.deployBackend;
   if (b) {

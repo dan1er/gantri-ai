@@ -64,7 +64,7 @@ export class JobsRunner {
   private async advanceOne(job: Job): Promise<void> {
     let patch: JobPatch;
     try {
-      patch = await this.deps.advance(job, { gh: this.deps.gh, vercel: this.deps.vercel });
+      patch = await this.deps.advance(job, { gh: this.deps.gh, vercel: this.deps.vercel, qase: this.deps.qase });
     } catch (err) {
       patch = { status: 'failed', error: String((err as Error)?.message ?? err).slice(0, 300) };
     }
@@ -87,7 +87,9 @@ export class JobsRunner {
       // The E2E run id lands a tick after e2e_running — post the run links then.
       const newRunId = updated.spec.e2e?.runId;
       if (updated.kind === 'deploy' && newRunId && !job.spec.e2e?.runId) {
-        const note = `🧪 Running E2E gate — <https://github.com/gantri/gantri-e2e/actions/runs/${newRunId}|GitHub run> · <https://app.qase.io/run/GANTRI|Qase>`;
+        const qaseId = updated.spec.e2e?.qaseRunId;
+        const qase = qaseId ? `https://app.qase.io/run/GANTRI/${qaseId}` : 'https://app.qase.io/run/GANTRI';
+        const note = `🧪 Running E2E gate — <https://github.com/gantri/gantri-e2e/actions/runs/${newRunId}|GitHub run> · <${qase}|Qase>`;
         await this.deps.slack.chat
           .postMessage({ channel: job.channelId, thread_ts: job.messageTs, text: note })
           .catch((err) => logger.warn({ jobId: job.id, err: String((err as Error)?.message ?? err) }, 'devops e2e thread note failed'));

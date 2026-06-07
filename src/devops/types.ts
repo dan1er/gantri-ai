@@ -4,6 +4,7 @@ export type FrontendRepo = 'mantle' | 'core' | 'made';
 
 export type JobStatus =
   | 'pending'
+  | 'e2e_running'
   | 'backend_running'
   | 'frontend_running'
   | 'ready'
@@ -36,6 +37,8 @@ export interface JobSpec {
   // Deploy jobs (kind = 'deploy') ship tags to production.
   deployBackend?: DeployItem;
   deployFrontends?: DeployItem[];
+  // Pre-deploy E2E gate (deploy jobs). Absent = skipped. One gantri-e2e ci.yml run (all projects).
+  e2e?: { scope: 'smoke' | 'both'; runId?: number | null; passed?: boolean };
 }
 
 export interface Job {

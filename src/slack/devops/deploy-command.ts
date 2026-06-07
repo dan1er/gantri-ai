@@ -49,6 +49,19 @@ function feSelects() {
   return FE.map((f) => tagSelect(f.block, f.action, `${f.repo} — deploy tag (optional)`, true));
 }
 
+function e2eSelect() {
+  const opt = (text: string, value: string) => ({ text: { type: 'plain_text' as const, text }, value });
+  return {
+    type: 'input', block_id: 'e2e_block', optional: false,
+    label: { type: 'plain_text', text: 'E2E before deploy' },
+    element: {
+      type: 'static_select', action_id: 'e2e_input',
+      initial_option: opt('Smoke (default)', 'smoke'),
+      options: [opt('Smoke (default)', 'smoke'), opt('Smoke + Regression', 'both'), opt('Skip', 'skip')],
+    },
+  };
+}
+
 function backendModal() {
   return {
     type: 'modal' as const, callback_id: 'deploy_backend_submit',
@@ -62,7 +75,7 @@ function frontendModal() {
     type: 'modal' as const, callback_id: 'deploy_frontend_submit',
     title: { type: 'plain_text' as const, text: 'Deploy frontend' },
     submit: { type: 'plain_text' as const, text: 'Deploy' },
-    blocks: feSelects(),
+    blocks: [...feSelects(), e2eSelect()],
   };
 }
 function fullstackModal() {
@@ -70,12 +83,17 @@ function fullstackModal() {
     type: 'modal' as const, callback_id: 'deploy_fullstack_submit',
     title: { type: 'plain_text' as const, text: 'Deploy full-stack' },
     submit: { type: 'plain_text' as const, text: 'Deploy' },
-    blocks: [tagSelect('d_be_block', 'd_be_input', 'porter — deploy tag'), ...feSelects()],
+    blocks: [tagSelect('d_be_block', 'd_be_input', 'porter — deploy tag'), ...feSelects(), e2eSelect()],
   };
 }
 
 type ViewState = { state: { values: Record<string, Record<string, { selected_option?: { value: string } }>> } };
 const sel = (v: ViewState, block: string, action: string) => v.state.values[block]?.[action]?.selected_option?.value ?? '';
+
+function e2eSpec(v: ViewState): { e2e?: { scope: 'smoke' | 'both' } } {
+  const c = sel(v, 'e2e_block', 'e2e_input');
+  return c === 'smoke' || c === 'both' ? { e2e: { scope: c } } : {};
+}
 
 async function resolveDeployItem(gh: GithubDispatcher, repo: string, tag: string, isBackend: boolean): Promise<DeployItem | null> {
   const tags = await gh.listDeployTags(repo);
@@ -99,7 +117,7 @@ async function postErr(deps: DeployCommandDeps, label: string, requestedBy: stri
 
 async function createDeployAndPost(
   deps: DeployCommandDeps, target: 'backend' | 'frontend' | 'fullstack',
-  spec: { deployBackend?: DeployItem; deployFrontends?: DeployItem[] }, requestedBy: string,
+  spec: { deployBackend?: DeployItem; deployFrontends?: DeployItem[]; e2e?: { scope: 'smoke' | 'both' } }, requestedBy: string,
 ) {
   const job = await deps.repo.create({ kind: 'deploy', target, spec, requestedBy, channelId: deps.opsChannelId });
   const posted = await deps.slack.chat.postMessage({
@@ -111,12 +129,13 @@ async function createDeployAndPost(
 const PROD_DOMAIN: Record<string, string> = { mantle: 'www.gantri.com', core: 'admin.gantri.com', made: 'made.gantri.com' };
 const REPO_NAME: Record<string, string> = { mantle: 'Marketplace', core: 'Factoryos', made: 'Madeos' };
 
-function confirmBlocks(target: string, spec: { deployBackend?: DeployItem; deployFrontends?: DeployItem[] }, skipped: string[]): unknown[] {
+function confirmBlocks(target: string, spec: { deployBackend?: DeployItem; deployFrontends?: DeployItem[]; e2e?: { scope: 'smoke' | 'both' } }, skipped: string[]): unknown[] {
   const lines: string[] = [];
   if (spec.deployBackend) lines.push(`• *Porter* \`${spec.deployBackend.tag}\` → api.gantri.com`);
   for (const f of spec.deployFrontends ?? []) {
     lines.push(`• *${REPO_NAME[f.repo ?? ''] ?? f.repo}* \`${f.tag}\` → ${PROD_DOMAIN[f.repo ?? ''] ?? 'production'}`);
   }
+  lines.push(`🧪 *E2E gate:* ${spec.e2e ? (spec.e2e.scope === 'both' ? 'Smoke + Regression' : 'Smoke') + ' (runs before deploy)' : '_skipped_'}`);
   const blocks: unknown[] = [
     { type: 'section', text: { type: 'mrkdwn', text: `:warning: *Deploy to PRODUCTION?*\n${lines.join('\n')}` } },
   ];
@@ -137,7 +156,7 @@ function confirmBlocks(target: string, spec: { deployBackend?: DeployItem; deplo
 }
 
 /** Per repo, earlier (lower PR#) tags that haven't been deployed and are being skipped. */
-async function findSkipped(deps: DeployCommandDeps, spec: { deployBackend?: DeployItem; deployFrontends?: DeployItem[] }): Promise<string[]> {
+async function findSkipped(deps: DeployCommandDeps, spec: { deployBackend?: DeployItem; deployFrontends?: DeployItem[]; e2e?: { scope: 'smoke' | 'both' } }): Promise<string[]> {
   const jobs = await deps.repo.listDeployJobs();
   const usedFor = (repo: string): Set<string> => {
     const s = new Set<string>();
@@ -164,7 +183,7 @@ async function findSkipped(deps: DeployCommandDeps, spec: { deployBackend?: Depl
 
 async function postConfirm(
   deps: DeployCommandDeps, userId: string, target: string,
-  spec: { deployBackend?: DeployItem; deployFrontends?: DeployItem[] },
+  spec: { deployBackend?: DeployItem; deployFrontends?: DeployItem[]; e2e?: { scope: 'smoke' | 'both' } },
 ): Promise<void> {
   const skipped = await findSkipped(deps, spec).catch(() => [] as string[]);
   await deps.slack.chat
@@ -241,7 +260,7 @@ export function registerDeployCommand(app: App, deps: DeployCommandDeps): void {
     try {
       const fes = await resolveFeItems(deps.gh, view as any);
       if (fes.length === 0) throw new Error('pick at least one frontend tag');
-      await postConfirm(deps, body.user.id, 'frontend', { deployFrontends: fes });
+      await postConfirm(deps, body.user.id, 'frontend', { deployFrontends: fes, ...e2eSpec(view as any) });
     } catch (err) {
       await postErr(deps, 'Frontend', body.user.id, err);
     }
@@ -252,7 +271,7 @@ export function registerDeployCommand(app: App, deps: DeployCommandDeps): void {
       const be = await resolveDeployItem(deps.gh, 'porter', sel(view as any, 'd_be_block', 'd_be_input'), true);
       if (!be) throw new Error('porter tag not found');
       const fes = await resolveFeItems(deps.gh, view as any);
-      await postConfirm(deps, body.user.id, 'fullstack', { deployBackend: be, deployFrontends: fes });
+      await postConfirm(deps, body.user.id, 'fullstack', { deployBackend: be, deployFrontends: fes, ...e2eSpec(view as any) });
     } catch (err) {
       await postErr(deps, 'Full-stack', body.user.id, err);
     }

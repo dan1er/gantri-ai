@@ -98,4 +98,15 @@ export class GithubDispatcher {
       .sort((a, b) => (b.pr ?? 0) - (a.pr ?? 0))
       .slice(0, limit);
   }
+
+  /** Most recent workflow_dispatch run for a workflow (poll a dispatched run that has no marker). */
+  async findLatestRun(repo: string, workflow: string): Promise<number | null> {
+    const res = await this.fetch(
+      `${this.base(repo)}/actions/workflows/${workflow}/runs?event=workflow_dispatch&per_page=1`,
+      { headers: this.headers() },
+    );
+    if (!res.ok) throw new Error(`list runs failed: ${res.status}`);
+    const body = (await res.json()) as { workflow_runs: { id: number }[] };
+    return body.workflow_runs[0]?.id ?? null;
+  }
 }

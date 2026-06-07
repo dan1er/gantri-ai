@@ -4,6 +4,8 @@ import type { ProvisionerDeps, JobPatch } from './provisioner.js';
 const PORTER = 'porter';
 const PROD_WF = 'prod-deploy.yml';
 const PROD_API = 'https://api.gantri.com';
+const E2E_REPO = 'gantri-e2e';
+const E2E_WF = 'ci.yml';
 
 /**
  * Advance a `deploy` job: ship the chosen tags to production. Backend goes
@@ -13,6 +15,27 @@ const PROD_API = 'https://api.gantri.com';
 export async function advanceDeployJob(job: Job, deps: ProvisionerDeps): Promise<JobPatch> {
   const b = job.spec.deployBackend;
   const fes = job.spec.deployFrontends ?? [];
+  const e2e = job.spec.e2e;
+
+  // E2E gate — runs before any deploy; passing hands off to the deploy phase (status 'pending').
+  if (e2e?.scope && e2e.passed !== true) {
+    if (job.status === 'pending') {
+      await deps.gh.dispatch(E2E_REPO, E2E_WF, 'main', { scope: e2e.scope });
+      return { status: 'e2e_running' };
+    }
+    if (job.status === 'e2e_running' && e2e.runId == null) {
+      const runId = await deps.gh.findLatestRun(E2E_REPO, E2E_WF);
+      return runId == null ? {} : { spec: { ...job.spec, e2e: { ...e2e, runId } } };
+    }
+    if (job.status === 'e2e_running' && e2e.runId != null) {
+      const state = await deps.gh.getRunState(E2E_REPO, e2e.runId);
+      if (state === 'running') return {};
+      if (state === 'failed') {
+        return { status: 'failed', error: 'E2E gate failed — deploy blocked', spec: { ...job.spec, e2e: { ...e2e, passed: false } } };
+      }
+      return { status: 'pending', spec: { ...job.spec, e2e: { ...e2e, passed: true } } };
+    }
+  }
 
   // Backend half (backend + fullstack)
   if ((job.target === 'backend' || job.target === 'fullstack') && b && !b.url) {

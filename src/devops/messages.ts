@@ -1,7 +1,7 @@
 import type { Job, JobStatus } from './types.js';
 
 const ICON: Record<JobStatus, string> = {
-  pending: '⏳', backend_running: '⏳', frontend_running: '⏳',
+  pending: '⏳', e2e_running: '🧪', backend_running: '⏳', frontend_running: '⏳',
   ready: '✅', failed: '✗', torn_down: '🧹',
 };
 
@@ -35,6 +35,9 @@ function renderDeploy(job: Job): unknown[] {
     return lines.join('\n');
   };
   const blocks: unknown[] = [section(header)];
+  if (job.spec.e2e && job.status === 'e2e_running') {
+    blocks.push(section(`🧪 Running E2E gate (${job.spec.e2e.scope === 'both' ? 'smoke + regression' : 'smoke'})… deploy waits for green`));
+  }
   const b = job.spec.deployBackend;
   if (b) {
     blocks.push(section(item('Porter', b.tag, 'https://api.gantri.com', b.url,

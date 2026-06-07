@@ -46,15 +46,23 @@ function renderDeploy(job: Job): unknown[] {
       : '<https://app.qase.io/run/GANTRI|Qase>';
     blocks.push(section(`🧪 E2E gate (${scope}) — ${run} · ${qase} — deploy waits for green`));
   }
+  // Status-aware "pending" text: a component isn't "deploying" until its own
+  // phase — during the E2E gate or while waiting on the backend it says so.
+  const pendText = (url: string | undefined, deployStatus: JobStatus): string | undefined => {
+    if (url) return undefined;
+    if (job.status === deployStatus) return 'deploying…';
+    if (job.status === 'e2e_running') return 'waiting for E2E';
+    if (job.status === 'backend_running') return 'waiting for backend';
+    return 'queued';
+  };
   const b = job.spec.deployBackend;
   if (b) {
-    blocks.push(section(item('Porter', b.tag, 'https://api.gantri.com', b.url,
-      job.status === 'backend_running' ? 'deploying…' : undefined)));
+    blocks.push(section(item('Porter', b.tag, 'https://api.gantri.com', b.url, pendText(b.url, 'backend_running'))));
   }
   for (const f of job.spec.deployFrontends ?? []) {
     const name = REPO_DISPLAY[f.repo ?? ''] ?? f.repo ?? 'frontend';
     blocks.push(section(item(name, f.tag, PROD_URL[f.repo ?? ''] ?? 'production', f.url,
-      f.url ? undefined : 'deploying…', f.deploymentUrl)));
+      pendText(f.url, 'frontend_running'), f.deploymentUrl)));
   }
   if (job.status === 'failed') {
     const e = job.spec.e2e;

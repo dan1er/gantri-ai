@@ -26,36 +26,30 @@ export function renderJobBlocks(job: Job): unknown[] {
   const header = `${icon} ${titleTarget} preview — requested by <@${job.requestedBy}>`;
 
   const showUrls = job.status === 'ready' || job.status === 'torn_down';
-  const sections: string[] = [];
+  const section = (text: string) => ({ type: 'section', text: { type: 'mrkdwn', text } });
+  const tearDownButton = {
+    type: 'actions',
+    elements: [{
+      type: 'button', text: { type: 'plain_text', text: 'Tear down' },
+      style: 'danger', action_id: 'preview_teardown', value: job.id,
+    }],
+  };
+
+  const blocks: unknown[] = [section(header)];
   if (job.spec.backend) {
     const b = job.spec.backend;
-    sections.push(componentBlock('Porter', b.slug, b.link, showUrls ? b.url : undefined,
-      job.status === 'backend_running' ? 'provisioning…' : undefined));
+    blocks.push(section(componentBlock('Porter', b.slug, b.link, showUrls ? b.url : undefined,
+      job.status === 'backend_running' ? 'provisioning…' : undefined)));
   }
+  // Tear down sits right after Porter, before the frontends.
+  if (job.status === 'ready') blocks.push(tearDownButton);
   for (const f of job.spec.frontends ?? []) {
-    sections.push(componentBlock(REPO_DISPLAY[f.repo] ?? f.repo, f.ref, f.link,
+    blocks.push(section(componentBlock(REPO_DISPLAY[f.repo] ?? f.repo, f.ref, f.link,
       showUrls ? f.url : undefined,
       job.status === 'frontend_running' && !f.url ? 'building…' : undefined,
-      showUrls ? f.deploymentUrl : undefined));
+      showUrls ? f.deploymentUrl : undefined)));
   }
-  if (job.status === 'failed' && job.error) sections.push(`*Error:* ${job.error}`);
-
-  const blocks: unknown[] = [
-    { type: 'section', text: { type: 'mrkdwn', text: header } },
-    { type: 'section', text: { type: 'mrkdwn', text: sections.join('\n\n') || '_starting…_' } },
-  ];
-
-  if (job.status === 'ready') {
-    blocks.push({
-      type: 'actions',
-      elements: [{
-        type: 'button',
-        text: { type: 'plain_text', text: 'Tear down' },
-        style: 'danger',
-        action_id: 'preview_teardown',
-        value: job.id,
-      }],
-    });
-  }
+  if (job.status === 'failed' && job.error) blocks.push(section(`*Error:* ${job.error}`));
+  if (blocks.length === 1) blocks.push(section('_starting…_'));
   return blocks;
 }

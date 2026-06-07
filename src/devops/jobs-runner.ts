@@ -15,7 +15,13 @@ function statusNote(job: Job): string | null {
     case 'backend_running': return job.kind === 'deploy' ? '🚀 Deploying backend…' : '🛠️ Provisioning backend…';
     case 'frontend_running': return job.kind === 'deploy' ? '🚀 Deploying frontend(s)…' : '🌐 Building frontend(s)…';
     case 'ready': return job.kind === 'deploy' ? '✅ Deployed to production' : '✅ Preview ready';
-    case 'failed': return `✗ Failed${job.error ? `: ${job.error}` : ''}`;
+    case 'failed': {
+      const e = job.spec.e2e;
+      if (e?.passed === false && e.qaseRunId) {
+        return `🚫 Deploy blocked — E2E gate failed. <https://app.qase.io/run/GANTRI/dashboard/${e.qaseRunId}|Check results in Qase>`;
+      }
+      return `✗ Failed${job.error ? `: ${job.error}` : ''}`;
+    }
     case 'torn_down': return '🧹 Torn down';
     default: return null;
   }

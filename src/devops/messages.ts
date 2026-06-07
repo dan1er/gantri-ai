@@ -56,7 +56,15 @@ function renderDeploy(job: Job): unknown[] {
     blocks.push(section(item(name, f.tag, PROD_URL[f.repo ?? ''] ?? 'production', f.url,
       f.url ? undefined : 'deploying…', f.deploymentUrl)));
   }
-  if (job.status === 'failed' && job.error) blocks.push(section(`*Error:* ${job.error}`));
+  if (job.status === 'failed') {
+    const e = job.spec.e2e;
+    if (e?.passed === false && e.qaseRunId) {
+      const ghRun = e.runId ? ` · <https://github.com/gantri/gantri-e2e/actions/runs/${e.runId}|GitHub run>` : '';
+      blocks.push(section(`🚫 *Deploy blocked — E2E gate failed.* <https://app.qase.io/run/GANTRI/dashboard/${e.qaseRunId}|Check results in Qase>${ghRun}`));
+    } else if (job.error) {
+      blocks.push(section(`*Error:* ${job.error}`));
+    }
+  }
   if (blocks.length === 1) blocks.push(section('_starting…_'));
   return blocks;
 }

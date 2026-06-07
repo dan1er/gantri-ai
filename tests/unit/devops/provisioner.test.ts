@@ -37,12 +37,32 @@ describe('advancePreviewJob', () => {
     expect(patch.error).toMatch(/workflow/i);
   });
 
-  it('frontend job → reads the staging preview url and is ready', async () => {
+  it('frontend job → reads the staging preview url for each frontend and is ready', async () => {
     const gh = {} as any;
     const vercel = { previewUrlForBranch: vi.fn().mockResolvedValue('https://mantle-git-x.vercel.app') };
-    const fe: Job = { ...backendJob, target: 'frontend', spec: { frontend: { repo: 'mantle', ref: 'feat/as-1' } } };
+    const fe: Job = { ...backendJob, target: 'frontend', spec: { frontends: [{ repo: 'mantle', ref: 'feat/as-1' }] } };
     const patch = await advancePreviewJob(fe, { gh, vercel } as any);
     expect(patch.status).toBe('ready');
-    expect(patch.spec?.frontend?.url).toContain('vercel.app');
+    expect(patch.spec?.frontends?.[0]?.url).toContain('vercel.app');
+  });
+
+  it('fullstack frontend half wires each frontend to the backend + keeps the deployment url', async () => {
+    const gh = {} as any;
+    const vercel = {
+      wireAndRedeploy: vi.fn().mockResolvedValue({
+        url: 'https://marketplace-git-x.vercel.app', deploymentUrl: 'https://marketplace-abc.vercel.app',
+      }),
+    };
+    const job: Job = {
+      ...backendJob, target: 'fullstack', status: 'frontend_running',
+      spec: {
+        backend: { ref: 'feat/as-1', slug: 'as-1', url: 'https://as-1.api.preview.gantri.com' },
+        frontends: [{ repo: 'mantle', ref: 'feat/as-1' }],
+      },
+    };
+    const patch = await advancePreviewJob(job, { gh, vercel } as any);
+    expect(vercel.wireAndRedeploy).toHaveBeenCalledWith('mantle', 'feat/as-1', 'https://as-1.api.preview.gantri.com');
+    expect(patch.status).toBe('ready');
+    expect(patch.spec?.frontends?.[0]?.deploymentUrl).toContain('marketplace-abc');
   });
 });

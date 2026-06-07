@@ -4,7 +4,7 @@ import type { GithubDispatcher } from './github.js';
 
 export interface VercelReader {
   previewUrlForBranch(repo: FrontendRepo, ref: string): Promise<string>;
-  wireAndRedeploy(repo: FrontendRepo, ref: string, backendUrl: string): Promise<string>;
+  wireAndRedeploy(repo: FrontendRepo, ref: string, backendUrl: string): Promise<{ url: string; deploymentUrl?: string }>;
 }
 
 export interface ProvisionerDeps {
@@ -28,7 +28,7 @@ const WORKFLOW_REF = 'master';
 
 export async function advancePreviewJob(job: Job, deps: ProvisionerDeps): Promise<JobPatch> {
   const b = job.spec.backend;
-  const f = job.spec.frontend;
+  const fes = job.spec.frontends ?? [];
 
   // Backend half (backend + fullstack)
   if ((job.target === 'backend' || job.target === 'fullstack') && b && !b.url) {
@@ -45,22 +45,28 @@ export async function advancePreviewJob(job: Job, deps: ProvisionerDeps): Promis
       if (state === 'running') return {};
       if (state === 'failed') return { status: 'failed', error: 'backend workflow failed' };
       const spec: JobSpec = { ...job.spec, backend: { ...b, url: backendUrl(b.slug) } };
-      // backend ready; if fullstack, hand off to the frontend half
-      return job.target === 'fullstack'
+      // backend ready; if fullstack with frontends, hand off to the frontend half
+      return job.target === 'fullstack' && fes.length > 0
         ? { status: 'frontend_running', spec }
         : { status: 'ready', spec };
     }
   }
 
-  // Frontend half (frontend + fullstack after backend is up)
-  if ((job.target === 'frontend' || job.target === 'fullstack') && f && !f.url) {
-    if (!deps.vercel) return { status: 'failed', error: 'vercel reader not configured' };
-    // Full stack: wire the frontend to the backend preview (set the branch env
+  // Frontend half (frontend + fullstack after backend is up) — fan out to all frontends
+  if ((job.target === 'frontend' || job.target === 'fullstack') && fes.some((x) => !x.url)) {
+    const vercel = deps.vercel;
+    if (!vercel) return { status: 'failed', error: 'vercel reader not configured' };
+    // Full stack: wire each frontend to the backend preview (set the branch env
     // var + rebuild). Frontend-only stays on staging (no wiring).
-    const url = job.target === 'fullstack' && b?.url
-      ? await deps.vercel.wireAndRedeploy(f.repo, f.ref, b.url)
-      : await deps.vercel.previewUrlForBranch(f.repo, f.ref);
-    const spec: JobSpec = { ...job.spec, frontend: { ...f, url } };
+    const wired = await Promise.all(fes.map(async (x) => {
+      if (x.url) return x;
+      if (job.target === 'fullstack' && b?.url) {
+        const { url, deploymentUrl } = await vercel.wireAndRedeploy(x.repo, x.ref, b.url);
+        return { ...x, url, deploymentUrl };
+      }
+      return { ...x, url: await vercel.previewUrlForBranch(x.repo, x.ref) };
+    }));
+    const spec: JobSpec = { ...job.spec, frontends: wired };
     return { status: 'ready', spec };
   }
 

@@ -5,8 +5,19 @@ const ICON: Record<JobStatus, string> = {
   ready: '✅', failed: '✗', torn_down: '🧹',
 };
 
-function line(label: string, url?: string): string {
-  return url ? `${label}: ${url}` : label;
+const REPO_DISPLAY: Record<string, string> = {
+  mantle: 'Marketplace', core: 'Factoryos', made: 'Madeos',
+};
+
+function componentBlock(
+  name: string, id: string, link: string | undefined, url: string | undefined,
+  pending: string | undefined, deploymentUrl?: string,
+): string {
+  const lines = [`*${name}* (${id})`];
+  if (link) lines.push(`Source: ${link}`);
+  lines.push(`Preview: ${url ?? (pending ? `_${pending}_` : '_pending_')}`);
+  if (deploymentUrl) lines.push(`Deployment: ${deploymentUrl}`);
+  return lines.join('\n');
 }
 
 export function renderJobBlocks(job: Job): unknown[] {
@@ -14,24 +25,23 @@ export function renderJobBlocks(job: Job): unknown[] {
   const titleTarget = job.target === 'fullstack' ? 'Full-stack' : job.target[0].toUpperCase() + job.target.slice(1);
   const header = `${icon} ${titleTarget} preview — requested by <@${job.requestedBy}>`;
 
-  const lines: string[] = [];
+  const sections: string[] = [];
   if (job.spec.backend) {
     const b = job.spec.backend;
-    const tag = b.link ? `<${b.link}|${b.slug}>` : b.slug;
-    lines.push(line(`*Backend* (${tag})`, job.status === 'ready' ? b.url : undefined) +
-      (job.status === 'backend_running' ? ' — provisioning…' : ''));
+    sections.push(componentBlock('Porter', b.slug, b.link, job.status === 'ready' ? b.url : undefined,
+      job.status === 'backend_running' ? 'provisioning…' : undefined));
   }
-  if (job.spec.frontend) {
-    const f = job.spec.frontend;
-    const tag = f.link ? `<${f.link}|${f.repo}>` : f.repo;
-    lines.push(line(`*Frontend* (${tag})`, job.status === 'ready' ? f.url : undefined) +
-      (job.status === 'frontend_running' ? ' — building…' : ''));
+  for (const f of job.spec.frontends ?? []) {
+    sections.push(componentBlock(REPO_DISPLAY[f.repo] ?? f.repo, f.ref, f.link,
+      job.status === 'ready' ? f.url : undefined,
+      job.status === 'frontend_running' && !f.url ? 'building…' : undefined,
+      job.status === 'ready' ? f.deploymentUrl : undefined));
   }
-  if (job.status === 'failed' && job.error) lines.push(`*Error:* ${job.error}`);
+  if (job.status === 'failed' && job.error) sections.push(`*Error:* ${job.error}`);
 
   const blocks: unknown[] = [
     { type: 'section', text: { type: 'mrkdwn', text: header } },
-    { type: 'section', text: { type: 'mrkdwn', text: lines.join('\n') || '_starting…_' } },
+    { type: 'section', text: { type: 'mrkdwn', text: sections.join('\n\n') || '_starting…_' } },
   ];
 
   if (job.status === 'ready') {

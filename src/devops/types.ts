@@ -10,9 +10,18 @@ export type JobStatus =
   | 'failed'
   | 'torn_down';
 
+export interface Frontend {
+  repo: FrontendRepo;
+  ref: string;
+  url?: string;            // stable git-branch preview URL
+  deploymentUrl?: string;  // the specific Vercel deployment that was triggered
+  link?: string;           // PR / branch source link
+}
+
 export interface JobSpec {
   backend?: { ref: string; slug: string; url?: string; link?: string };
-  frontend?: { repo: FrontendRepo; ref: string; url?: string; link?: string };
+  // A single backend preview can fan out to 1–3 frontends at once.
+  frontends?: Frontend[];
 }
 
 export interface Job {

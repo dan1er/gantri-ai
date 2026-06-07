@@ -58,7 +58,7 @@ export class VercelClient {
    * build time, so a redeploy is required). Returns the stable branch URL, which
    * the new build will serve once it's ready.
    */
-  async wireAndRedeploy(repo: FrontendRepo, ref: string, backendUrl: string): Promise<string> {
+  async wireAndRedeploy(repo: FrontendRepo, ref: string, backendUrl: string): Promise<{ url: string; deploymentUrl?: string }> {
     const { id, repoId, name } = await this.project(repo);
     const branch = sanitizeBranch(ref);
 
@@ -81,7 +81,9 @@ export class VercelClient {
       body: JSON.stringify({ name, project: id, gitSource: { type: 'github', ref, repoId } }),
     });
     if (!depRes.ok) throw new Error(`vercel redeploy failed: ${depRes.status}`);
+    const dep = (await depRes.json()) as { url?: string; inspectorUrl?: string };
+    const deploymentUrl = dep.url ? `https://${dep.url}` : dep.inspectorUrl;
 
-    return `https://${name}-git-${branch}-gantri.vercel.app`;
+    return { url: `https://${name}-git-${branch}-gantri.vercel.app`, deploymentUrl };
   }
 }

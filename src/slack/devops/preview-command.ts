@@ -25,19 +25,23 @@ export function buildTypeButtons(): unknown[] {
   ];
 }
 
-function input(blockId: string, actionId: string, label: string, placeholder: string) {
+function input(blockId: string, actionId: string, label: string, placeholder: string, optional = false) {
   return {
-    type: 'input', block_id: blockId, label: { type: 'plain_text', text: label },
+    type: 'input', block_id: blockId, optional, label: { type: 'plain_text', text: label },
     element: { type: 'plain_text_input', action_id: actionId, placeholder: { type: 'plain_text', text: placeholder } },
   };
 }
 
-function repoSelect(blockId: string, actionId: string) {
-  const opt = (v: string) => ({ text: { type: 'plain_text', text: v }, value: v });
-  return {
-    type: 'input', block_id: blockId, label: { type: 'plain_text', text: 'Frontend repo' },
-    element: { type: 'static_select', action_id: actionId, options: [opt('mantle'), opt('core'), opt('made')] },
-  };
+// One optional ref input per frontend app; the user fills the ones they want.
+const FRONTEND_FIELDS: { repo: FrontendRepo; block: string; action: string }[] = [
+  { repo: 'mantle', block: 'mantle_ref_block', action: 'mantle_ref_input' },
+  { repo: 'core', block: 'core_ref_block', action: 'core_ref_input' },
+  { repo: 'made', block: 'made_ref_block', action: 'made_ref_input' },
+];
+
+function frontendInputs() {
+  return FRONTEND_FIELDS.map((fld) =>
+    input(fld.block, fld.action, `${fld.repo} — branch / PR# / URL (optional)`, 'feat/as-2300-…', true));
 }
 
 export function buildBackendModal() {
@@ -54,7 +58,7 @@ export function buildFrontendModal() {
     type: 'modal' as const, callback_id: 'preview_frontend_submit',
     title: { type: 'plain_text' as const, text: 'Frontend preview' },
     submit: { type: 'plain_text' as const, text: 'Create' },
-    blocks: [repoSelect('repo_block', 'repo_input'), input('ref_block', 'ref_input', 'branch / PR# / URL', 'feat/as-2300-…')],
+    blocks: frontendInputs(),
   };
 }
 
@@ -65,8 +69,7 @@ export function buildFullstackModal() {
     submit: { type: 'plain_text' as const, text: 'Create' },
     blocks: [
       input('be_ref_block', 'be_ref_input', 'porter branch / PR# / URL', 'feat/as-2215-…'),
-      repoSelect('repo_block', 'repo_input'),
-      input('fe_ref_block', 'fe_ref_input', 'frontend branch / PR# / URL', 'feat/as-2300-…'),
+      ...frontendInputs(),
     ],
   };
 }
@@ -78,15 +81,13 @@ const val = (v: ViewState, block: string, action: string) =>
 export function parseBackendSubmission(v: ViewState) {
   return { ref: val(v, 'ref_block', 'ref_input') };
 }
-export function parseFrontendSubmission(v: ViewState) {
-  return { repo: val(v, 'repo_block', 'repo_input') as FrontendRepo, ref: val(v, 'ref_block', 'ref_input') };
+export function parseFrontendSubmission(v: ViewState): { repo: FrontendRepo; ref: string }[] {
+  return FRONTEND_FIELDS
+    .map((fld) => ({ repo: fld.repo, ref: val(v, fld.block, fld.action).trim() }))
+    .filter((x) => x.ref.length > 0);
 }
 export function parseFullstackSubmission(v: ViewState) {
-  return {
-    backendRef: val(v, 'be_ref_block', 'be_ref_input'),
-    repo: val(v, 'repo_block', 'repo_input') as FrontendRepo,
-    frontendRef: val(v, 'fe_ref_block', 'fe_ref_input'),
-  };
+  return { backendRef: val(v, 'be_ref_block', 'be_ref_input'), frontends: parseFrontendSubmission(v) };
 }
 
 export interface PreviewCommandDeps {
@@ -96,23 +97,25 @@ export interface PreviewCommandDeps {
   gh: GithubDispatcher;
 }
 
-function jobKey(spec: { backend?: { slug: string }; frontend?: { repo: string; ref: string } }): string {
+function jobKey(spec: { backend?: { slug: string }; frontends?: { repo: string; ref: string }[] }): string {
   const parts: string[] = [];
   if (spec.backend) parts.push(`b:${spec.backend.slug}`);
-  if (spec.frontend) parts.push(`f:${spec.frontend.repo}:${spec.frontend.ref}`);
+  for (const f of [...(spec.frontends ?? [])].sort((a, b) => `${a.repo}:${a.ref}`.localeCompare(`${b.repo}:${b.ref}`))) {
+    parts.push(`f:${f.repo}:${f.ref}`);
+  }
   return parts.join('|');
 }
 
 async function createJobAndPost(
   deps: PreviewCommandDeps, target: JobTarget,
-  spec: { backend?: { ref: string; slug: string; link?: string }; frontend?: { repo: FrontendRepo; ref: string; link?: string } },
+  spec: { backend?: { ref: string; slug: string; link?: string }; frontends?: { repo: FrontendRepo; ref: string; link?: string }[] },
   requestedBy: string,
 ) {
   // Reuse an existing preview (anything not failed/torn down) for the same target + identity.
   const key = jobKey(spec);
   const existing = (await deps.repo.listReusable()).find((j) => j.target === target && jobKey(j.spec) === key);
   if (existing) {
-    const url = existing.spec.backend?.url ?? existing.spec.frontend?.url;
+    const url = existing.spec.backend?.url ?? existing.spec.frontends?.[0]?.url;
     await deps.slack.chat
       .postMessage({
         channel: deps.opsChannelId,
@@ -133,6 +136,15 @@ async function postError(deps: PreviewCommandDeps, label: string, requestedBy: s
   await deps.slack.chat
     .postMessage({ channel: deps.opsChannelId, text: `✗ ${label} preview — <@${requestedBy}>: ${msg}` })
     .catch(() => {});
+}
+
+async function resolveFrontends(
+  deps: PreviewCommandDeps, inputs: { repo: FrontendRepo; ref: string }[],
+): Promise<{ repo: FrontendRepo; ref: string; link: string }[]> {
+  return Promise.all(inputs.map(async (f) => {
+    const { ref, link } = await deps.gh.resolveRef(f.repo, f.ref);
+    return { repo: f.repo, ref, link };
+  }));
 }
 
 export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void {
@@ -167,23 +179,24 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
   });
   app.view('preview_frontend_submit', async ({ ack, body, view }) => {
     await ack();
-    const { repo, ref } = parseFrontendSubmission(view as any);
+    const inputs = parseFrontendSubmission(view as any);
     try {
-      const { ref: resolved, link } = await deps.gh.resolveRef(repo, ref);
-      await createJobAndPost(deps, 'frontend', { frontend: { repo, ref: resolved, link } }, body.user.id);
+      if (inputs.length === 0) throw new Error('pick at least one frontend');
+      const frontends = await resolveFrontends(deps, inputs);
+      await createJobAndPost(deps, 'frontend', { frontends }, body.user.id);
     } catch (err) {
       await postError(deps, 'Frontend', body.user.id, err);
     }
   });
   app.view('preview_fullstack_submit', async ({ ack, body, view }) => {
     await ack();
-    const { backendRef, repo, frontendRef } = parseFullstackSubmission(view as any);
+    const { backendRef, frontends: feInputs } = parseFullstackSubmission(view as any);
     try {
       const be = await deps.gh.resolveRef('porter', backendRef);
-      const fe = await deps.gh.resolveRef(repo, frontendRef);
+      const frontends = await resolveFrontends(deps, feInputs);
       await createJobAndPost(deps, 'fullstack', {
         backend: { ref: be.ref, slug: slugFromRef(be.ref), link: be.link },
-        frontend: { repo, ref: fe.ref, link: fe.link },
+        frontends,
       }, body.user.id);
     } catch (err) {
       await postError(deps, 'Full-stack', body.user.id, err);

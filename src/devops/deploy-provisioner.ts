@@ -1,0 +1,62 @@
+import type { Job, JobSpec } from './types.js';
+import type { ProvisionerDeps, JobPatch } from './provisioner.js';
+
+const PORTER = 'porter';
+const PROD_WF = 'prod-deploy.yml';
+const PROD_API = 'https://api.gantri.com';
+
+/**
+ * Advance a `deploy` job: ship the chosen tags to production. Backend goes
+ * through the porter prod-deploy workflow; each frontend is a Vercel
+ * production-target deploy (prod env vars) that is promoted once it's ready.
+ */
+export async function advanceDeployJob(job: Job, deps: ProvisionerDeps): Promise<JobPatch> {
+  const b = job.spec.deployBackend;
+  const fes = job.spec.deployFrontends ?? [];
+
+  // Backend half (backend + fullstack)
+  if ((job.target === 'backend' || job.target === 'fullstack') && b && !b.url) {
+    if (job.status === 'pending') {
+      await deps.gh.dispatch(PORTER, PROD_WF, 'master', { tag: b.tag, job_id: job.id });
+      return { status: 'backend_running' };
+    }
+    if (job.status === 'backend_running' && job.runId == null) {
+      const runId = await deps.gh.findRunByMarker(PORTER, PROD_WF, job.id);
+      return runId == null ? {} : { runId };
+    }
+    if (job.status === 'backend_running' && job.runId != null) {
+      const state = await deps.gh.getRunState(PORTER, job.runId);
+      if (state === 'running') return {};
+      if (state === 'failed') return { status: 'failed', error: 'prod-deploy workflow failed' };
+      const spec: JobSpec = { ...job.spec, deployBackend: { ...b, url: PROD_API } };
+      return job.target === 'fullstack' && fes.length > 0
+        ? { status: 'frontend_running', spec }
+        : { status: 'ready', spec };
+    }
+  }
+
+  // Frontend half (frontend + fullstack) — deploy(prod) -> poll -> promote, per repo
+  if ((job.target === 'frontend' || job.target === 'fullstack') && fes.some((x) => !x.url)) {
+    const vercel = deps.vercel;
+    if (!vercel) return { status: 'failed', error: 'vercel reader not configured' };
+    const advanced = await Promise.all(fes.map(async (fe) => {
+      if (fe.url || !fe.repo) return fe;
+      if (!fe.deploymentId) {
+        const { projectId, deploymentId, inspectorUrl } = await vercel.deployToProd(fe.repo, fe.tag);
+        return { ...fe, projectId, deploymentId, deploymentUrl: inspectorUrl };
+      }
+      const state = await vercel.deploymentState(fe.deploymentId);
+      if (state === 'error') throw new Error(`vercel prod deploy errored for ${fe.repo}`);
+      if (state === 'ready') {
+        await vercel.promoteToProd(fe.projectId ?? '', fe.deploymentId);
+        return { ...fe, url: vercel.prodUrl(fe.repo) };
+      }
+      return fe;
+    }));
+    const spec: JobSpec = { ...job.spec, deployFrontends: advanced };
+    const allDone = advanced.every((x) => x.url || !x.repo);
+    return allDone ? { status: 'ready', spec } : { status: 'frontend_running', spec };
+  }
+
+  return {};
+}

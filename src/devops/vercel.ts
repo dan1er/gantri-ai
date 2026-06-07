@@ -13,6 +13,12 @@ const API_URL_VAR: Record<FrontendRepo, string> = {
   made: 'VITE_API_URL',
 };
 
+const PROD_DOMAIN: Record<FrontendRepo, string> = {
+  mantle: 'https://www.gantri.com',
+  core: 'https://admin.gantri.com',
+  made: 'https://made.gantri.com',
+};
+
 function sanitizeBranch(ref: string): string {
   return ref.replace(/^.*\//, '').replace(/[^a-z0-9-]/gi, '-').toLowerCase();
 }
@@ -86,5 +92,43 @@ export class VercelClient {
     const deploymentUrl = dep.inspectorUrl ?? (dep.url ? `https://${dep.url}` : undefined);
 
     return { url: `https://${name}-git-${branch}-gantri.vercel.app`, deploymentUrl };
+  }
+
+  prodUrl(repo: FrontendRepo): string {
+    return PROD_DOMAIN[repo];
+  }
+
+  /** Production-target deploy of a ref (tag/commit) — built with prod env vars, not yet aliased. */
+  async deployToProd(repo: FrontendRepo, ref: string): Promise<{ projectId: string; deploymentId: string; inspectorUrl?: string }> {
+    const { id, repoId, name } = await this.project(repo);
+    const res = await this.fetch(`https://api.vercel.com/v13/deployments?teamId=${this.deps.teamId}`, {
+      method: 'POST',
+      headers: this.headers(),
+      body: JSON.stringify({ name, project: id, target: 'production', gitSource: { type: 'github', ref, repoId } }),
+    });
+    if (!res.ok) throw new Error(`vercel prod deploy failed: ${res.status}`);
+    const dep = (await res.json()) as { id?: string; uid?: string; inspectorUrl?: string };
+    return { projectId: id, deploymentId: dep.id ?? dep.uid ?? '', inspectorUrl: dep.inspectorUrl };
+  }
+
+  async deploymentState(deploymentId: string): Promise<'building' | 'ready' | 'error'> {
+    const res = await this.fetch(`https://api.vercel.com/v13/deployments/${deploymentId}?teamId=${this.deps.teamId}`, {
+      headers: this.headers(),
+    });
+    if (!res.ok) throw new Error(`vercel deployment get failed: ${res.status}`);
+    const body = (await res.json()) as { readyState?: string; status?: string };
+    const s = body.readyState ?? body.status ?? '';
+    if (s === 'READY') return 'ready';
+    if (s === 'ERROR' || s === 'CANCELED') return 'error';
+    return 'building';
+  }
+
+  /** Alias a ready production deployment to the prod domain(s). */
+  async promoteToProd(projectId: string, deploymentId: string): Promise<void> {
+    const res = await this.fetch(
+      `https://api.vercel.com/v10/projects/${projectId}/promote/${deploymentId}?teamId=${this.deps.teamId}`,
+      { method: 'POST', headers: this.headers() },
+    );
+    if (!res.ok) throw new Error(`vercel promote failed: ${res.status}`);
   }
 }

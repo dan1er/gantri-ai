@@ -20,7 +20,38 @@ function componentBlock(
   return lines.join('\n');
 }
 
+const PROD_URL: Record<string, string> = {
+  mantle: 'https://www.gantri.com', core: 'https://admin.gantri.com', made: 'https://made.gantri.com',
+};
+
+function renderDeploy(job: Job): unknown[] {
+  const icon = ICON[job.status];
+  const header = `${icon} Deploy → production — requested by <@${job.requestedBy}>`;
+  const section = (text: string) => ({ type: 'section', text: { type: 'mrkdwn', text } });
+  const item = (name: string, tag: string, target: string, url: string | undefined, pending: string | undefined, inspector?: string) => {
+    const lines = [`*${name}* · \`${tag}\``];
+    lines.push(`Production: ${url ?? `${target}${pending ? ` _(${pending})_` : ''}`}`);
+    if (inspector) lines.push(`Deployment: ${inspector}`);
+    return lines.join('\n');
+  };
+  const blocks: unknown[] = [section(header)];
+  const b = job.spec.deployBackend;
+  if (b) {
+    blocks.push(section(item('Porter', b.tag, 'https://api.gantri.com', b.url,
+      job.status === 'backend_running' ? 'deploying…' : undefined)));
+  }
+  for (const f of job.spec.deployFrontends ?? []) {
+    const name = REPO_DISPLAY[f.repo ?? ''] ?? f.repo ?? 'frontend';
+    blocks.push(section(item(name, f.tag, PROD_URL[f.repo ?? ''] ?? 'production', f.url,
+      f.url ? undefined : 'deploying…', f.deploymentUrl)));
+  }
+  if (job.status === 'failed' && job.error) blocks.push(section(`*Error:* ${job.error}`));
+  if (blocks.length === 1) blocks.push(section('_starting…_'));
+  return blocks;
+}
+
 export function renderJobBlocks(job: Job): unknown[] {
+  if (job.kind === 'deploy') return renderDeploy(job);
   const icon = ICON[job.status];
   const titleTarget = job.target === 'fullstack' ? 'Full-stack' : job.target[0].toUpperCase() + job.target.slice(1);
   const header = `${icon} ${titleTarget} preview — requested by <@${job.requestedBy}>`;

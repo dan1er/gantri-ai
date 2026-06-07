@@ -56,6 +56,8 @@ import { advancePreviewJob } from './devops/provisioner.js';
 import { JobsRunner } from './devops/jobs-runner.js';
 import { VercelClient } from './devops/vercel.js';
 import { registerPreviewCommand } from './slack/devops/preview-command.js';
+import { advanceDeployJob } from './devops/deploy-provisioner.js';
+import { registerDeployCommand } from './slack/devops/deploy-command.js';
 import { ReportSubscriptionsRepo } from './reports/reports-repo.js';
 import { ScheduledReportsConnector } from './reports/reports-connector.js';
 import { compilePlan } from './reports/plan-compiler.js';
@@ -455,6 +457,7 @@ async function main() {
     registerExtra: (a) => {
       if (devopsEnabled) {
         registerPreviewCommand(a, { repo: jobsRepo, slack: a.client, opsChannelId: env.OPS_CHANNEL_ID!, gh: gh! });
+        registerDeployCommand(a, { repo: jobsRepo, slack: a.client, opsChannelId: env.OPS_CHANNEL_ID!, gh: gh! });
       }
     },
   });
@@ -639,7 +642,10 @@ async function main() {
   reportsRunner.start();
 
   if (devopsEnabled && gh) {
-    const jobsRunner = new JobsRunner({ repo: jobsRepo, slack: app.client, gh, vercel: vercel ?? undefined, advance: advancePreviewJob });
+    const jobsRunner = new JobsRunner({
+      repo: jobsRepo, slack: app.client, gh, vercel: vercel ?? undefined,
+      advance: (job, d) => (job.kind === 'deploy' ? advanceDeployJob(job, d) : advancePreviewJob(job, d)),
+    });
     jobsRunner.start();
     logger.info({ vercelWiring: !!vercel }, 'devops jobs runner started');
   } else {

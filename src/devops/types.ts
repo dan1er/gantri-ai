@@ -18,10 +18,24 @@ export interface Frontend {
   link?: string;           // PR / branch source link
 }
 
+export interface DeployItem {
+  repo?: FrontendRepo;     // absent = backend (porter)
+  tag: string;
+  sha: string;
+  pr: number | null;
+  url?: string;            // prod URL once shipped
+  deploymentUrl?: string;  // Vercel inspector (frontend)
+  deploymentId?: string;   // frontend poll handle
+  projectId?: string;      // frontend promote handle
+}
+
 export interface JobSpec {
   backend?: { ref: string; slug: string; url?: string; link?: string };
   // A single backend preview can fan out to 1–3 frontends at once.
   frontends?: Frontend[];
+  // Deploy jobs (kind = 'deploy') ship tags to production.
+  deployBackend?: DeployItem;
+  deployFrontends?: DeployItem[];
 }
 
 export interface Job {

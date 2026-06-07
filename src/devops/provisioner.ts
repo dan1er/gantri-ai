@@ -5,6 +5,10 @@ import type { GithubDispatcher } from './github.js';
 export interface VercelReader {
   previewUrlForBranch(repo: FrontendRepo, ref: string): Promise<string>;
   wireAndRedeploy(repo: FrontendRepo, ref: string, backendUrl: string): Promise<{ url: string; deploymentUrl?: string }>;
+  deployToProd(repo: FrontendRepo, ref: string): Promise<{ projectId: string; deploymentId: string; inspectorUrl?: string }>;
+  deploymentState(deploymentId: string): Promise<'building' | 'ready' | 'error'>;
+  promoteToProd(projectId: string, deploymentId: string): Promise<void>;
+  prodUrl(repo: FrontendRepo): string;
 }
 
 export interface ProvisionerDeps {

@@ -83,4 +83,19 @@ export class GithubDispatcher {
     const body = (await res.json()) as { number: number; title: string; html_url: string; head: { ref: string } }[];
     return body.map((p) => ({ number: p.number, title: p.title, url: p.html_url, head: p.head.ref }));
   }
+
+  /** `deploy-*` tags for a repo, newest PR first (for the /deploy picker). */
+  async listDeployTags(repo: string, limit = 25): Promise<{ tag: string; sha: string; pr: number | null }[]> {
+    const res = await this.fetch(`${this.base(repo)}/git/matching-refs/tags/deploy-`, { headers: this.headers() });
+    if (!res.ok) throw new Error(`list tags failed: ${res.status}`);
+    const body = (await res.json()) as { ref: string; object: { sha: string } }[];
+    return body
+      .map((r) => {
+        const tag = r.ref.replace('refs/tags/', '');
+        const pr = Number(tag.match(/^deploy-(\d+)-/)?.[1] ?? '') || null;
+        return { tag, sha: r.object.sha, pr };
+      })
+      .sort((a, b) => (b.pr ?? 0) - (a.pr ?? 0))
+      .slice(0, limit);
+  }
 }

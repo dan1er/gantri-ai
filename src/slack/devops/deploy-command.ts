@@ -111,30 +111,64 @@ async function createDeployAndPost(
 const PROD_DOMAIN: Record<string, string> = { mantle: 'www.gantri.com', core: 'admin.gantri.com', made: 'made.gantri.com' };
 const REPO_NAME: Record<string, string> = { mantle: 'Marketplace', core: 'Factoryos', made: 'Madeos' };
 
-function confirmBlocks(target: string, spec: { deployBackend?: DeployItem; deployFrontends?: DeployItem[] }): unknown[] {
+function confirmBlocks(target: string, spec: { deployBackend?: DeployItem; deployFrontends?: DeployItem[] }, skipped: string[]): unknown[] {
   const lines: string[] = [];
   if (spec.deployBackend) lines.push(`• *Porter* \`${spec.deployBackend.tag}\` → api.gantri.com`);
   for (const f of spec.deployFrontends ?? []) {
     lines.push(`• *${REPO_NAME[f.repo ?? ''] ?? f.repo}* \`${f.tag}\` → ${PROD_DOMAIN[f.repo ?? ''] ?? 'production'}`);
   }
-  return [
+  const blocks: unknown[] = [
     { type: 'section', text: { type: 'mrkdwn', text: `:warning: *Deploy to PRODUCTION?*\n${lines.join('\n')}` } },
-    {
-      type: 'actions',
-      elements: [
-        { type: 'button', text: { type: 'plain_text', text: 'Deploy' }, style: 'primary', action_id: 'deploy_confirm', value: JSON.stringify({ target, spec }) },
-        { type: 'button', text: { type: 'plain_text', text: 'Cancel' }, action_id: 'deploy_cancel', value: 'x' },
-      ],
-    },
   ];
+  if (skipped.length) {
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: `:rotating_light: *Skipping earlier un-deployed tags:*\n${skipped.join('\n')}\n_These won't ship in this deploy._` },
+    });
+  }
+  blocks.push({
+    type: 'actions',
+    elements: [
+      { type: 'button', text: { type: 'plain_text', text: 'Deploy' }, style: 'primary', action_id: 'deploy_confirm', value: JSON.stringify({ target, spec }) },
+      { type: 'button', text: { type: 'plain_text', text: 'Cancel' }, action_id: 'deploy_cancel', value: 'x' },
+    ],
+  });
+  return blocks;
+}
+
+/** Per repo, earlier (lower PR#) tags that haven't been deployed and are being skipped. */
+async function findSkipped(deps: DeployCommandDeps, spec: { deployBackend?: DeployItem; deployFrontends?: DeployItem[] }): Promise<string[]> {
+  const jobs = await deps.repo.listDeployJobs();
+  const usedFor = (repo: string): Set<string> => {
+    const s = new Set<string>();
+    for (const j of jobs) {
+      if (repo === 'porter' && j.spec.deployBackend) s.add(j.spec.deployBackend.tag);
+      for (const f of j.spec.deployFrontends ?? []) if (f.repo === repo) s.add(f.tag);
+    }
+    return s;
+  };
+  const out: string[] = [];
+  const check = async (repo: string, name: string, pickedTag: string, pickedPr: number | null) => {
+    if (pickedPr == null) return;
+    const used = usedFor(repo);
+    const tags = await deps.gh.listDeployTags(repo);
+    const skipped = tags
+      .filter((t) => t.pr != null && t.pr < pickedPr && t.tag !== pickedTag && !used.has(t.tag))
+      .map((t) => `\`${t.tag}\``);
+    if (skipped.length) out.push(`*${name}*: ${skipped.join(', ')}`);
+  };
+  if (spec.deployBackend) await check('porter', 'Porter', spec.deployBackend.tag, spec.deployBackend.pr);
+  for (const f of spec.deployFrontends ?? []) await check(f.repo ?? '', REPO_NAME[f.repo ?? ''] ?? (f.repo ?? ''), f.tag, f.pr);
+  return out;
 }
 
 async function postConfirm(
   deps: DeployCommandDeps, userId: string, target: string,
   spec: { deployBackend?: DeployItem; deployFrontends?: DeployItem[] },
 ): Promise<void> {
+  const skipped = await findSkipped(deps, spec).catch(() => [] as string[]);
   await deps.slack.chat
-    .postEphemeral({ channel: deps.opsChannelId, user: userId, text: 'Confirm deploy', blocks: confirmBlocks(target, spec) as any })
+    .postEphemeral({ channel: deps.opsChannelId, user: userId, text: 'Confirm deploy', blocks: confirmBlocks(target, spec, skipped) as any })
     .catch(() => {});
 }
 

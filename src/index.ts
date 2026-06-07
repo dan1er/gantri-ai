@@ -50,6 +50,11 @@ import { PipedriveWritesRepo } from './storage/repositories/pipedrive-writes.js'
 import { buildSearchConsoleConnector } from './connectors/gsc/connector.js';
 import { Orchestrator, getActiveActor, getActiveThread, runWithContext } from './orchestrator/orchestrator.js';
 import { buildSlackApp } from './slack/app.js';
+import { DevopsJobsRepo } from './devops/jobs-repo.js';
+import { GithubDispatcher } from './devops/github.js';
+import { advancePreviewJob } from './devops/provisioner.js';
+import { JobsRunner } from './devops/jobs-runner.js';
+import { registerPreviewCommand } from './slack/devops/preview-command.js';
 import { ReportSubscriptionsRepo } from './reports/reports-repo.js';
 import { ScheduledReportsConnector } from './reports/reports-connector.js';
 import { compilePlan } from './reports/plan-compiler.js';
@@ -426,6 +431,12 @@ async function main() {
     claude,
   };
 
+  // GITHUB_TOKEN may come from Vault if not in env:
+  const githubToken = env.GITHUB_TOKEN ?? (await readVaultSecret(supabase, 'GITHUB_TOKEN').catch(() => null));
+  const devopsEnabled = !!(env.OPS_CHANNEL_ID && githubToken);
+  const jobsRepo = new DevopsJobsRepo(supabase);
+  const gh = devopsEnabled ? new GithubDispatcher({ token: githubToken!, owner: env.GITHUB_OWNER }) : null;
+
   const { app, receiver } = buildSlackApp({
     orchestrator,
     usersRepo,
@@ -436,6 +447,11 @@ async function main() {
     // createDmHandler doesn't crash on the pending-context lookup path.
     pendingRepo: klaviyoPendingRepoRef ?? { lookupByThread: async () => null },
     klaviyoClient: klaviyoClientRef ?? { listLists: async () => [] },
+    registerExtra: (a) => {
+      if (devopsEnabled) {
+        registerPreviewCommand(a, { repo: jobsRepo, slack: a.client, opsChannelId: env.OPS_CHANNEL_ID! });
+      }
+    },
   });
   // Adapters above capture this `appRef` thunk lazily — they were constructed
   // before `app` existed. Assigning here makes them functional immediately
@@ -616,6 +632,21 @@ async function main() {
   logger.info({ port: env.PORT }, 'gantri-ai-bot listening');
 
   reportsRunner.start();
+
+  if (devopsEnabled && gh) {
+    const vercel = {
+      async previewUrlForBranch(repo: string, ref: string): Promise<string> {
+        const project = repo === 'mantle' ? 'marketplace' : repo === 'core' ? 'factoryos' : 'made';
+        const branch = ref.replace(/^.*\//, '').replace(/[^a-z0-9-]/gi, '-').toLowerCase();
+        return `https://${project}-git-${branch}-gantri.vercel.app`;
+      },
+    };
+    const jobsRunner = new JobsRunner({ repo: jobsRepo, slack: app.client, gh, vercel, advance: advancePreviewJob });
+    jobsRunner.start();
+    logger.info('devops jobs runner started');
+  } else {
+    logger.warn('devops disabled — set OPS_CHANNEL_ID + GITHUB_TOKEN to enable /preview');
+  }
 
   // Start the Klaviyo import-status poller now that the Slack client is live
   // (its `slack` adapter dereferences `appRef!.client`). Skipped entirely

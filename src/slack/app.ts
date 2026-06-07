@@ -5,7 +5,10 @@ import { loadEnv } from '../config/env.js';
 
 const { App, ExpressReceiver } = pkg;
 
-export function buildSlackApp(deps: HandlerDeps & { fileSharedDeps: FileSharedDeps }) {
+export function buildSlackApp(deps: HandlerDeps & {
+  fileSharedDeps: FileSharedDeps;
+  registerExtra?: (app: InstanceType<typeof App>) => void;
+}) {
   const env = loadEnv();
   const receiver = new ExpressReceiver({
     signingSecret: env.SLACK_SIGNING_SECRET,
@@ -32,5 +35,6 @@ export function buildSlackApp(deps: HandlerDeps & { fileSharedDeps: FileSharedDe
     });
   });
 
+  deps.registerExtra?.(app);
   return { app, receiver };
 }

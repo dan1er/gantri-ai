@@ -70,26 +70,42 @@ describe('advanceDeployJob', () => {
     expect(patch.spec?.deployBackend?.url).toBe('https://api.gantri.com');
   });
 
-  it('e2e gate: pending with e2e → dispatches gantri-e2e ci.yml + e2e_running', async () => {
-    const gh = { dispatch: vi.fn().mockResolvedValue(undefined), findLatestRun: vi.fn(), getRunState: vi.fn() } as any;
-    const job: Job = { ...base, status: 'pending', spec: { ...base.spec, e2e: { scope: 'smoke' } } };
-    const patch = await advanceDeployJob(job, { gh });
-    expect(gh.dispatch).toHaveBeenCalledWith('gantri-e2e', 'ci.yml', 'main', { scope: 'smoke' });
+  const feE2e: Job = {
+    ...base, target: 'frontend',
+    spec: {
+      deployFrontends: [{ repo: 'mantle', tag: 'deploy-1201-2026.06.07', sha: 'def', pr: 1201 }],
+      e2e: { scope: 'smoke' },
+    },
+  };
+
+  it('e2e gate: pending → persists e2e_running WITHOUT dispatching (dup-safe)', async () => {
+    const gh = { dispatch: vi.fn(), findRunByMarker: vi.fn(), getRunState: vi.fn() } as any;
+    const patch = await advanceDeployJob({ ...feE2e, status: 'pending' }, { gh } as any);
+    expect(gh.dispatch).not.toHaveBeenCalled();
     expect(patch.status).toBe('e2e_running');
+  });
+
+  it('e2e gate: e2e_running + not dispatched → dispatches qase-trigger for the project', async () => {
+    const gh = { dispatch: vi.fn().mockResolvedValue(undefined), findRunByMarker: vi.fn(), getRunState: vi.fn() } as any;
+    const patch = await advanceDeployJob({ ...feE2e, status: 'e2e_running' }, { gh } as any);
+    expect(gh.dispatch).toHaveBeenCalledWith('gantri-e2e', 'qase-trigger.yml', 'main', {
+      project: 'marketplace', scope: 'smoke', marker: 'd1',
+    });
+    expect(patch.spec?.e2e?.dispatched).toBe(true);
   });
 
   it('e2e gate: run passes → hands off to the deploy phase', async () => {
     const gh = { getRunState: vi.fn().mockResolvedValue('success') } as any;
-    const job: Job = { ...base, status: 'e2e_running', spec: { ...base.spec, e2e: { scope: 'smoke', runId: 5 } } };
-    const patch = await advanceDeployJob(job, { gh });
+    const job: Job = { ...feE2e, status: 'e2e_running', spec: { ...feE2e.spec, e2e: { scope: 'smoke', project: 'marketplace', dispatched: true, runId: 5 } } };
+    const patch = await advanceDeployJob(job, { gh } as any);
     expect(patch.status).toBe('pending');
     expect(patch.spec?.e2e?.passed).toBe(true);
   });
 
   it('e2e gate: run fails → deploy blocked', async () => {
     const gh = { getRunState: vi.fn().mockResolvedValue('failed') } as any;
-    const job: Job = { ...base, status: 'e2e_running', spec: { ...base.spec, e2e: { scope: 'smoke', runId: 5 } } };
-    const patch = await advanceDeployJob(job, { gh });
+    const job: Job = { ...feE2e, status: 'e2e_running', spec: { ...feE2e.spec, e2e: { scope: 'smoke', project: 'marketplace', dispatched: true, runId: 5 } } };
+    const patch = await advanceDeployJob(job, { gh } as any);
     expect(patch.status).toBe('failed');
     expect(patch.error).toMatch(/E2E/);
   });

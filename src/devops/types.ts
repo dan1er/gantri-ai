@@ -37,8 +37,15 @@ export interface JobSpec {
   // Deploy jobs (kind = 'deploy') ship tags to production.
   deployBackend?: DeployItem;
   deployFrontends?: DeployItem[];
-  // Pre-deploy E2E gate (deploy jobs). Absent = skipped. One gantri-e2e ci.yml run (all projects).
-  e2e?: { scope: 'smoke' | 'both'; runId?: number | null; passed?: boolean };
+  // Pre-deploy E2E gate (deploy jobs). Absent = skipped. Dispatches gantri-e2e
+  // qase-trigger (→ a Qase run) for the deployed frontend's project.
+  e2e?: {
+    scope: 'smoke' | 'both';
+    project?: string;          // gantri-e2e Playwright project (marketplace/factoryOs/madeOs)
+    runId?: number | null;
+    passed?: boolean;
+    dispatched?: boolean;      // guards against re-dispatch on a failed state update
+  };
 }
 
 export interface Job {

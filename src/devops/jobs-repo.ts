@@ -94,4 +94,17 @@ export class DevopsJobsRepo {
     if (error) throw new Error(`devops_jobs list reusable failed: ${error.message}`);
     return (data as Row[]).map(toJob);
   }
+
+  /** Deploy jobs that aren't failed — their tags are deployed or in flight. */
+  async listDeployJobs(limit = 100): Promise<Job[]> {
+    const { data, error } = await this.client
+      .from('devops_jobs')
+      .select('*')
+      .eq('kind', 'deploy')
+      .neq('status', 'failed')
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    if (error) throw new Error(`devops_jobs deploy list failed: ${error.message}`);
+    return (data as Row[]).map(toJob);
+  }
 }

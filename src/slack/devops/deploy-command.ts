@@ -167,7 +167,12 @@ export function registerDeployCommand(app: App, deps: DeployCommandDeps): void {
       const q = String(payload?.value ?? '').trim().toLowerCase();
       let opts: { text: { type: 'plain_text'; text: string }; value: string }[] = [];
       try {
-        const tags = await deps.gh.listDeployTags(src.repo);
+        const used = new Set<string>();
+        for (const j of await deps.repo.listDeployJobs()) {
+          if (src.repo === 'porter' && j.spec.deployBackend) used.add(j.spec.deployBackend.tag);
+          for (const f of j.spec.deployFrontends ?? []) if (f.repo === src.repo) used.add(f.tag);
+        }
+        const tags = (await deps.gh.listDeployTags(src.repo)).filter((t) => !used.has(t.tag));
         const matched = (q ? tags.filter((t) => t.tag.toLowerCase().includes(q)) : tags).slice(0, 15);
         opts = await Promise.all(matched.map(async (t) => {
           let branch = '';

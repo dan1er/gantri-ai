@@ -108,6 +108,36 @@ async function createDeployAndPost(
   if (posted.ts) await deps.repo.update(job.id, { messageTs: posted.ts });
 }
 
+const PROD_DOMAIN: Record<string, string> = { mantle: 'www.gantri.com', core: 'admin.gantri.com', made: 'made.gantri.com' };
+const REPO_NAME: Record<string, string> = { mantle: 'Marketplace', core: 'Factoryos', made: 'Madeos' };
+
+function confirmBlocks(target: string, spec: { deployBackend?: DeployItem; deployFrontends?: DeployItem[] }): unknown[] {
+  const lines: string[] = [];
+  if (spec.deployBackend) lines.push(`• *Porter* \`${spec.deployBackend.tag}\` → api.gantri.com`);
+  for (const f of spec.deployFrontends ?? []) {
+    lines.push(`• *${REPO_NAME[f.repo ?? ''] ?? f.repo}* \`${f.tag}\` → ${PROD_DOMAIN[f.repo ?? ''] ?? 'production'}`);
+  }
+  return [
+    { type: 'section', text: { type: 'mrkdwn', text: `:warning: *Deploy to PRODUCTION?*\n${lines.join('\n')}` } },
+    {
+      type: 'actions',
+      elements: [
+        { type: 'button', text: { type: 'plain_text', text: 'Deploy' }, style: 'primary', action_id: 'deploy_confirm', value: JSON.stringify({ target, spec }) },
+        { type: 'button', text: { type: 'plain_text', text: 'Cancel' }, action_id: 'deploy_cancel', value: 'x' },
+      ],
+    },
+  ];
+}
+
+async function postConfirm(
+  deps: DeployCommandDeps, userId: string, target: string,
+  spec: { deployBackend?: DeployItem; deployFrontends?: DeployItem[] },
+): Promise<void> {
+  await deps.slack.chat
+    .postEphemeral({ channel: deps.opsChannelId, user: userId, text: 'Confirm deploy', blocks: confirmBlocks(target, spec) as any })
+    .catch(() => {});
+}
+
 export function registerDeployCommand(app: App, deps: DeployCommandDeps): void {
   app.command('/deploy', async ({ ack, body, respond }) => {
     await ack();
@@ -138,10 +168,17 @@ export function registerDeployCommand(app: App, deps: DeployCommandDeps): void {
       let opts: { text: { type: 'plain_text'; text: string }; value: string }[] = [];
       try {
         const tags = await deps.gh.listDeployTags(src.repo);
-        const matched = q ? tags.filter((t) => t.tag.toLowerCase().includes(q)) : tags;
-        opts = matched.slice(0, 24).map((t) => ({
-          text: { type: 'plain_text' as const, text: `${t.tag}${t.pr ? ` · #${t.pr}` : ''}`.slice(0, 75) },
-          value: t.tag,
+        const matched = (q ? tags.filter((t) => t.tag.toLowerCase().includes(q)) : tags).slice(0, 15);
+        opts = await Promise.all(matched.map(async (t) => {
+          let branch = '';
+          if (t.pr) {
+            try { branch = (await deps.gh.resolveRef(src.repo, String(t.pr))).ref; } catch { /* keep empty */ }
+          }
+          const ctx = branch || (t.pr ? `#${t.pr}` : '');
+          return {
+            text: { type: 'plain_text' as const, text: `${t.tag}${ctx ? ` · ${ctx}` : ''}`.slice(0, 75) },
+            value: t.tag,
+          };
         }));
       } catch {
         // ignore — empty list
@@ -155,7 +192,7 @@ export function registerDeployCommand(app: App, deps: DeployCommandDeps): void {
     try {
       const item = await resolveDeployItem(deps.gh, 'porter', sel(view as any, 'd_be_block', 'd_be_input'), true);
       if (!item) throw new Error('tag not found');
-      await createDeployAndPost(deps, 'backend', { deployBackend: item }, body.user.id);
+      await postConfirm(deps, body.user.id, 'backend', { deployBackend: item });
     } catch (err) {
       await postErr(deps, 'Backend', body.user.id, err);
     }
@@ -165,7 +202,7 @@ export function registerDeployCommand(app: App, deps: DeployCommandDeps): void {
     try {
       const fes = await resolveFeItems(deps.gh, view as any);
       if (fes.length === 0) throw new Error('pick at least one frontend tag');
-      await createDeployAndPost(deps, 'frontend', { deployFrontends: fes }, body.user.id);
+      await postConfirm(deps, body.user.id, 'frontend', { deployFrontends: fes });
     } catch (err) {
       await postErr(deps, 'Frontend', body.user.id, err);
     }
@@ -176,9 +213,24 @@ export function registerDeployCommand(app: App, deps: DeployCommandDeps): void {
       const be = await resolveDeployItem(deps.gh, 'porter', sel(view as any, 'd_be_block', 'd_be_input'), true);
       if (!be) throw new Error('porter tag not found');
       const fes = await resolveFeItems(deps.gh, view as any);
-      await createDeployAndPost(deps, 'fullstack', { deployBackend: be, deployFrontends: fes }, body.user.id);
+      await postConfirm(deps, body.user.id, 'fullstack', { deployBackend: be, deployFrontends: fes });
     } catch (err) {
       await postErr(deps, 'Full-stack', body.user.id, err);
     }
+  });
+
+  app.action('deploy_confirm', async ({ ack, body, action, respond }: any) => {
+    await ack();
+    await respond({ delete_original: true });
+    try {
+      const { target, spec } = JSON.parse(action.value as string);
+      await createDeployAndPost(deps, target, spec, body.user.id);
+    } catch (err) {
+      await postErr(deps, 'Deploy', body.user?.id ?? '', err);
+    }
+  });
+  app.action('deploy_cancel', async ({ ack, respond }: any) => {
+    await ack();
+    await respond({ replace_original: true, text: '🚫 Deploy cancelled.' });
   });
 }

@@ -46,4 +46,27 @@ describe('advanceDeployJob', () => {
     expect(p2.status).toBe('ready');
     expect(p2.spec?.deployFrontends?.[0]?.url).toBe('https://www.gantri.com');
   });
+
+  const fullstack: Job = {
+    ...base, target: 'fullstack',
+    spec: {
+      deployBackend: { tag: 'deploy-5187-2026.06.07', sha: 'a', pr: 5187 },
+      deployFrontends: [{ repo: 'mantle', tag: 'deploy-1199-2026.06.07', sha: 'b', pr: 1199 }],
+    },
+  };
+
+  it('fullstack: frontends do NOT deploy while the backend is still running', async () => {
+    const gh = { getRunState: vi.fn().mockResolvedValue('running') } as any;
+    const vercel = { deployToProd: vi.fn(), deploymentState: vi.fn(), promoteToProd: vi.fn(), prodUrl: vi.fn() };
+    const patch = await advanceDeployJob({ ...fullstack, status: 'backend_running', runId: 7 }, { gh, vercel } as any);
+    expect(vercel.deployToProd).not.toHaveBeenCalled();
+    expect(patch.status).toBeUndefined();
+  });
+
+  it('fullstack: backend success hands off to frontend_running (then frontends deploy)', async () => {
+    const gh = { getRunState: vi.fn().mockResolvedValue('success') } as any;
+    const patch = await advanceDeployJob({ ...fullstack, status: 'backend_running', runId: 7 }, { gh } as any);
+    expect(patch.status).toBe('frontend_running');
+    expect(patch.spec?.deployBackend?.url).toBe('https://api.gantri.com');
+  });
 });

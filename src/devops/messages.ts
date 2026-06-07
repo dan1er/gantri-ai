@@ -14,9 +14,9 @@ function componentBlock(
   pending: string | undefined, deploymentUrl?: string,
 ): string {
   const lines = [`*${name}* (${id})`];
-  if (link) lines.push(`Source: ${link}`);
-  lines.push(`Preview: ${url ?? (pending ? `_${pending}_` : '_pending_')}`);
-  if (deploymentUrl) lines.push(`Deployment: ${deploymentUrl}`);
+  if (link) lines.push(`<${link}|Source>`);
+  lines.push(url ? `<${url}|Preview>` : `Preview _(${pending ?? 'pending'})_`);
+  if (deploymentUrl) lines.push(`<${deploymentUrl}|Deployment>`);
   return lines.join('\n');
 }
 
@@ -30,8 +30,8 @@ function renderDeploy(job: Job): unknown[] {
   const section = (text: string) => ({ type: 'section', text: { type: 'mrkdwn', text } });
   const item = (name: string, tag: string, target: string, url: string | undefined, pending: string | undefined, inspector?: string) => {
     const lines = [`*${name}* · \`${tag}\``];
-    lines.push(`Production: ${url ?? `${target}${pending ? ` _(${pending})_` : ''}`}`);
-    if (inspector) lines.push(`Deployment: ${inspector}`);
+    lines.push(`<${url ?? target}|Production>${!url && pending ? ` _(${pending})_` : ''}`);
+    if (inspector) lines.push(`<${inspector}|Deployment>`);
     return lines.join('\n');
   };
   const blocks: unknown[] = [section(header)];

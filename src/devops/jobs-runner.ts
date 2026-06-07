@@ -7,6 +7,20 @@ import { logger } from '../logger.js';
 
 type Advance = (job: Job, deps: ProvisionerDeps) => Promise<JobPatch>;
 
+// Short progress line posted to the message thread on each status change.
+function statusNote(job: Job): string | null {
+  switch (job.status) {
+    case 'e2e_running': return '🧪 Running E2E gate…';
+    case 'pending': return job.spec.e2e?.passed ? '✅ E2E passed — starting deploy' : null;
+    case 'backend_running': return job.kind === 'deploy' ? '🚀 Deploying backend…' : '🛠️ Provisioning backend…';
+    case 'frontend_running': return job.kind === 'deploy' ? '🚀 Deploying frontend(s)…' : '🌐 Building frontend(s)…';
+    case 'ready': return job.kind === 'deploy' ? '✅ Deployed to production' : '✅ Preview ready';
+    case 'failed': return `✗ Failed${job.error ? `: ${job.error}` : ''}`;
+    case 'torn_down': return '🧹 Torn down';
+    default: return null;
+  }
+}
+
 export interface JobsRunnerDeps extends ProvisionerDeps {
   repo: DevopsJobsRepo;
   slack: WebClient;
@@ -60,8 +74,16 @@ export class JobsRunner {
     if (job.messageTs) {
       await this.deps.slack.chat.update({
         channel: job.channelId, ts: job.messageTs,
-        text: `preview ${updated.status}`, blocks: renderJobBlocks(updated) as any,
+        text: `${updated.kind} ${updated.status}`, blocks: renderJobBlocks(updated) as any,
       }).catch((err) => logger.warn({ jobId: job.id, err: String((err as Error)?.message ?? err) }, 'devops chat.update failed'));
+      if (patch.status && patch.status !== job.status) {
+        const note = statusNote(updated);
+        if (note) {
+          await this.deps.slack.chat
+            .postMessage({ channel: job.channelId, thread_ts: job.messageTs, text: note })
+            .catch((err) => logger.warn({ jobId: job.id, err: String((err as Error)?.message ?? err) }, 'devops thread note failed'));
+        }
+      }
     }
   }
 }

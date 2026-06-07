@@ -127,11 +127,23 @@ async function createJobAndPost(
           .catch(() => undefined)
       : undefined;
     const ref = permalink ? `<${permalink}|the existing preview>` : 'the existing preview';
+    const blocks: unknown[] = [
+      {
+        type: 'section',
+        text: { type: 'mrkdwn', text: `↻ <@${requestedBy}> that *${target}* preview is already up (${existing.status}) — see ${ref}${url ? `: ${url}` : ''}.` },
+      },
+    ];
+    if (existing.status === 'ready') {
+      blocks.push({
+        type: 'actions',
+        elements: [{
+          type: 'button', text: { type: 'plain_text', text: 'Tear down' },
+          style: 'danger', action_id: 'preview_teardown', value: existing.id,
+        }],
+      });
+    }
     await deps.slack.chat
-      .postMessage({
-        channel: deps.opsChannelId,
-        text: `↻ <@${requestedBy}> that *${target}* preview is already up (${existing.status}) — see ${ref}${url ? `: ${url}` : ''}.`,
-      })
+      .postMessage({ channel: deps.opsChannelId, text: 'reusing existing preview', blocks: blocks as any })
       .catch(() => {});
     return;
   }
@@ -255,14 +267,17 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
         .dispatch('porter', 'preview-teardown.yml', 'master', { slug, job_id: jobId })
         .catch((err) => logger.warn({ jobId, err: String((err as Error)?.message ?? err) }, 'teardown dispatch failed'));
     }
-    // Update the original message in place: keep the info, drop the button, note who tore it down.
-    if (job?.messageTs) {
+    // Update the message the button was clicked from (original or reuse note):
+    // keep the info, drop the button, note who tore it down.
+    const channel = body.channel?.id ?? job?.channelId;
+    const ts = body.container?.message_ts ?? body.message?.ts ?? job?.messageTs;
+    if (job && channel && ts) {
       const blocks = [
         ...(renderJobBlocks(job) as any[]),
         { type: 'context', elements: [{ type: 'mrkdwn', text: `🧹 <@${body.user?.id}> tore down this preview` }] },
       ];
       await deps.slack.chat
-        .update({ channel: job.channelId, ts: job.messageTs, text: 'preview torn down', blocks })
+        .update({ channel, ts, text: 'preview torn down', blocks })
         .catch(() => {});
     }
     logger.info({ jobId, by: body.user?.id }, 'devops preview torn down');

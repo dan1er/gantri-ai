@@ -55,19 +55,21 @@ export class GithubDispatcher {
   }
 
   /**
-   * Resolve user input to a real git branch ref for `repo`. Accepts a branch
-   * name, a bare PR number, or a full PR URL (…/pull/123); for a PR it looks up
-   * the PR's head branch.
+   * Resolve user input to a real git branch ref + a human link for `repo`.
+   * Accepts a branch name, a bare PR number, or a full PR URL (…/pull/123); for
+   * a PR it looks up the head branch and links to the PR, for a branch it links
+   * to the branch tree.
    */
-  async resolveRef(repo: string, input: string): Promise<string> {
+  async resolveRef(repo: string, input: string): Promise<{ ref: string; link: string }> {
     const trimmed = input.trim();
+    const repoUrl = `https://github.com/${this.deps.owner}/${repo}`;
     const fromUrl = trimmed.match(/\/pull\/(\d+)/)?.[1];
     const prNumber = fromUrl ?? (/^\d+$/.test(trimmed) ? trimmed : null);
-    if (!prNumber) return trimmed;
+    if (!prNumber) return { ref: trimmed, link: `${repoUrl}/tree/${trimmed}` };
     const res = await this.fetch(`${this.base(repo)}/pulls/${prNumber}`, { headers: this.headers() });
     if (!res.ok) throw new Error(`PR #${prNumber} not found in ${repo} (${res.status})`);
-    const body = (await res.json()) as { head?: { ref?: string } };
+    const body = (await res.json()) as { head?: { ref?: string }; html_url?: string };
     if (!body.head?.ref) throw new Error(`PR #${prNumber} has no head branch`);
-    return body.head.ref;
+    return { ref: body.head.ref, link: body.html_url ?? `${repoUrl}/pull/${prNumber}` };
   }
 }

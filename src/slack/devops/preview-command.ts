@@ -96,11 +96,31 @@ export interface PreviewCommandDeps {
   gh: GithubDispatcher;
 }
 
+function jobKey(spec: { backend?: { slug: string }; frontend?: { repo: string; ref: string } }): string {
+  const parts: string[] = [];
+  if (spec.backend) parts.push(`b:${spec.backend.slug}`);
+  if (spec.frontend) parts.push(`f:${spec.frontend.repo}:${spec.frontend.ref}`);
+  return parts.join('|');
+}
+
 async function createJobAndPost(
   deps: PreviewCommandDeps, target: JobTarget,
-  spec: { backend?: { ref: string; slug: string }; frontend?: { repo: FrontendRepo; ref: string } },
+  spec: { backend?: { ref: string; slug: string; link?: string }; frontend?: { repo: FrontendRepo; ref: string; link?: string } },
   requestedBy: string,
 ) {
+  // Reuse an existing preview (anything not failed/torn down) for the same target + identity.
+  const key = jobKey(spec);
+  const existing = (await deps.repo.listReusable()).find((j) => j.target === target && jobKey(j.spec) === key);
+  if (existing) {
+    const url = existing.spec.backend?.url ?? existing.spec.frontend?.url;
+    await deps.slack.chat
+      .postMessage({
+        channel: deps.opsChannelId,
+        text: `↻ <@${requestedBy}> reusing the active *${target}* preview for \`${key}\` (${existing.status})${url ? `: ${url}` : ''}.`,
+      })
+      .catch(() => {});
+    return;
+  }
   const job = await deps.repo.create({ kind: 'preview', target, spec, requestedBy, channelId: deps.opsChannelId });
   const posted = await deps.slack.chat.postMessage({
     channel: deps.opsChannelId, text: `🛠️ ${target} preview starting…`, blocks: renderJobBlocks(job) as any,
@@ -139,8 +159,8 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
     await ack();
     const { ref } = parseBackendSubmission(view as any);
     try {
-      const resolved = await deps.gh.resolveRef('porter', ref);
-      await createJobAndPost(deps, 'backend', { backend: { ref: resolved, slug: slugFromRef(resolved) } }, body.user.id);
+      const { ref: resolved, link } = await deps.gh.resolveRef('porter', ref);
+      await createJobAndPost(deps, 'backend', { backend: { ref: resolved, slug: slugFromRef(resolved), link } }, body.user.id);
     } catch (err) {
       await postError(deps, 'Backend', body.user.id, err);
     }
@@ -149,8 +169,8 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
     await ack();
     const { repo, ref } = parseFrontendSubmission(view as any);
     try {
-      const resolved = await deps.gh.resolveRef(repo, ref);
-      await createJobAndPost(deps, 'frontend', { frontend: { repo, ref: resolved } }, body.user.id);
+      const { ref: resolved, link } = await deps.gh.resolveRef(repo, ref);
+      await createJobAndPost(deps, 'frontend', { frontend: { repo, ref: resolved, link } }, body.user.id);
     } catch (err) {
       await postError(deps, 'Frontend', body.user.id, err);
     }
@@ -162,8 +182,8 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
       const be = await deps.gh.resolveRef('porter', backendRef);
       const fe = await deps.gh.resolveRef(repo, frontendRef);
       await createJobAndPost(deps, 'fullstack', {
-        backend: { ref: be, slug: slugFromRef(be) },
-        frontend: { repo, ref: fe },
+        backend: { ref: be.ref, slug: slugFromRef(be.ref), link: be.link },
+        frontend: { repo, ref: fe.ref, link: fe.link },
       }, body.user.id);
     } catch (err) {
       await postError(deps, 'Full-stack', body.user.id, err);
@@ -182,12 +202,14 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
         .dispatch('porter', 'preview-teardown.yml', 'master', { slug, job_id: jobId })
         .catch((err) => logger.warn({ jobId, err: String((err as Error)?.message ?? err) }, 'teardown dispatch failed'));
     }
-    // Refresh the message so the icon flips to 🧹 and the button disappears.
-    if (job?.messageTs) {
-      await deps.slack.chat
-        .update({ channel: job.channelId, ts: job.messageTs, text: 'preview torn down', blocks: renderJobBlocks(job) as any })
-        .catch(() => {});
-    }
+    // Leave the original message intact; post a separate note about what happened.
+    const what = slug ? `\`${slug}\`` : (job?.target ?? 'preview');
+    await deps.slack.chat
+      .postMessage({
+        channel: deps.opsChannelId,
+        text: `🧹 <@${body.user?.id}> tore down the ${job?.target ?? ''} preview ${what}.`,
+      })
+      .catch(() => {});
     logger.info({ jobId, by: body.user?.id }, 'devops preview torn down');
   });
 }

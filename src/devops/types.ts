@@ -11,8 +11,8 @@ export type JobStatus =
   | 'torn_down';
 
 export interface JobSpec {
-  backend?: { ref: string; slug: string; url?: string };
-  frontend?: { repo: FrontendRepo; ref: string; url?: string };
+  backend?: { ref: string; slug: string; url?: string; link?: string };
+  frontend?: { repo: FrontendRepo; ref: string; url?: string; link?: string };
 }
 
 export interface Job {

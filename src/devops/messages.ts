@@ -17,12 +17,14 @@ export function renderJobBlocks(job: Job): unknown[] {
   const lines: string[] = [];
   if (job.spec.backend) {
     const b = job.spec.backend;
-    lines.push(line(`*Backend* (${b.slug})`, job.status === 'ready' ? b.url : undefined) +
+    const tag = b.link ? `<${b.link}|${b.slug}>` : b.slug;
+    lines.push(line(`*Backend* (${tag})`, job.status === 'ready' ? b.url : undefined) +
       (job.status === 'backend_running' ? ' — provisioning…' : ''));
   }
   if (job.spec.frontend) {
     const f = job.spec.frontend;
-    lines.push(line(`*Frontend* (${f.repo})`, job.status === 'ready' ? f.url : undefined) +
+    const tag = f.link ? `<${f.link}|${f.repo}>` : f.repo;
+    lines.push(line(`*Frontend* (${tag})`, job.status === 'ready' ? f.url : undefined) +
       (job.status === 'frontend_running' ? ' — building…' : ''));
   }
   if (job.status === 'failed' && job.error) lines.push(`*Error:* ${job.error}`);

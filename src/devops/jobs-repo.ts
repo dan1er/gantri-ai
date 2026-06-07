@@ -82,4 +82,16 @@ export class DevopsJobsRepo {
     if (error) throw new Error(`devops_jobs get failed: ${error.message}`);
     return data ? toJob(data as Row) : null;
   }
+
+  /** Jobs still usable for reuse — anything not failed or torn down. */
+  async listReusable(limit = 50): Promise<Job[]> {
+    const { data, error } = await this.client
+      .from('devops_jobs')
+      .select('*')
+      .not('status', 'in', '(failed,torn_down)')
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    if (error) throw new Error(`devops_jobs list reusable failed: ${error.message}`);
+    return (data as Row[]).map(toJob);
+  }
 }

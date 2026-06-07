@@ -81,8 +81,9 @@ export class VercelClient {
       body: JSON.stringify({ name, project: id, gitSource: { type: 'github', ref, repoId } }),
     });
     if (!depRes.ok) throw new Error(`vercel redeploy failed: ${depRes.status}`);
-    const dep = (await depRes.json()) as { url?: string; inspectorUrl?: string };
-    const deploymentUrl = dep.url ? `https://${dep.url}` : dep.inspectorUrl;
+    const dep = (await depRes.json()) as { inspectorUrl?: string; url?: string };
+    // The Vercel dashboard page for the deployment (build logs / status).
+    const deploymentUrl = dep.inspectorUrl ?? (dep.url ? `https://${dep.url}` : undefined);
 
     return { url: `https://${name}-git-${branch}-gantri.vercel.app`, deploymentUrl };
   }

@@ -25,14 +25,19 @@ export function buildTypeButtons(): unknown[] {
   ];
 }
 
-function input(blockId: string, actionId: string, label: string, placeholder: string, optional = false) {
+// An open-PR typeahead per repo; the option-load handler also offers a "use
+// what you typed" entry so a branch / PR not in the list still works.
+function prSelect(blockId: string, actionId: string, label: string, optional = false) {
   return {
-    type: 'input', block_id: blockId, optional, label: { type: 'plain_text', text: label },
-    element: { type: 'plain_text_input', action_id: actionId, placeholder: { type: 'plain_text', text: placeholder } },
+    type: 'input', block_id: blockId, optional,
+    label: { type: 'plain_text', text: label },
+    element: {
+      type: 'external_select', action_id: actionId, min_query_length: 0,
+      placeholder: { type: 'plain_text', text: 'Pick an open PR or type a branch…' },
+    },
   };
 }
 
-// One optional ref input per frontend app; the user fills the ones they want.
 const FRONTEND_FIELDS: { repo: FrontendRepo; block: string; action: string }[] = [
   { repo: 'mantle', block: 'mantle_ref_block', action: 'mantle_ref_input' },
   { repo: 'core', block: 'core_ref_block', action: 'core_ref_input' },
@@ -40,8 +45,7 @@ const FRONTEND_FIELDS: { repo: FrontendRepo; block: string; action: string }[] =
 ];
 
 function frontendInputs() {
-  return FRONTEND_FIELDS.map((fld) =>
-    input(fld.block, fld.action, `${fld.repo} — branch / PR# / URL (optional)`, 'feat/as-2300-…', true));
+  return FRONTEND_FIELDS.map((fld) => prSelect(fld.block, fld.action, `${fld.repo} — PR or branch (optional)`, true));
 }
 
 export function buildBackendModal() {
@@ -49,7 +53,7 @@ export function buildBackendModal() {
     type: 'modal' as const, callback_id: 'preview_backend_submit',
     title: { type: 'plain_text' as const, text: 'Backend preview' },
     submit: { type: 'plain_text' as const, text: 'Create' },
-    blocks: [input('ref_block', 'ref_input', 'porter branch / PR# / URL', 'feat/as-2215-…')],
+    blocks: [prSelect('ref_block', 'ref_input', 'porter — PR or branch')],
   };
 }
 
@@ -68,7 +72,7 @@ export function buildFullstackModal() {
     title: { type: 'plain_text' as const, text: 'Full-stack preview' },
     submit: { type: 'plain_text' as const, text: 'Create' },
     blocks: [
-      input('be_ref_block', 'be_ref_input', 'porter branch / PR# / URL', 'feat/as-2215-…'),
+      prSelect('be_ref_block', 'be_ref_input', 'porter — PR or branch'),
       ...frontendInputs(),
     ],
   };
@@ -166,6 +170,35 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
   app.action('preview_backend', openModal(buildBackendModal, 'Backend'));
   app.action('preview_frontend', openModal(buildFrontendModal, 'Frontend'));
   app.action('preview_fullstack', openModal(buildFullstackModal, 'Full-stack'));
+
+  // Populate each PR picker: matching open PRs + a "use what you typed" entry.
+  const OPTION_SOURCES: { action: string; repo: string }[] = [
+    { action: 'ref_input', repo: 'porter' },
+    { action: 'be_ref_input', repo: 'porter' },
+    ...FRONTEND_FIELDS.map((f) => ({ action: f.action, repo: f.repo as string })),
+  ];
+  for (const src of OPTION_SOURCES) {
+    app.options(src.action, async ({ ack, payload }: any) => {
+      const query = String(payload?.value ?? '').trim();
+      let opts: { text: { type: 'plain_text'; text: string }; value: string }[] = [];
+      try {
+        const prs = await deps.gh.listOpenPRs(src.repo);
+        const matched = query
+          ? prs.filter((p) => `#${p.number} ${p.title} ${p.head}`.toLowerCase().includes(query.toLowerCase()))
+          : prs;
+        opts = matched.slice(0, 24).map((p) => ({
+          text: { type: 'plain_text' as const, text: `#${p.number} ${p.title}`.slice(0, 75) },
+          value: p.url,
+        }));
+      } catch {
+        // ignore — still offer the literal entry below
+      }
+      if (query) {
+        opts.unshift({ text: { type: 'plain_text' as const, text: `✍︎ Use "${query}"`.slice(0, 75) }, value: query.slice(0, 75) });
+      }
+      await ack({ options: opts });
+    });
+  }
 
   app.view('preview_backend_submit', async ({ ack, body, view }) => {
     await ack();

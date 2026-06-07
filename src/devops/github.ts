@@ -72,4 +72,15 @@ export class GithubDispatcher {
     if (!body.head?.ref) throw new Error(`PR #${prNumber} has no head branch`);
     return { ref: body.head.ref, link: body.html_url ?? `${repoUrl}/pull/${prNumber}` };
   }
+
+  /** Open PRs for a repo, most-recently-updated first (for the picker). */
+  async listOpenPRs(repo: string, limit = 30): Promise<{ number: number; title: string; url: string; head: string }[]> {
+    const res = await this.fetch(
+      `${this.base(repo)}/pulls?state=open&per_page=${limit}&sort=updated&direction=desc`,
+      { headers: this.headers() },
+    );
+    if (!res.ok) throw new Error(`list PRs failed: ${res.status}`);
+    const body = (await res.json()) as { number: number; title: string; html_url: string; head: { ref: string } }[];
+    return body.map((p) => ({ number: p.number, title: p.title, url: p.html_url, head: p.head.ref }));
+  }
 }

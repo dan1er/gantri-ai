@@ -41,4 +41,25 @@ describe('GithubDispatcher', () => {
     expect(await gh.getRunState('porter', 22)).toBe('success');
     expect(await gh.getRunState('porter', 22)).toBe('failed');
   });
+
+  it('resolveRef returns a branch name unchanged (no lookup)', async () => {
+    const fetchMock = vi.fn();
+    const gh = new GithubDispatcher({ token: 't', owner: 'gantri', fetch: fetchMock });
+    expect(await gh.resolveRef('porter', 'feat/as-1-x')).toBe('feat/as-1-x');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('resolveRef looks up a PR number and a PR URL to its head branch', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ head: { ref: 'feat/as-2215-x' } }));
+    const gh = new GithubDispatcher({ token: 't', owner: 'gantri', fetch: fetchMock });
+    expect(await gh.resolveRef('porter', '5180')).toBe('feat/as-2215-x');
+    expect(await gh.resolveRef('porter', 'https://github.com/gantri/porter/pull/5180')).toBe('feat/as-2215-x');
+    expect(fetchMock.mock.calls[0][0] as string).toBe('https://api.github.com/repos/gantri/porter/pulls/5180');
+  });
+
+  it('resolveRef throws when the PR is not found', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ message: 'Not Found' }, 404));
+    const gh = new GithubDispatcher({ token: 't', owner: 'gantri', fetch: fetchMock });
+    await expect(gh.resolveRef('porter', '999')).rejects.toThrow(/PR #999 not found/);
+  });
 });

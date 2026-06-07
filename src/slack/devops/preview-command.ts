@@ -1,6 +1,7 @@
 import type { App } from '@slack/bolt';
 import type { WebClient } from '@slack/web-api';
 import type { DevopsJobsRepo } from '../../devops/jobs-repo.js';
+import type { GithubDispatcher } from '../../devops/github.js';
 import type { JobTarget, FrontendRepo } from '../../devops/types.js';
 import { slugFromRef } from '../../devops/slug.js';
 import { renderJobBlocks } from '../../devops/messages.js';
@@ -44,7 +45,7 @@ export function buildBackendModal() {
     type: 'modal' as const, callback_id: 'preview_backend_submit',
     title: { type: 'plain_text' as const, text: 'Backend preview' },
     submit: { type: 'plain_text' as const, text: 'Create' },
-    blocks: [input('ref_block', 'ref_input', 'porter branch or PR#', 'feat/as-2215-…')],
+    blocks: [input('ref_block', 'ref_input', 'porter branch / PR# / URL', 'feat/as-2215-…')],
   };
 }
 
@@ -53,7 +54,7 @@ export function buildFrontendModal() {
     type: 'modal' as const, callback_id: 'preview_frontend_submit',
     title: { type: 'plain_text' as const, text: 'Frontend preview' },
     submit: { type: 'plain_text' as const, text: 'Create' },
-    blocks: [repoSelect('repo_block', 'repo_input'), input('ref_block', 'ref_input', 'branch or PR#', 'feat/as-2300-…')],
+    blocks: [repoSelect('repo_block', 'repo_input'), input('ref_block', 'ref_input', 'branch / PR# / URL', 'feat/as-2300-…')],
   };
 }
 
@@ -63,9 +64,9 @@ export function buildFullstackModal() {
     title: { type: 'plain_text' as const, text: 'Full-stack preview' },
     submit: { type: 'plain_text' as const, text: 'Create' },
     blocks: [
-      input('be_ref_block', 'be_ref_input', 'porter branch or PR#', 'feat/as-2215-…'),
+      input('be_ref_block', 'be_ref_input', 'porter branch / PR# / URL', 'feat/as-2215-…'),
       repoSelect('repo_block', 'repo_input'),
-      input('fe_ref_block', 'fe_ref_input', 'frontend branch or PR#', 'feat/as-2300-…'),
+      input('fe_ref_block', 'fe_ref_input', 'frontend branch / PR# / URL', 'feat/as-2300-…'),
     ],
   };
 }
@@ -92,6 +93,7 @@ export interface PreviewCommandDeps {
   repo: DevopsJobsRepo;
   slack: WebClient;
   opsChannelId: string;
+  gh: GithubDispatcher;
 }
 
 async function createJobAndPost(
@@ -104,6 +106,13 @@ async function createJobAndPost(
     channel: deps.opsChannelId, text: `🛠️ ${target} preview starting…`, blocks: renderJobBlocks(job) as any,
   });
   if (posted.ts) await deps.repo.update(job.id, { messageTs: posted.ts });
+}
+
+async function postError(deps: PreviewCommandDeps, label: string, requestedBy: string, err: unknown): Promise<void> {
+  const msg = err instanceof Error ? err.message : String(err);
+  await deps.slack.chat
+    .postMessage({ channel: deps.opsChannelId, text: `✗ ${label} preview — <@${requestedBy}>: ${msg}` })
+    .catch(() => {});
 }
 
 export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void {
@@ -127,20 +136,36 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
   app.view('preview_backend_submit', async ({ ack, body, view }) => {
     await ack();
     const { ref } = parseBackendSubmission(view as any);
-    await createJobAndPost(deps, 'backend', { backend: { ref, slug: slugFromRef(ref) } }, body.user.id);
+    try {
+      const resolved = await deps.gh.resolveRef('porter', ref);
+      await createJobAndPost(deps, 'backend', { backend: { ref: resolved, slug: slugFromRef(resolved) } }, body.user.id);
+    } catch (err) {
+      await postError(deps, 'Backend', body.user.id, err);
+    }
   });
   app.view('preview_frontend_submit', async ({ ack, body, view }) => {
     await ack();
     const { repo, ref } = parseFrontendSubmission(view as any);
-    await createJobAndPost(deps, 'frontend', { frontend: { repo, ref } }, body.user.id);
+    try {
+      const resolved = await deps.gh.resolveRef(repo, ref);
+      await createJobAndPost(deps, 'frontend', { frontend: { repo, ref: resolved } }, body.user.id);
+    } catch (err) {
+      await postError(deps, 'Frontend', body.user.id, err);
+    }
   });
   app.view('preview_fullstack_submit', async ({ ack, body, view }) => {
     await ack();
     const { backendRef, repo, frontendRef } = parseFullstackSubmission(view as any);
-    await createJobAndPost(deps, 'fullstack', {
-      backend: { ref: backendRef, slug: slugFromRef(backendRef) },
-      frontend: { repo, ref: frontendRef },
-    }, body.user.id);
+    try {
+      const be = await deps.gh.resolveRef('porter', backendRef);
+      const fe = await deps.gh.resolveRef(repo, frontendRef);
+      await createJobAndPost(deps, 'fullstack', {
+        backend: { ref: be, slug: slugFromRef(be) },
+        frontend: { repo, ref: fe },
+      }, body.user.id);
+    } catch (err) {
+      await postError(deps, 'Full-stack', body.user.id, err);
+    }
   });
 
   app.action('preview_teardown', async ({ ack, body, action }: any) => {

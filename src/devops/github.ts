@@ -53,4 +53,21 @@ export class GithubDispatcher {
     if (body.status !== 'completed') return 'running';
     return body.conclusion === 'success' ? 'success' : 'failed';
   }
+
+  /**
+   * Resolve user input to a real git branch ref for `repo`. Accepts a branch
+   * name, a bare PR number, or a full PR URL (…/pull/123); for a PR it looks up
+   * the PR's head branch.
+   */
+  async resolveRef(repo: string, input: string): Promise<string> {
+    const trimmed = input.trim();
+    const fromUrl = trimmed.match(/\/pull\/(\d+)/)?.[1];
+    const prNumber = fromUrl ?? (/^\d+$/.test(trimmed) ? trimmed : null);
+    if (!prNumber) return trimmed;
+    const res = await this.fetch(`${this.base(repo)}/pulls/${prNumber}`, { headers: this.headers() });
+    if (!res.ok) throw new Error(`PR #${prNumber} not found in ${repo} (${res.status})`);
+    const body = (await res.json()) as { head?: { ref?: string } };
+    if (!body.head?.ref) throw new Error(`PR #${prNumber} has no head branch`);
+    return body.head.ref;
+  }
 }

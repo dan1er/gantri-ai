@@ -449,7 +449,7 @@ async function main() {
     klaviyoClient: klaviyoClientRef ?? { listLists: async () => [] },
     registerExtra: (a) => {
       if (devopsEnabled) {
-        registerPreviewCommand(a, { repo: jobsRepo, slack: a.client, opsChannelId: env.OPS_CHANNEL_ID! });
+        registerPreviewCommand(a, { repo: jobsRepo, slack: a.client, opsChannelId: env.OPS_CHANNEL_ID!, gh: gh! });
       }
     },
   });

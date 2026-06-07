@@ -174,14 +174,20 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
     await ack();
     const jobId = action.value as string;
     await deps.repo.update(jobId, { status: 'torn_down' });
-    // Refresh the message so the icon flips to 🧹 and the button disappears.
     const job = await deps.repo.get(jobId);
+    // Dispatch the (dumb) porter teardown workflow for backend previews.
+    const slug = job?.spec.backend?.slug;
+    if (slug) {
+      await deps.gh
+        .dispatch('porter', 'preview-teardown.yml', 'master', { slug, job_id: jobId })
+        .catch((err) => logger.warn({ jobId, err: String((err as Error)?.message ?? err) }, 'teardown dispatch failed'));
+    }
+    // Refresh the message so the icon flips to 🧹 and the button disappears.
     if (job?.messageTs) {
       await deps.slack.chat
         .update({ channel: job.channelId, ts: job.messageTs, text: 'preview torn down', blocks: renderJobBlocks(job) as any })
         .catch(() => {});
     }
     logger.info({ jobId, by: body.user?.id }, 'devops preview torn down');
-    // Phase 2: dispatch porter preview-teardown.yml here.
   });
 }

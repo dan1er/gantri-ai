@@ -17,6 +17,8 @@ const envSchema = z.object({
   OPS_CHANNEL_ID: z.string().optional(),
   GITHUB_TOKEN: z.string().optional(),
   GITHUB_OWNER: z.string().default('gantri'),
+  VERCEL_TOKEN: z.string().optional(),
+  VERCEL_TEAM_ID: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

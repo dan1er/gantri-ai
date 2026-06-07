@@ -4,6 +4,7 @@ import type { GithubDispatcher } from './github.js';
 
 export interface VercelReader {
   previewUrlForBranch(repo: FrontendRepo, ref: string): Promise<string>;
+  wireAndRedeploy(repo: FrontendRepo, ref: string, backendUrl: string): Promise<string>;
 }
 
 export interface ProvisionerDeps {
@@ -54,7 +55,11 @@ export async function advancePreviewJob(job: Job, deps: ProvisionerDeps): Promis
   // Frontend half (frontend + fullstack after backend is up)
   if ((job.target === 'frontend' || job.target === 'fullstack') && f && !f.url) {
     if (!deps.vercel) return { status: 'failed', error: 'vercel reader not configured' };
-    const url = await deps.vercel.previewUrlForBranch(f.repo, f.ref);
+    // Full stack: wire the frontend to the backend preview (set the branch env
+    // var + rebuild). Frontend-only stays on staging (no wiring).
+    const url = job.target === 'fullstack' && b?.url
+      ? await deps.vercel.wireAndRedeploy(f.repo, f.ref, b.url)
+      : await deps.vercel.previewUrlForBranch(f.repo, f.ref);
     const spec: JobSpec = { ...job.spec, frontend: { ...f, url } };
     return { status: 'ready', spec };
   }

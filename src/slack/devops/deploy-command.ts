@@ -123,7 +123,7 @@ function confirmBlocks(target: string, spec: { deployBackend?: DeployItem; deplo
   if (skipped.length) {
     blocks.push({
       type: 'section',
-      text: { type: 'mrkdwn', text: `:rotating_light: *Skipping earlier un-deployed tags:*\n${skipped.join('\n')}\n_These won't ship in this deploy._` },
+      text: { type: 'mrkdwn', text: `:rotating_light: *This also ships earlier un-deployed PRs* (they're bundled into your tag):\n${skipped.join('\n')}\n_Their changes go to production with this deploy — confirm that's intended._` },
     });
   }
   blocks.push({

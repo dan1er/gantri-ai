@@ -75,12 +75,13 @@ export class JobsRunner {
       await this.deps.slack.chat.update({
         channel: job.channelId, ts: job.messageTs,
         text: `${updated.kind} ${updated.status}`, blocks: renderJobBlocks(updated) as any,
-      }).catch((err) => logger.warn({ jobId: job.id, err: String((err as Error)?.message ?? err) }, 'devops chat.update failed'));
+        unfurl_links: false, unfurl_media: false,
+      } as any).catch((err) => logger.warn({ jobId: job.id, err: String((err as Error)?.message ?? err) }, 'devops chat.update failed'));
       if (patch.status && patch.status !== job.status) {
         const note = statusNote(updated);
         if (note) {
           await this.deps.slack.chat
-            .postMessage({ channel: job.channelId, thread_ts: job.messageTs, text: note })
+            .postMessage({ channel: job.channelId, thread_ts: job.messageTs, text: note, unfurl_links: false, unfurl_media: false })
             .catch((err) => logger.warn({ jobId: job.id, err: String((err as Error)?.message ?? err) }, 'devops thread note failed'));
         }
       }
@@ -88,10 +89,10 @@ export class JobsRunner {
       const newRunId = updated.spec.e2e?.runId;
       if (updated.kind === 'deploy' && newRunId && !job.spec.e2e?.runId) {
         const qaseId = updated.spec.e2e?.qaseRunId;
-        const qase = qaseId ? `https://app.qase.io/run/GANTRI/${qaseId}` : 'https://app.qase.io/run/GANTRI';
+        const qase = qaseId ? `https://app.qase.io/run/GANTRI/dashboard/${qaseId}` : 'https://app.qase.io/run/GANTRI';
         const note = `🧪 Running E2E gate — <https://github.com/gantri/gantri-e2e/actions/runs/${newRunId}|GitHub run> · <${qase}|Qase>`;
         await this.deps.slack.chat
-          .postMessage({ channel: job.channelId, thread_ts: job.messageTs, text: note })
+          .postMessage({ channel: job.channelId, thread_ts: job.messageTs, text: note, unfurl_links: false, unfurl_media: false })
           .catch((err) => logger.warn({ jobId: job.id, err: String((err as Error)?.message ?? err) }, 'devops e2e thread note failed'));
       }
     }

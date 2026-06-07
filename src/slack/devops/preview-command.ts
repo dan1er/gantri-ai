@@ -150,6 +150,7 @@ async function createJobAndPost(
   const job = await deps.repo.create({ kind: 'preview', target, spec, requestedBy, channelId: deps.opsChannelId });
   const posted = await deps.slack.chat.postMessage({
     channel: deps.opsChannelId, text: `🛠️ ${target} preview starting…`, blocks: renderJobBlocks(job) as any,
+    unfurl_links: false, unfurl_media: false,
   });
   if (posted.ts) await deps.repo.update(job.id, { messageTs: posted.ts });
 }

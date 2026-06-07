@@ -122,6 +122,7 @@ async function createDeployAndPost(
   const job = await deps.repo.create({ kind: 'deploy', target, spec, requestedBy, channelId: deps.opsChannelId });
   const posted = await deps.slack.chat.postMessage({
     channel: deps.opsChannelId, text: '🚀 deploy starting…', blocks: renderJobBlocks(job) as any,
+    unfurl_links: false, unfurl_media: false,
   });
   if (posted.ts) await deps.repo.update(job.id, { messageTs: posted.ts });
 }

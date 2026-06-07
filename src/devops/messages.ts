@@ -29,8 +29,8 @@ function renderDeploy(job: Job): unknown[] {
   const header = `${icon} Deploy → production — requested by <@${job.requestedBy}>`;
   const section = (text: string) => ({ type: 'section', text: { type: 'mrkdwn', text } });
   const item = (name: string, tag: string, target: string, url: string | undefined, pending: string | undefined, inspector?: string) => {
-    const lines = [`*${name}* · \`${tag}\``];
-    lines.push(`<${url ?? target}|Production>${!url && pending ? ` _(${pending})_` : ''}`);
+    const status = !url && pending ? ` _(${pending})_` : '';
+    const lines = [`<${url ?? target}|${name}> · \`${tag}\`${status}`];
     if (inspector) lines.push(`<${inspector}|Deployment>`);
     return lines.join('\n');
   };
@@ -42,7 +42,7 @@ function renderDeploy(job: Job): unknown[] {
       ? `<https://github.com/gantri/gantri-e2e/actions/runs/${e.runId}|GitHub run>`
       : '_dispatching…_';
     const qase = e.qaseRunId
-      ? `<https://app.qase.io/run/GANTRI/${e.qaseRunId}|Qase>`
+      ? `<https://app.qase.io/run/GANTRI/dashboard/${e.qaseRunId}|Qase>`
       : '<https://app.qase.io/run/GANTRI|Qase>';
     blocks.push(section(`🧪 E2E gate (${scope}) — ${run} · ${qase} — deploy waits for green`));
   }

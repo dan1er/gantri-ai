@@ -29,6 +29,6 @@ export class QaseClient implements QaseReader {
   }
 
   runUrl(id: number): string {
-    return `https://app.qase.io/run/${QASE_PROJECT}/${id}`;
+    return `https://app.qase.io/run/${QASE_PROJECT}/dashboard/${id}`;
   }
 }

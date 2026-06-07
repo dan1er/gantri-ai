@@ -120,10 +120,17 @@ async function createJobAndPost(
   const existing = (await deps.repo.listReusable()).find((j) => j.target === target && jobKey(j.spec) === key);
   if (existing) {
     const url = existing.spec.backend?.url ?? existing.spec.frontends?.[0]?.url;
+    const permalink = existing.messageTs
+      ? await deps.slack.chat
+          .getPermalink({ channel: existing.channelId, message_ts: existing.messageTs })
+          .then((r) => r.permalink as string | undefined)
+          .catch(() => undefined)
+      : undefined;
+    const ref = permalink ? `<${permalink}|the existing preview>` : 'the existing preview';
     await deps.slack.chat
       .postMessage({
         channel: deps.opsChannelId,
-        text: `↻ <@${requestedBy}> reusing the active *${target}* preview for \`${key}\` (${existing.status})${url ? `: ${url}` : ''}.`,
+        text: `↻ <@${requestedBy}> that *${target}* preview is already up (${existing.status}) — see ${ref}${url ? `: ${url}` : ''}.`,
       })
       .catch(() => {});
     return;

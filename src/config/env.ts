@@ -14,6 +14,9 @@ const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(3000),
   INTERNAL_SHARED_SECRET: z.string().optional(),
   MAINTAINER_SLACK_USER_ID: z.string().optional(),
+  OPS_CHANNEL_ID: z.string().optional(),
+  GITHUB_TOKEN: z.string().optional(),
+  GITHUB_OWNER: z.string().default('gantri'),
 });
 
 export type Env = z.infer<typeof envSchema>;

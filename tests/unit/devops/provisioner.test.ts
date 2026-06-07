@@ -13,7 +13,7 @@ describe('advancePreviewJob', () => {
   it('pending backend → dispatches and moves to backend_running', async () => {
     const gh = { dispatch: vi.fn().mockResolvedValue(undefined), findRunByMarker: vi.fn(), getRunState: vi.fn() } as any;
     const patch = await advancePreviewJob(backendJob, { gh });
-    expect(gh.dispatch).toHaveBeenCalledWith('porter', 'preview-create.yml', 'feat/as-1', { ref: 'feat/as-1', slug: 'as-1', job_id: 'j1' });
+    expect(gh.dispatch).toHaveBeenCalledWith('porter', 'preview-create.yml', 'master', { ref: 'feat/as-1', slug: 'as-1', job_id: 'j1' });
     expect(patch.status).toBe('backend_running');
   });
 

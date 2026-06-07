@@ -20,6 +20,10 @@ export interface JobPatch {
 
 const PORTER = 'porter';
 const CREATE_WF = 'preview-create.yml';
+// The workflow definition only lives on porter's default branch, so dispatch
+// the run from there. The actual preview target branch travels as the `ref`
+// input (a feature branch usually won't have the workflow file yet).
+const WORKFLOW_REF = 'master';
 
 export async function advancePreviewJob(job: Job, deps: ProvisionerDeps): Promise<JobPatch> {
   const b = job.spec.backend;
@@ -28,7 +32,7 @@ export async function advancePreviewJob(job: Job, deps: ProvisionerDeps): Promis
   // Backend half (backend + fullstack)
   if ((job.target === 'backend' || job.target === 'fullstack') && b && !b.url) {
     if (job.status === 'pending') {
-      await deps.gh.dispatch(PORTER, CREATE_WF, b.ref, { ref: b.ref, slug: b.slug, job_id: job.id });
+      await deps.gh.dispatch(PORTER, CREATE_WF, WORKFLOW_REF, { ref: b.ref, slug: b.slug, job_id: job.id });
       return { status: 'backend_running' };
     }
     if (job.status === 'backend_running' && job.runId == null) {

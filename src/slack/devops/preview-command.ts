@@ -248,14 +248,16 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
         .dispatch('porter', 'preview-teardown.yml', 'master', { slug, job_id: jobId })
         .catch((err) => logger.warn({ jobId, err: String((err as Error)?.message ?? err) }, 'teardown dispatch failed'));
     }
-    // Leave the original message intact; post a separate note about what happened.
-    const what = slug ? `\`${slug}\`` : (job?.target ?? 'preview');
-    await deps.slack.chat
-      .postMessage({
-        channel: deps.opsChannelId,
-        text: `🧹 <@${body.user?.id}> tore down the ${job?.target ?? ''} preview ${what}.`,
-      })
-      .catch(() => {});
+    // Update the original message in place: keep the info, drop the button, note who tore it down.
+    if (job?.messageTs) {
+      const blocks = [
+        ...(renderJobBlocks(job) as any[]),
+        { type: 'context', elements: [{ type: 'mrkdwn', text: `🧹 <@${body.user?.id}> tore down this preview` }] },
+      ];
+      await deps.slack.chat
+        .update({ channel: job.channelId, ts: job.messageTs, text: 'preview torn down', blocks })
+        .catch(() => {});
+    }
     logger.info({ jobId, by: body.user?.id }, 'devops preview torn down');
   });
 }

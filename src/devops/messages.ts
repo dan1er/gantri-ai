@@ -25,17 +25,18 @@ export function renderJobBlocks(job: Job): unknown[] {
   const titleTarget = job.target === 'fullstack' ? 'Full-stack' : job.target[0].toUpperCase() + job.target.slice(1);
   const header = `${icon} ${titleTarget} preview — requested by <@${job.requestedBy}>`;
 
+  const showUrls = job.status === 'ready' || job.status === 'torn_down';
   const sections: string[] = [];
   if (job.spec.backend) {
     const b = job.spec.backend;
-    sections.push(componentBlock('Porter', b.slug, b.link, job.status === 'ready' ? b.url : undefined,
+    sections.push(componentBlock('Porter', b.slug, b.link, showUrls ? b.url : undefined,
       job.status === 'backend_running' ? 'provisioning…' : undefined));
   }
   for (const f of job.spec.frontends ?? []) {
     sections.push(componentBlock(REPO_DISPLAY[f.repo] ?? f.repo, f.ref, f.link,
-      job.status === 'ready' ? f.url : undefined,
+      showUrls ? f.url : undefined,
       job.status === 'frontend_running' && !f.url ? 'building…' : undefined,
-      job.status === 'ready' ? f.deploymentUrl : undefined));
+      showUrls ? f.deploymentUrl : undefined));
   }
   if (job.status === 'failed' && job.error) sections.push(`*Error:* ${job.error}`);
 

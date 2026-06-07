@@ -46,6 +46,8 @@ export async function advanceDeployJob(job: Job, deps: ProvisionerDeps): Promise
     if (job.status === 'e2e_running' && e2e.runId != null) {
       const state = await deps.gh.getRunState(E2E_REPO, e2e.runId);
       if (state === 'running') return {};
+      // Gate concluded — the bot created the Qase run, so it closes it.
+      if (deps.qase && e2e.qaseRunId) await deps.qase.completeRun(e2e.qaseRunId);
       if (state === 'failed') {
         return { status: 'failed', error: 'E2E gate failed — deploy blocked', spec: { ...job.spec, e2e: { ...e2e, passed: false } } };
       }

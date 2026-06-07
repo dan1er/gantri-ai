@@ -5,6 +5,7 @@
 
 export interface QaseReader {
   createRun(title: string): Promise<number | null>;
+  completeRun(id: number): Promise<void>;
   runUrl(id: number): string;
 }
 
@@ -25,6 +26,20 @@ export class QaseClient implements QaseReader {
       return body.result?.id ?? null;
     } catch {
       return null;
+    }
+  }
+
+  // qase-trigger only appends results to a run it didn't create, so the bot
+  // (the creator) must close it once the gate concludes — otherwise the run
+  // stays in_progress forever.
+  async completeRun(id: number): Promise<void> {
+    try {
+      await fetch(`https://api.qase.io/v1/run/${QASE_PROJECT}/${id}/complete`, {
+        method: 'POST',
+        headers: { Token: this.token },
+      });
+    } catch {
+      // best-effort
     }
   }
 

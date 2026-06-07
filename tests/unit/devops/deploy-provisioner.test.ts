@@ -120,4 +120,12 @@ describe('advanceDeployJob', () => {
     expect(patch.status).toBe('failed');
     expect(patch.error).toMatch(/E2E/);
   });
+
+  it('e2e gate: completes the Qase run when the gate concludes', async () => {
+    const gh = { getRunState: vi.fn().mockResolvedValue('failed') } as any;
+    const qase = { createRun: vi.fn(), completeRun: vi.fn().mockResolvedValue(undefined), runUrl: vi.fn() };
+    const job: Job = { ...feE2e, status: 'e2e_running', spec: { ...feE2e.spec, e2e: { scope: 'smoke', project: 'marketplace', dispatched: true, runId: 5, qaseRunId: 298 } } };
+    await advanceDeployJob(job, { gh, qase } as any);
+    expect(qase.completeRun).toHaveBeenCalledWith(298);
+  });
 });

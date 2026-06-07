@@ -72,4 +72,14 @@ export class DevopsJobsRepo {
     const { error } = await this.client.from('devops_jobs').update(row).eq('id', id);
     if (error) throw new Error(`devops_jobs update failed: ${error.message}`);
   }
+
+  async get(id: string): Promise<Job | null> {
+    const { data, error } = await this.client
+      .from('devops_jobs')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw new Error(`devops_jobs get failed: ${error.message}`);
+    return data ? toJob(data as Row) : null;
+  }
 }

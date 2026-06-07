@@ -125,13 +125,15 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
     await respond({ response_type: 'ephemeral', blocks: buildTypeButtons() as any });
   });
 
-  const openModal = (build: () => object) => async ({ ack, body, client }: any) => {
+  const openModal = (build: () => object, label: string) => async ({ ack, body, client, respond }: any) => {
     await ack();
+    // Clear the ephemeral picker so the buttons can't be clicked again.
+    await respond({ replace_original: true, text: `📝 Opening the ${label} preview form…` });
     await client.views.open({ trigger_id: body.trigger_id, view: build() });
   };
-  app.action('preview_backend', openModal(buildBackendModal));
-  app.action('preview_frontend', openModal(buildFrontendModal));
-  app.action('preview_fullstack', openModal(buildFullstackModal));
+  app.action('preview_backend', openModal(buildBackendModal, 'Backend'));
+  app.action('preview_frontend', openModal(buildFrontendModal, 'Frontend'));
+  app.action('preview_fullstack', openModal(buildFullstackModal, 'Full-stack'));
 
   app.view('preview_backend_submit', async ({ ack, body, view }) => {
     await ack();
@@ -172,7 +174,14 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
     await ack();
     const jobId = action.value as string;
     await deps.repo.update(jobId, { status: 'torn_down' });
-    logger.info({ jobId, by: body.user?.id }, 'devops preview torn down (Phase 1: status only)');
+    // Refresh the message so the icon flips to 🧹 and the button disappears.
+    const job = await deps.repo.get(jobId);
+    if (job?.messageTs) {
+      await deps.slack.chat
+        .update({ channel: job.channelId, ts: job.messageTs, text: 'preview torn down', blocks: renderJobBlocks(job) as any })
+        .catch(() => {});
+    }
+    logger.info({ jobId, by: body.user?.id }, 'devops preview torn down');
     // Phase 2: dispatch porter preview-teardown.yml here.
   });
 }

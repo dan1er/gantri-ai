@@ -90,13 +90,15 @@ function feSelects() {
 
 function e2eSelect() {
   const opt = (text: string, value: string) => ({ text: { type: 'plain_text' as const, text }, value });
+  // Skip is the default for now (gate opt-in, not opt-out).
+  const skip = opt('Skip (default)', 'skip');
   return {
     type: 'input', block_id: 'e2e_block', optional: false,
     label: { type: 'plain_text', text: 'E2E before deploy' },
     element: {
       type: 'static_select', action_id: 'e2e_input',
-      initial_option: opt('Smoke (default)', 'smoke'),
-      options: [opt('Smoke (default)', 'smoke'), opt('Smoke + Regression', 'both'), opt('Skip', 'skip')],
+      initial_option: skip,
+      options: [skip, opt('Smoke', 'smoke'), opt('Smoke + Regression', 'both')],
     },
   };
 }

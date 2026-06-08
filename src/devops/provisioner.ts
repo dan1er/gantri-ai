@@ -56,8 +56,11 @@ export async function advancePreviewJob(job: Job, deps: ProvisionerDeps): Promis
       if (state === 'running') return {};
       if (state === 'failed') return { status: 'failed', error: 'backend workflow failed' };
       const spec: JobSpec = { ...job.spec, backend: { ...b, url: backendUrl(b.slug) } };
-      // backend ready; if fullstack with frontends, hand off to the frontend half
-      return job.target === 'fullstack' && fes.length > 0
+      // Backend ready. Hand off to the frontend half only if a frontend still
+      // needs wiring. On a backend refresh the frontends already carry their
+      // URLs (the slug — hence the backend URL — is unchanged, so no re-wire),
+      // so go straight to ready instead of stalling in frontend_running.
+      return job.target === 'fullstack' && fes.some((x) => !x.url)
         ? { status: 'frontend_running', spec }
         : { status: 'ready', spec };
     }

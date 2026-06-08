@@ -87,30 +87,36 @@ export function renderJobBlocks(job: Job): unknown[] {
   const titleTarget = job.target === 'fullstack' ? 'Full-stack' : job.target[0].toUpperCase() + job.target.slice(1);
   const header = `${icon} ${titleTarget} preview — requested by <@${job.requestedBy}>`;
 
-  const showUrls = job.status === 'ready' || job.status === 'torn_down';
   const section = (text: string) => ({ type: 'section', text: { type: 'mrkdwn', text } });
-  const tearDownButton = {
+  const buttons = {
     type: 'actions',
-    elements: [{
-      type: 'button', text: { type: 'plain_text', text: 'Tear down' },
-      style: 'danger', action_id: 'preview_teardown', value: job.id,
-    }],
+    elements: [
+      // Refresh re-provisions the backend at the branch HEAD (rebuild + migrations);
+      // only meaningful when there's a backend preview.
+      ...(job.spec.backend ? [{
+        type: 'button', text: { type: 'plain_text', text: '🔄 Refresh backend' },
+        action_id: 'preview_refresh', value: job.id,
+      }] : []),
+      {
+        type: 'button', text: { type: 'plain_text', text: 'Tear down' },
+        style: 'danger', action_id: 'preview_teardown', value: job.id,
+      },
+    ],
   };
 
   const blocks: unknown[] = [section(header)];
   if (job.spec.backend) {
     const b = job.spec.backend;
-    blocks.push(section(componentBlock('Porter', b.slug, b.link, showUrls ? b.url : undefined,
-      job.status === 'backend_running' ? 'provisioning…' : undefined)));
+    blocks.push(section(componentBlock('Porter', b.slug, b.link, b.url, b.url ? undefined : 'provisioning…')));
   }
-  // Tear down sits right after Porter, before the frontends.
-  if (job.status === 'ready') blocks.push(tearDownButton);
+  // Action buttons sit right after Porter, before the frontends.
+  if (job.status === 'ready') blocks.push(buttons);
   const apiUrl = job.spec.backend?.url ? `${job.spec.backend.url}/api` : undefined;
   for (const f of job.spec.frontends ?? []) {
     blocks.push(section(componentBlock(REPO_DISPLAY[f.repo] ?? f.repo, f.ref, f.link,
-      showUrls ? f.url : undefined,
-      job.status === 'frontend_running' && !f.url ? 'building…' : undefined,
-      showUrls ? f.deploymentUrl : undefined, apiUrl)));
+      f.url,
+      f.url ? undefined : 'building…',
+      f.url ? f.deploymentUrl : undefined, apiUrl)));
   }
   if (job.status === 'failed' && job.error) blocks.push(section(`*Error:* ${job.error}`));
   if (blocks.length === 1) blocks.push(section('_starting…_'));

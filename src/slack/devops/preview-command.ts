@@ -3,7 +3,7 @@ import type { WebClient } from '@slack/web-api';
 import type { DevopsJobsRepo } from '../../devops/jobs-repo.js';
 import type { GithubDispatcher } from '../../devops/github.js';
 import type { VercelReader } from '../../devops/provisioner.js';
-import type { JobTarget, FrontendRepo } from '../../devops/types.js';
+import type { JobTarget, FrontendRepo, JobSpec } from '../../devops/types.js';
 import { slugFromRef } from '../../devops/slug.js';
 import { renderJobBlocks } from '../../devops/messages.js';
 import { logger } from '../../logger.js';
@@ -256,6 +256,30 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
     } catch (err) {
       await postError(deps, 'Full-stack', body.user.id, err);
     }
+  });
+
+  app.action('preview_refresh', async ({ ack, body, action }: any) => {
+    await ack();
+    const jobId = action.value as string;
+    const job = await deps.repo.get(jobId);
+    const b = job?.spec.backend;
+    if (!job || !b) return; // nothing to refresh without a backend preview
+    // Re-provision the backend at the branch HEAD without tearing down: clear
+    // its URL and reset to pending so the runner re-dispatches
+    // preview-from-branch against the same slug (rebuild + run-migrations
+    // init-container). The frontends keep their URLs — the slug, and thus the
+    // backend URL they're wired to, is unchanged — so no re-wire is needed.
+    const spec: JobSpec = { ...job.spec, backend: { ...b, url: undefined } };
+    await deps.repo.update(jobId, { status: 'pending', runId: null, error: null, spec });
+    const refreshed = await deps.repo.get(jobId);
+    const channel = body.channel?.id ?? job.channelId;
+    const ts = body.container?.message_ts ?? body.message?.ts ?? job.messageTs;
+    if (refreshed && channel && ts) {
+      await deps.slack.chat
+        .update({ channel, ts, text: 'refreshing backend preview', blocks: renderJobBlocks(refreshed) as any })
+        .catch(() => {});
+    }
+    logger.info({ jobId, by: body.user?.id }, 'devops preview backend refresh requested');
   });
 
   app.action('preview_teardown', async ({ ack, body, action }: any) => {

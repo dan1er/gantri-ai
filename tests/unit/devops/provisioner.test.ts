@@ -30,6 +30,36 @@ describe('advancePreviewJob', () => {
     expect(patch.spec?.backend?.url).toBe('https://as-1.preview.api.gantri.com');
   });
 
+  it('fullstack backend success with un-wired frontends → hands off to frontend_running', async () => {
+    const gh = { getRunState: vi.fn().mockResolvedValue('success') } as any;
+    const job: Job = {
+      ...backendJob, target: 'fullstack', status: 'backend_running', runId: 42,
+      spec: { backend: { ref: 'feat/as-1', slug: 'as-1' }, frontends: [{ repo: 'mantle', ref: 'feat/as-1' }] },
+    };
+    const patch = await advancePreviewJob(job, { gh });
+    expect(patch.status).toBe('frontend_running');
+    expect(patch.spec?.backend?.url).toBe('https://as-1.preview.api.gantri.com');
+  });
+
+  it('backend refresh: fullstack backend success with already-wired frontends → ready, no re-wire', async () => {
+    const gh = { getRunState: vi.fn().mockResolvedValue('success') } as any;
+    const vercel = { wireAndRedeploy: vi.fn() };
+    // Refresh re-runs the backend half (backend.url cleared) while the frontends
+    // already carry their URLs — they must NOT be re-wired and the job goes
+    // straight to ready rather than stalling in frontend_running.
+    const job: Job = {
+      ...backendJob, target: 'fullstack', status: 'backend_running', runId: 42,
+      spec: {
+        backend: { ref: 'feat/as-1', slug: 'as-1' },
+        frontends: [{ repo: 'mantle', ref: 'feat/as-1', url: 'https://marketplace-git-x.vercel.app' }],
+      },
+    };
+    const patch = await advancePreviewJob(job, { gh, vercel } as any);
+    expect(patch.status).toBe('ready');
+    expect(vercel.wireAndRedeploy).not.toHaveBeenCalled();
+    expect(patch.spec?.backend?.url).toBe('https://as-1.preview.api.gantri.com');
+  });
+
   it('backend_running failed → failed with error', async () => {
     const gh = { getRunState: vi.fn().mockResolvedValue('failed') } as any;
     const patch = await advancePreviewJob({ ...backendJob, status: 'backend_running', runId: 42 }, { gh });

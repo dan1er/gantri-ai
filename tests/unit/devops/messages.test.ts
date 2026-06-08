@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { renderJobBlocks } from '../../../src/devops/messages.js';
+import { renderJobBlocks, e2eLocalConfig } from '../../../src/devops/messages.js';
 import type { Job } from '../../../src/devops/types.js';
 
 const baseJob: Job = {
@@ -41,6 +41,40 @@ const deployJob: Job = {
   requestedBy: 'U1', channelId: 'C1', messageTs: 'ts', runId: 9,
   error: null, createdAt: 't', updatedAt: 't',
 };
+
+describe('e2eLocalConfig', () => {
+  const readyFullstack: Job = {
+    id: 'p1', kind: 'preview', target: 'fullstack', status: 'ready',
+    spec: {
+      backend: { ref: 'feat/as-1', slug: 'as-1', url: 'https://as-1.preview.api.gantri.com' },
+      frontends: [
+        { repo: 'mantle', ref: 'feat/as-1', url: 'https://marketplace-git-feat-as-1-gantri.vercel.app' },
+        { repo: 'core', ref: 'feat/other', url: 'https://factoryos-git-feat-other-gantri.vercel.app' },
+      ],
+    },
+    requestedBy: 'U1', channelId: 'C1', messageTs: 'ts', runId: 9, error: null, createdAt: 't', updatedAt: 't',
+  };
+
+  it('builds the env + tunnel block for a ready preview with a backend', () => {
+    const cfg = e2eLocalConfig(readyFullstack)!;
+    expect(cfg).toContain('E2E_TARGET=preview');
+    expect(cfg).toContain('PORTER_API_URL=https://as-1.preview.api.gantri.com');
+    expect(cfg).toContain('MARKETPLACE_BASE_URL=https://marketplace-git-feat-as-1-gantri.vercel.app');
+    expect(cfg).toContain('FACTORYOS_BASE_URL=https://factoryos-git-feat-other-gantri.vercel.app');
+    expect(cfg).toContain('PORTER_STAGING_DB_HOST=localhost');
+    expect(cfg).toContain('PORTER_STAGING_DB_SSL=false');
+    expect(cfg).toContain('preview-db-tunnel.sh as-1'); // tunnel keyed off the backend slug
+  });
+
+  it('returns null for a frontend-only preview (no preview API/DB)', () => {
+    const fe: Job = { ...readyFullstack, target: 'frontend', spec: { frontends: [{ repo: 'mantle', ref: 'x', url: 'https://u' }] } };
+    expect(e2eLocalConfig(fe)).toBeNull();
+  });
+
+  it('returns null until the preview is ready', () => {
+    expect(e2eLocalConfig({ ...readyFullstack, status: 'backend_running', spec: { backend: { ref: 'feat/as-1', slug: 'as-1' } } })).toBeNull();
+  });
+});
 
 describe('renderJobBlocks — deploy rollback button', () => {
   it('shows a Rollback backend button with a confirm dialog naming the previous deploy when ready', () => {

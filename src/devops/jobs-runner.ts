@@ -2,7 +2,7 @@ import type { WebClient } from '@slack/web-api';
 import type { Job } from './types.js';
 import type { DevopsJobsRepo } from './jobs-repo.js';
 import type { JobPatch, ProvisionerDeps } from './provisioner.js';
-import { renderJobBlocks } from './messages.js';
+import { renderJobBlocks, e2eLocalConfig } from './messages.js';
 import { logger } from '../logger.js';
 
 type Advance = (job: Job, deps: ProvisionerDeps) => Promise<JobPatch>;
@@ -93,6 +93,14 @@ export class JobsRunner {
           await this.deps.slack.chat
             .postMessage({ channel: job.channelId, thread_ts: job.messageTs, text: note, unfurl_links: false, unfurl_media: false })
             .catch((err) => logger.warn({ jobId: job.id, err: String((err as Error)?.message ?? err) }, 'devops thread note failed'));
+        }
+        // When a preview with a backend goes ready, thread the ready-to-run
+        // gantri-e2e config (env + tunnel command) for that specific preview.
+        const e2eCfg = e2eLocalConfig(updated);
+        if (e2eCfg) {
+          await this.deps.slack.chat
+            .postMessage({ channel: job.channelId, thread_ts: job.messageTs, text: e2eCfg, unfurl_links: false, unfurl_media: false })
+            .catch((err) => logger.warn({ jobId: job.id, err: String((err as Error)?.message ?? err) }, 'devops e2e config note failed'));
         }
       }
     }

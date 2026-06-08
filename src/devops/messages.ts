@@ -1,9 +1,42 @@
-import type { Job, JobStatus, DeployItem } from './types.js';
+import type { Job, JobStatus, DeployItem, FrontendRepo } from './types.js';
 
 const ICON: Record<JobStatus, string> = {
   pending: '⏳', e2e_running: '🧪', backend_running: '⏳', frontend_running: '⏳',
   ready: '✅', failed: '✗', torn_down: '🧹',
 };
+
+const E2E_FE_ENV: Record<FrontendRepo, string> = {
+  mantle: 'MARKETPLACE_BASE_URL', core: 'FACTORYOS_BASE_URL', made: 'MADEOS_BASE_URL',
+};
+
+/**
+ * For a ready preview that has a backend, a copy-paste block (gantri-e2e `.env`
+ * + the tunnel command) to run the suite locally against THIS preview. Returns
+ * null for frontend-only previews (no preview API/DB to target). Meant for the
+ * preview thread, not the main message.
+ */
+export function e2eLocalConfig(job: Job): string | null {
+  const b = job.spec.backend;
+  if (job.kind !== 'preview' || job.status !== 'ready' || !b?.url) return null;
+  const envLines = [`E2E_TARGET=preview`, `PORTER_API_URL=${b.url}`];
+  for (const f of job.spec.frontends ?? []) {
+    if (f.url) envLines.push(`${E2E_FE_ENV[f.repo]}=${f.url}`);
+  }
+  envLines.push(
+    `PORTER_STAGING_DB_HOST=localhost`,
+    `PORTER_STAGING_DB_USER=postgres`,
+    `PORTER_STAGING_DB_PASSWORD=preview`,
+    `PORTER_STAGING_DB_NAME=porter`,
+    `PORTER_STAGING_DB_SSL=false`,
+  );
+  return [
+    `🧪 *Run gantri-e2e locally against this preview*`,
+    `1. Put this in \`gantri-e2e/.env\`:`,
+    '```\n' + envLines.join('\n') + '\n```',
+    `2. Open the DB tunnel (leave running): \`scripts/preview-db-tunnel.sh ${b.slug}\``,
+    `3. Run a project, e.g. \`yarn test:marketplace\` (the suite ensures e2e fixtures on first run).`,
+  ].join('\n');
+}
 
 const REPO_DISPLAY: Record<string, string> = {
   mantle: 'Marketplace', core: 'Factoryos', made: 'Madeos',

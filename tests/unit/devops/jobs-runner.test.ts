@@ -38,4 +38,22 @@ describe('JobsRunner.tick', () => {
     await runner.tick();
     expect(repo.update).toHaveBeenCalledWith('j1', expect.objectContaining({ status: 'failed' }));
   });
+
+  it('on a deploy going ready, threads a note with the previous release + manual rollback steps', async () => {
+    const deployJob: Job = {
+      id: 'd1', kind: 'deploy', target: 'backend', status: 'backend_running',
+      spec: { deployBackend: { tag: 'deploy-5198-2026.06.08', sha: 's', pr: 5198, url: 'https://api.gantri.com', prevRelease: 'v2026.06.08.05' } },
+      requestedBy: 'U1', channelId: 'C1', messageTs: 'tsD', runId: 9, error: null, createdAt: 't', updatedAt: 't',
+    };
+    const repo = { listActive: vi.fn().mockResolvedValue([deployJob]), update: vi.fn().mockResolvedValue(undefined) } as any;
+    const advance = vi.fn().mockResolvedValue({ status: 'ready' });
+    const slack = { chat: { update: vi.fn().mockResolvedValue({}), postMessage: vi.fn().mockResolvedValue({}) } } as any;
+    const runner = new JobsRunner({ repo, advance, slack, gh: {} as any });
+    await runner.tick();
+    expect(slack.chat.postMessage).toHaveBeenCalledOnce();
+    const arg = slack.chat.postMessage.mock.calls[0][0];
+    expect(arg.thread_ts).toBe('tsD');
+    expect(arg.text).toContain('v2026.06.08.05');
+    expect(arg.text).toMatch(/Rollback Production/i);
+  });
 });

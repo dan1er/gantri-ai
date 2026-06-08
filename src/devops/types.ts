@@ -35,6 +35,10 @@ export interface DeployItem {
   e2eQaseRunId?: number | null; // its Qase TestOps run
   e2eDispatched?: boolean;
   e2ePassed?: boolean;          // undefined = testing, true = green, false = blocked
+  // Backend only: the prod release tag (vYYYY.MM.DD.i) that was live BEFORE this
+  // deploy — captured at dispatch, used as the one-click rollback target and
+  // shown in the thread as the manual-rollback fallback.
+  prevRelease?: string;
 }
 
 export interface JobSpec {

@@ -34,3 +34,38 @@ describe('renderJobBlocks', () => {
     expect(JSON.stringify(blocks)).toContain('boom');
   });
 });
+
+const deployJob: Job = {
+  id: 'd1', kind: 'deploy', target: 'backend', status: 'ready',
+  spec: { deployBackend: { tag: 'deploy-5198-2026.06.08', sha: 's', pr: 5198, url: 'https://api.gantri.com', prevRelease: 'v2026.06.08.05' } },
+  requestedBy: 'U1', channelId: 'C1', messageTs: 'ts', runId: 9,
+  error: null, createdAt: 't', updatedAt: 't',
+};
+
+describe('renderJobBlocks — deploy rollback button', () => {
+  it('shows a Rollback backend button with a confirm dialog naming the previous release when ready', () => {
+    const text = JSON.stringify(renderJobBlocks(deployJob));
+    expect(text).toContain('deploy_rollback');
+    expect(text).toContain('Rollback backend');
+    expect(text).toContain('v2026.06.08.05'); // the rollback target, inside the confirm dialog
+    expect(text).toContain('Roll back production?');
+  });
+
+  it('hides the rollback button when there is no previous release', () => {
+    const job = { ...deployJob, spec: { deployBackend: { ...deployJob.spec.deployBackend!, prevRelease: undefined } } };
+    expect(JSON.stringify(renderJobBlocks(job))).not.toContain('deploy_rollback');
+  });
+
+  it('hides the rollback button on a failed deploy', () => {
+    const job = { ...deployJob, status: 'failed' as const, error: 'boom' };
+    expect(JSON.stringify(renderJobBlocks(job))).not.toContain('deploy_rollback');
+  });
+
+  it('hides the rollback button on a frontend-only deploy (no backend)', () => {
+    const job: Job = {
+      ...deployJob,
+      spec: { deployFrontends: [{ repo: 'mantle', tag: 'deploy-1203-2026.06.08', sha: 's', pr: 1203, url: 'https://www.gantri.com' }] },
+    };
+    expect(JSON.stringify(renderJobBlocks(job))).not.toContain('deploy_rollback');
+  });
+});

@@ -70,4 +70,19 @@ describe('GithubDispatcher', () => {
     const gh = new GithubDispatcher({ token: 't', owner: 'gantri', fetch: fetchMock });
     await expect(gh.resolveRef('porter', '999')).rejects.toThrow(/PR #999 not found/);
   });
+
+  it('listReleaseTags sorts vYYYY.MM.DD.i newest-first, numerically (.10 after .2), ignoring non-release tags', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse([
+      { ref: 'refs/tags/v2026.06.08.2', object: { sha: 'a' } },
+      { ref: 'refs/tags/v2026.06.08.10', object: { sha: 'b' } },
+      { ref: 'refs/tags/v2026.06.07.9', object: { sha: 'c' } },
+      { ref: 'refs/tags/v1.0.0', object: { sha: 'x' } },        // legacy semver — ignored
+      { ref: 'refs/tags/vibe', object: { sha: 'y' } },           // not a release tag — ignored
+    ]));
+    const gh = new GithubDispatcher({ token: 't', owner: 'gantri', fetch: fetchMock });
+    const tags = await gh.listReleaseTags('porter');
+    expect(fetchMock.mock.calls[0][0]).toBe('https://api.github.com/repos/gantri/porter/git/matching-refs/tags/v');
+    expect(tags.map((t) => t.tag)).toEqual(['v2026.06.08.10', 'v2026.06.08.2', 'v2026.06.07.9']);
+    expect(tags[0]).toEqual({ tag: 'v2026.06.08.10', sha: 'b' });
+  });
 });

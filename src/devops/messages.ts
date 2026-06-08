@@ -77,6 +77,24 @@ function renderDeploy(job: Job): unknown[] {
   } else if (job.status === 'failed' && job.error) {
     blocks.push(section(`*Error:* ${job.error}`));
   }
+
+  // On a successful deploy, offer a one-click rollback of the backend to the
+  // release that was live before it. Native Slack confirm — it touches prod.
+  if (job.status === 'ready' && b?.prevRelease) {
+    blocks.push({
+      type: 'actions',
+      elements: [{
+        type: 'button', text: { type: 'plain_text', text: '↩️ Rollback backend' }, style: 'danger',
+        action_id: 'deploy_rollback', value: job.id,
+        confirm: {
+          title: { type: 'plain_text', text: 'Roll back production?' },
+          text: { type: 'mrkdwn', text: `Redeploy \`${b.prevRelease}\` to production — the release that was live before this deploy.` },
+          confirm: { type: 'plain_text', text: 'Roll back' },
+          deny: { type: 'plain_text', text: 'Cancel' },
+        },
+      }],
+    });
+  }
   if (blocks.length === 1) blocks.push(section('_starting…_'));
   return blocks;
 }

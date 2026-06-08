@@ -353,4 +353,38 @@ export function registerDeployCommand(app: App, deps: DeployCommandDeps): void {
       await postErr(deps, 'Retry', body.user?.id ?? '', err);
     }
   });
+
+  // One-click backend rollback: redeploy the release that was live before this
+  // deploy (captured at dispatch). The button carries a native Slack confirm, so
+  // by the time we get here the user has already confirmed.
+  app.action('deploy_rollback', async ({ ack, body, action }: any) => {
+    await ack();
+    try {
+      const jobId = action.value as string;
+      const job = await deps.repo.get(jobId);
+      const prev = job?.spec.deployBackend?.prevRelease;
+      if (!job || !prev) {
+        await deps.slack.chat
+          .postEphemeral({
+            channel: body.channel?.id ?? deps.opsChannelId, user: body.user?.id,
+            text: 'No previous release recorded for this deploy — roll back manually via Actions → Rollback Production.',
+          })
+          .catch(() => {});
+        return;
+      }
+      // rollback-production.yml gates on confirm === 'rollback'.
+      await deps.gh.dispatch('porter', 'rollback-production.yml', 'master', { release_tag: prev, confirm: 'rollback' });
+      const channel = body.channel?.id ?? job.channelId;
+      const ts = job.messageTs ?? body.container?.message_ts;
+      await deps.slack.chat
+        .postMessage({
+          channel, thread_ts: ts ?? undefined,
+          text: `↩️ <@${body.user?.id}> dispatched a production rollback to \`${prev}\` — watch: https://github.com/gantri/porter/actions/workflows/rollback-production.yml`,
+          unfurl_links: false, unfurl_media: false,
+        })
+        .catch(() => {});
+    } catch (err) {
+      await postErr(deps, 'Rollback', body.user?.id ?? '', err);
+    }
+  });
 }

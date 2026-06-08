@@ -38,7 +38,10 @@ export interface DeployItem {
 }
 
 export interface JobSpec {
-  backend?: { ref: string; slug: string; url?: string; link?: string };
+  // `attempt` bumps on each backend refresh so the re-dispatched workflow run
+  // carries a unique marker (job_id#N) — otherwise findRunByMarker could latch
+  // onto the original, now-completed run and report success without re-provisioning.
+  backend?: { ref: string; slug: string; url?: string; link?: string; attempt?: number };
   // A single backend preview can fan out to 1–3 frontends at once.
   frontends?: Frontend[];
   // Deploy jobs (kind = 'deploy') ship tags to production.

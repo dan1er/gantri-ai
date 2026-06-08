@@ -43,12 +43,16 @@ export async function advancePreviewJob(job: Job, deps: ProvisionerDeps): Promis
 
   // Backend half (backend + fullstack)
   if ((job.target === 'backend' || job.target === 'fullstack') && b && !b.url) {
+    // On a refresh the same job is re-dispatched, so disambiguate this run from
+    // the original with a per-attempt suffix (job_id#N). The very first
+    // provision (attempt unset) keeps the bare job id, unchanged.
+    const marker = `${job.id}${b.attempt ? `#${b.attempt}` : ''}`;
     if (job.status === 'pending') {
-      await deps.gh.dispatch(PORTER, CREATE_WF, WORKFLOW_REF, { ref: b.ref, slug: b.slug, job_id: job.id });
+      await deps.gh.dispatch(PORTER, CREATE_WF, WORKFLOW_REF, { ref: b.ref, slug: b.slug, job_id: marker });
       return { status: 'backend_running' };
     }
     if (job.status === 'backend_running' && job.runId == null) {
-      const runId = await deps.gh.findRunByMarker(PORTER, CREATE_WF, job.id);
+      const runId = await deps.gh.findRunByMarker(PORTER, CREATE_WF, marker);
       return runId == null ? {} : { runId };
     }
     if (job.status === 'backend_running' && job.runId != null) {

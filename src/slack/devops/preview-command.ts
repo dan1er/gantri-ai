@@ -1,6 +1,6 @@
 import type { App } from '@slack/bolt';
 import type { WebClient } from '@slack/web-api';
-import type { DevopsJobsRepo } from '../../devops/jobs-repo.js';
+import type { DevopsJobsRepo, UpdateJobInput } from '../../devops/jobs-repo.js';
 import type { GithubDispatcher } from '../../devops/github.js';
 import type { VercelReader } from '../../devops/provisioner.js';
 import type { JobTarget, FrontendRepo, JobSpec } from '../../devops/types.js';
@@ -138,10 +138,18 @@ async function createJobAndPost(
     if (existing.status === 'ready') {
       blocks.push({
         type: 'actions',
-        elements: [{
-          type: 'button', text: { type: 'plain_text', text: 'Tear down' },
-          style: 'danger', action_id: 'preview_teardown', value: existing.id,
-        }],
+        elements: [
+          // Same buttons as the live job message: refresh the backend in place
+          // (when there is one) or tear the whole preview down.
+          ...(existing.spec.backend ? [{
+            type: 'button', text: { type: 'plain_text', text: '🔄 Refresh backend' },
+            action_id: 'preview_refresh', value: existing.id,
+          }] : []),
+          {
+            type: 'button', text: { type: 'plain_text', text: 'Tear down' },
+            style: 'danger', action_id: 'preview_teardown', value: existing.id,
+          },
+        ],
       });
     }
     await deps.slack.chat
@@ -264,22 +272,47 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
     const job = await deps.repo.get(jobId);
     const b = job?.spec.backend;
     if (!job || !b) return; // nothing to refresh without a backend preview
-    // Re-provision the backend at the branch HEAD without tearing down: clear
-    // its URL and reset to pending so the runner re-dispatches
-    // preview-from-branch against the same slug (rebuild + run-migrations
-    // init-container). The frontends keep their URLs — the slug, and thus the
-    // backend URL they're wired to, is unchanged — so no re-wire is needed.
-    const spec: JobSpec = { ...job.spec, backend: { ...b, url: undefined } };
-    await deps.repo.update(jobId, { status: 'pending', runId: null, error: null, spec });
+    // Only a settled, live preview can be refreshed. This guards stale buttons
+    // (on an orphaned/old message) from resurrecting a torn-down preview or
+    // re-dispatching one that's already mid-refresh (rapid double-click).
+    if (job.status !== 'ready') {
+      await deps.slack.chat
+        .postEphemeral({
+          channel: body.channel?.id ?? job.channelId, user: body.user?.id,
+          text: job.status === 'torn_down'
+            ? 'That preview was torn down — run `/preview` to make a new one.'
+            : 'That preview is already updating — give it a moment.',
+        })
+        .catch(() => {});
+      return;
+    }
+    // Re-provision the backend at the branch HEAD without tearing down: clear its
+    // URL and reset to pending so the runner re-dispatches preview-from-branch
+    // against the same slug (rebuild + run-migrations init-container). The
+    // frontends keep their URLs — the slug, hence the backend URL they're wired
+    // to, is unchanged — so no re-wire is needed. Bump `attempt` so the new run
+    // gets a unique marker (job_id#N) and findRunByMarker can't latch the old run.
+    const attempt = (b.attempt ?? 0) + 1;
+    const spec: JobSpec = { ...job.spec, backend: { ...b, url: undefined, attempt } };
+    // The button can live on a "reuse" note — a different message than the job's
+    // canonical one (job.messageTs), which is what the runner keeps updating as
+    // the refresh progresses. Adopt the clicked message (same channel) as the new
+    // canonical one so the runner drives the message the user is actually looking
+    // at, rather than leaving it frozen while a stale message elsewhere updates.
+    const clickedTs: string | undefined = body.container?.message_ts ?? body.message?.ts;
+    const adopt = !!clickedTs && body.channel?.id === job.channelId && clickedTs !== job.messageTs;
+    const patch: UpdateJobInput = { status: 'pending', runId: null, error: null, spec };
+    if (adopt) patch.messageTs = clickedTs;
+    await deps.repo.update(jobId, patch);
     const refreshed = await deps.repo.get(jobId);
     const channel = body.channel?.id ?? job.channelId;
-    const ts = body.container?.message_ts ?? body.message?.ts ?? job.messageTs;
+    const ts = adopt ? clickedTs : job.messageTs;
     if (refreshed && channel && ts) {
       await deps.slack.chat
-        .update({ channel, ts, text: 'refreshing backend preview', blocks: renderJobBlocks(refreshed) as any })
+        .update({ channel, ts, text: 'refreshing backend preview', blocks: renderJobBlocks(refreshed) as any, unfurl_links: false, unfurl_media: false } as any)
         .catch(() => {});
     }
-    logger.info({ jobId, by: body.user?.id }, 'devops preview backend refresh requested');
+    logger.info({ jobId, by: body.user?.id, adopted: adopt, attempt }, 'devops preview backend refresh requested');
   });
 
   app.action('preview_teardown', async ({ ack, body, action }: any) => {
@@ -300,18 +333,25 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
       await deps.vercel?.removeBranchEnv(f.repo, f.ref)
         .catch((err) => logger.warn({ jobId, repo: f.repo, err: String((err as Error)?.message ?? err) }, 'env cleanup failed'));
     }
-    // Update the message the button was clicked from (original or reuse note):
-    // keep the info, drop the button, note who tore it down.
+    // Update BOTH the message the button was clicked from AND the job's canonical
+    // message: tearing down from a "reuse" note leaves the original message
+    // otherwise showing a stale "live" preview with active buttons. The torn-down
+    // render (status='torn_down') drops the buttons; sync them to the same state.
     const channel = body.channel?.id ?? job?.channelId;
-    const ts = body.container?.message_ts ?? body.message?.ts ?? job?.messageTs;
-    if (job && channel && ts) {
+    if (job && channel) {
       const blocks = [
         ...(renderJobBlocks(job) as any[]),
         { type: 'context', elements: [{ type: 'mrkdwn', text: `🧹 <@${body.user?.id}> tore down this preview` }] },
       ];
-      await deps.slack.chat
-        .update({ channel, ts, text: 'preview torn down', blocks })
-        .catch(() => {});
+      const targets = new Set<string>();
+      const clickedTs = body.container?.message_ts ?? body.message?.ts;
+      if (clickedTs) targets.add(clickedTs);
+      if (job.messageTs) targets.add(job.messageTs);
+      for (const ts of targets) {
+        await deps.slack.chat
+          .update({ channel, ts, text: 'preview torn down', blocks })
+          .catch(() => {});
+      }
     }
     logger.info({ jobId, by: body.user?.id }, 'devops preview torn down');
   });

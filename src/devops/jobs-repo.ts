@@ -29,7 +29,9 @@ export interface CreateJobInput {
 export interface UpdateJobInput {
   status?: JobStatus;
   spec?: JobSpec;
-  messageTs?: string | null;
+  // No `| null`: nulling the canonical message ts would strand the job (the
+  // runner skips updates when messageTs is falsy and could never recover).
+  messageTs?: string;
   runId?: number | null;
   error?: string | null;
 }
@@ -66,7 +68,7 @@ export class DevopsJobsRepo {
     const row: Record<string, unknown> = { updated_at: new Date().toISOString() };
     if (patch.status !== undefined) row.status = patch.status;
     if (patch.spec !== undefined) row.spec = patch.spec;
-    if (patch.messageTs !== undefined) row.message_ts = patch.messageTs;
+    if (patch.messageTs) row.message_ts = patch.messageTs; // truthy: never null out the canonical ts
     if (patch.runId !== undefined) row.run_id = patch.runId;
     if (patch.error !== undefined) row.error = patch.error;
     const { error } = await this.client.from('devops_jobs').update(row).eq('id', id);

@@ -202,9 +202,10 @@ export function registerDeployCommand(app: App, deps: DeployCommandDeps): void {
     await respond({ response_type: 'ephemeral', blocks: buttons() as any });
   });
 
-  const open = (build: () => object, label: string) => async ({ ack, body, client, respond }: any) => {
+  const open = (build: () => object, _label: string) => async ({ ack, body, client, respond }: any) => {
     await ack();
-    await respond({ replace_original: true, text: `🚀 Opening the ${label} deploy form…` });
+    // Remove the picker buttons; the modal opening is feedback enough.
+    await respond({ delete_original: true });
     await client.views.open({ trigger_id: body.trigger_id, view: build() });
   };
   app.action('deploy_backend', open(backendModal, 'Backend'));

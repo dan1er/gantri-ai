@@ -181,10 +181,10 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
     await respond({ response_type: 'ephemeral', blocks: buildTypeButtons() as any });
   });
 
-  const openModal = (build: () => object, label: string) => async ({ ack, body, client, respond }: any) => {
+  const openModal = (build: () => object, _label: string) => async ({ ack, body, client, respond }: any) => {
     await ack();
-    // Clear the ephemeral picker so the buttons can't be clicked again.
-    await respond({ replace_original: true, text: `📝 Opening the ${label} preview form…` });
+    // Remove the picker buttons; the modal opening is feedback enough.
+    await respond({ delete_original: true });
     await client.views.open({ trigger_id: body.trigger_id, view: build() });
   };
   app.action('preview_backend', openModal(buildBackendModal, 'Backend'));

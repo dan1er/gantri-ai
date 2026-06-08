@@ -10,6 +10,7 @@ export interface VercelReader {
   deploymentState(deploymentId: string): Promise<'building' | 'ready' | 'error'>;
   promoteToProd(projectId: string, deploymentId: string): Promise<void>;
   prodUrl(repo: FrontendRepo): string;
+  removeBranchEnv(repo: FrontendRepo, ref: string): Promise<void>;
 }
 
 export interface ProvisionerDeps {

@@ -97,6 +97,24 @@ export class VercelClient {
     return { url: `https://${name}-git-${branch}-gantri.vercel.app`, deploymentUrl };
   }
 
+  // Remove the branch-scoped API-URL env var on teardown so the branch stops
+  // pointing at a now-dead backend preview; future auto-deploys revert to the
+  // project's default preview API URL. Best-effort.
+  async removeBranchEnv(repo: FrontendRepo, ref: string): Promise<void> {
+    const { id } = await this.project(repo);
+    const listRes = await this.fetch(
+      `https://api.vercel.com/v9/projects/${id}/env?teamId=${this.deps.teamId}`,
+      { headers: this.headers() },
+    );
+    if (!listRes.ok) return;
+    const body = (await listRes.json()) as { envs?: { id: string; key: string; gitBranch?: string | null }[] };
+    const match = (body.envs ?? []).find((e) => e.key === API_URL_VAR[repo] && e.gitBranch === ref);
+    if (!match) return;
+    await this.fetch(`https://api.vercel.com/v9/projects/${id}/env/${match.id}?teamId=${this.deps.teamId}`, {
+      method: 'DELETE', headers: this.headers(),
+    });
+  }
+
   prodUrl(repo: FrontendRepo): string {
     return PROD_DOMAIN[repo];
   }

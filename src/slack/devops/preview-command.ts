@@ -2,6 +2,7 @@ import type { App } from '@slack/bolt';
 import type { WebClient } from '@slack/web-api';
 import type { DevopsJobsRepo } from '../../devops/jobs-repo.js';
 import type { GithubDispatcher } from '../../devops/github.js';
+import type { VercelReader } from '../../devops/provisioner.js';
 import type { JobTarget, FrontendRepo } from '../../devops/types.js';
 import { slugFromRef } from '../../devops/slug.js';
 import { renderJobBlocks } from '../../devops/messages.js';
@@ -99,6 +100,7 @@ export interface PreviewCommandDeps {
   slack: WebClient;
   opsChannelId: string;
   gh: GithubDispatcher;
+  vercel?: VercelReader;
 }
 
 function jobKey(spec: { backend?: { slug: string }; frontends?: { repo: string; ref: string }[] }): string {
@@ -267,6 +269,12 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
       await deps.gh
         .dispatch('porter', 'preview-teardown.yml', 'master', { slug, job_id: jobId })
         .catch((err) => logger.warn({ jobId, err: String((err as Error)?.message ?? err) }, 'teardown dispatch failed'));
+    }
+    // Remove each frontend's branch-scoped API-URL env var so the branch stops
+    // pointing at the now-gone backend preview (future auto-deploys revert to default).
+    for (const f of job?.spec.frontends ?? []) {
+      await deps.vercel?.removeBranchEnv(f.repo, f.ref)
+        .catch((err) => logger.warn({ jobId, repo: f.repo, err: String((err as Error)?.message ?? err) }, 'env cleanup failed'));
     }
     // Update the message the button was clicked from (original or reuse note):
     // keep the info, drop the button, note who tore it down.

@@ -47,6 +47,26 @@ describe('advanceDeployJob', () => {
     expect(p2.spec?.deployFrontends?.[0]?.url).toBe('https://www.gantri.com');
   });
 
+  it('frontend deploy: one fails, the sibling still promotes (job failed, sibling keeps url)', async () => {
+    const vercel = {
+      deployToProd: vi.fn(),
+      deploymentState: vi.fn().mockImplementation((id: string) => (id === 'd1' ? 'ready' : 'error')),
+      promoteToProd: vi.fn().mockResolvedValue(undefined),
+      prodUrl: vi.fn().mockReturnValue('https://www.gantri.com'),
+    };
+    const job: Job = {
+      ...base, target: 'frontend', status: 'frontend_running',
+      spec: { deployFrontends: [
+        { repo: 'mantle', tag: 't1', sha: 'a', pr: 1, deploymentId: 'd1', projectId: 'p1' },
+        { repo: 'core', tag: 't2', sha: 'b', pr: 2, deploymentId: 'd2', projectId: 'p2' },
+      ] },
+    };
+    const patch = await advanceDeployJob(job, { gh: {} as any, vercel } as any);
+    expect(patch.status).toBe('failed');
+    expect(patch.spec?.deployFrontends?.find((f) => f.repo === 'mantle')?.url).toBe('https://www.gantri.com');
+    expect(patch.spec?.deployFrontends?.find((f) => f.repo === 'core')?.error).toBeTruthy();
+  });
+
   const fullstack: Job = {
     ...base, target: 'fullstack',
     spec: {

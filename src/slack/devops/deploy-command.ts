@@ -293,4 +293,29 @@ export function registerDeployCommand(app: App, deps: DeployCommandDeps): void {
     await ack();
     await respond({ replace_original: true, text: '🚫 Deploy cancelled.' });
   });
+
+  // Retry after a deploy-phase failure (E2E already passed): clear the failed
+  // frontends' progress and re-enter the deploy phase, skipping the gate.
+  // Succeeded components keep their URLs and aren't redeployed.
+  app.action('deploy_retry', async ({ ack, body, action }: any) => {
+    await ack();
+    try {
+      const jobId = action.value as string;
+      const job = await deps.repo.get(jobId);
+      if (!job) throw new Error('job not found');
+      const deployFrontends = (job.spec.deployFrontends ?? []).map((f: DeployItem) =>
+        f.error ? { ...f, error: undefined, deploymentId: undefined, projectId: undefined, deploymentUrl: undefined } : f);
+      const spec = { ...job.spec, deployFrontends };
+      await deps.repo.update(jobId, { status: 'pending', error: null, runId: null, spec });
+      if (job.messageTs) {
+        await deps.slack.chat.update({
+          channel: job.channelId, ts: job.messageTs, text: 'retrying deploy…',
+          blocks: renderJobBlocks({ ...job, status: 'pending', error: null, spec } as any) as any,
+          unfurl_links: false, unfurl_media: false,
+        } as any).catch(() => undefined);
+      }
+    } catch (err) {
+      await postErr(deps, 'Retry', body.user?.id ?? '', err);
+    }
+  });
 }

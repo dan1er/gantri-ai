@@ -26,12 +26,15 @@ const PROD_URL: Record<string, string> = {
 
 function renderDeploy(job: Job): unknown[] {
   const icon = ICON[job.status];
-  const header = `${icon} Deploy → production — requested by <@${job.requestedBy}>`;
+  const headline = job.status === 'ready' ? 'Deployed to production'
+    : job.status === 'failed' ? 'Deploy failed'
+    : 'Deploy → production';
+  const header = `${icon} *${headline}* — requested by <@${job.requestedBy}>`;
   const section = (text: string) => ({ type: 'section', text: { type: 'mrkdwn', text } });
-  const item = (name: string, tag: string, target: string, url: string | undefined, pending: string | undefined, inspector?: string) => {
-    const status = !url && pending ? ` _(${pending})_` : '';
+  const item = (name: string, tag: string, target: string, url: string | undefined, pending: string | undefined, inspector?: string, error?: string) => {
+    const status = error ? ` ✗ _${error}_` : !url && pending ? ` _(${pending})_` : '';
     const lines = [`<${url ?? target}|${name}> · \`${tag}\`${status}`];
-    if (inspector) lines.push(`<${inspector}|Deployment>`);
+    if (inspector && !error) lines.push(`<${inspector}|Deployment>`);
     return lines.join('\n');
   };
   const blocks: unknown[] = [section(header)];
@@ -62,15 +65,24 @@ function renderDeploy(job: Job): unknown[] {
   for (const f of job.spec.deployFrontends ?? []) {
     const name = REPO_DISPLAY[f.repo ?? ''] ?? f.repo ?? 'frontend';
     blocks.push(section(item(name, f.tag, PROD_URL[f.repo ?? ''] ?? 'production', f.url,
-      pendText(f.url, 'frontend_running'), f.deploymentUrl)));
+      pendText(f.url, 'frontend_running'), f.deploymentUrl, f.error)));
   }
   if (job.status === 'failed') {
     const e = job.spec.e2e;
     if (e?.passed === false && e.qaseRunId) {
       const ghRun = e.runId ? ` · <https://github.com/gantri/gantri-e2e/actions/runs/${e.runId}|GitHub run>` : '';
       blocks.push(section(`🚫 *Deploy blocked — E2E gate failed.* <https://app.qase.io/run/GANTRI/dashboard/${e.qaseRunId}|Check results in Qase>${ghRun}`));
-    } else if (job.error) {
-      blocks.push(section(`*Error:* ${job.error}`));
+    } else {
+      // Deploy-phase failure (E2E already passed) — show it + a Retry button
+      // that re-attempts only the failed components, skipping the gate.
+      if (job.error) blocks.push(section(`✗ *Deploy failed:* ${job.error}`));
+      blocks.push({
+        type: 'actions',
+        elements: [{
+          type: 'button', text: { type: 'plain_text', text: '🔄 Retry failed' },
+          style: 'primary', action_id: 'deploy_retry', value: job.id,
+        }],
+      });
     }
   }
   if (blocks.length === 1) blocks.push(section('_starting…_'));

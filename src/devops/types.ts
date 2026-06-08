@@ -28,6 +28,7 @@ export interface DeployItem {
   deploymentUrl?: string;  // Vercel inspector (frontend)
   deploymentId?: string;   // frontend poll handle
   projectId?: string;      // frontend promote handle
+  error?: string;          // set when this component's deploy failed (retriable)
 }
 
 export interface JobSpec {

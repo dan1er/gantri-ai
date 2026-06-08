@@ -76,27 +76,34 @@ export async function advanceDeployJob(job: Job, deps: ProvisionerDeps): Promise
     }
   }
 
-  // Frontend half (frontend + fullstack) — deploy(prod) -> poll -> promote, per repo
-  if ((job.target === 'frontend' || job.target === 'fullstack') && fes.some((x) => !x.url)) {
+  // Frontend half (frontend + fullstack) — deploy(prod) -> poll -> promote, per
+  // repo, in parallel. A failure is recorded on that frontend (not thrown) so
+  // the siblings keep going and the failed one can be retried on its own.
+  if ((job.target === 'frontend' || job.target === 'fullstack') && fes.some((x) => x.repo && !x.url && !x.error)) {
     const vercel = deps.vercel;
     if (!vercel) return { status: 'failed', error: 'vercel reader not configured' };
     const advanced = await Promise.all(fes.map(async (fe) => {
-      if (fe.url || !fe.repo) return fe;
-      if (!fe.deploymentId) {
-        const { projectId, deploymentId, inspectorUrl } = await vercel.deployToProd(fe.repo, fe.tag);
-        return { ...fe, projectId, deploymentId, deploymentUrl: inspectorUrl };
+      if (fe.url || !fe.repo || fe.error) return fe;
+      try {
+        if (!fe.deploymentId) {
+          const { projectId, deploymentId, inspectorUrl } = await vercel.deployToProd(fe.repo, fe.tag);
+          return { ...fe, projectId, deploymentId, deploymentUrl: inspectorUrl };
+        }
+        const state = await vercel.deploymentState(fe.deploymentId);
+        if (state === 'error') return { ...fe, error: 'Vercel deployment errored' };
+        if (state === 'ready') {
+          await vercel.promoteToProd(fe.projectId ?? '', fe.deploymentId);
+          return { ...fe, url: vercel.prodUrl(fe.repo) };
+        }
+        return fe;
+      } catch (err) {
+        return { ...fe, error: String((err as Error)?.message ?? err).slice(0, 120) };
       }
-      const state = await vercel.deploymentState(fe.deploymentId);
-      if (state === 'error') throw new Error(`vercel prod deploy errored for ${fe.repo}`);
-      if (state === 'ready') {
-        await vercel.promoteToProd(fe.projectId ?? '', fe.deploymentId);
-        return { ...fe, url: vercel.prodUrl(fe.repo) };
-      }
-      return fe;
     }));
     const spec: JobSpec = { ...job.spec, deployFrontends: advanced };
-    const allDone = advanced.every((x) => x.url || !x.repo);
-    return allDone ? { status: 'ready', spec } : { status: 'frontend_running', spec };
+    if (advanced.some((x) => x.repo && !x.url && !x.error)) return { status: 'frontend_running', spec };
+    if (advanced.some((x) => x.error)) return { status: 'failed', error: 'one or more frontends failed to deploy', spec };
+    return { status: 'ready', spec };
   }
 
   return {};

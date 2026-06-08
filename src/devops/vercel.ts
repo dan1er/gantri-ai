@@ -20,7 +20,10 @@ const PROD_DOMAIN: Record<FrontendRepo, string> = {
 };
 
 function sanitizeBranch(ref: string): string {
-  return ref.replace(/^.*\//, '').replace(/[^a-z0-9-]/gi, '-').toLowerCase();
+  // Match Vercel's git-branch alias: keep the WHOLE branch, just lowercase and
+  // turn non-alphanumerics into '-' (feat/x -> feat-x). Do NOT strip the path
+  // prefix — that yields a branch the repo doesn't have.
+  return ref.replace(/[^a-z0-9-]/gi, '-').toLowerCase();
 }
 
 export interface VercelClientDeps {
@@ -76,7 +79,7 @@ export class VercelClient {
         value: backendUrl,
         type: 'plain',
         target: ['preview'],
-        gitBranch: branch,
+        gitBranch: ref, // the REAL branch — Vercel 400s on a branch the repo doesn't have
       }),
     });
     if (!envRes.ok) throw new Error(`vercel env set failed: ${envRes.status}`);

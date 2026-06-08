@@ -76,7 +76,10 @@ export class VercelClient {
       headers: this.headers(),
       body: JSON.stringify({
         key: API_URL_VAR[repo],
-        value: backendUrl,
+        // The frontends' API base includes the porter /api prefix (e.g. prod
+        // marketplace = https://api.gantri.com/api), so the preview API URL must
+        // too — otherwise the app calls <backend>/user instead of <backend>/api/user.
+        value: `${backendUrl}/api`,
         type: 'plain',
         target: ['preview'],
         gitBranch: ref, // the REAL branch — Vercel 400s on a branch the repo doesn't have

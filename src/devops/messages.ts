@@ -11,11 +11,12 @@ const REPO_DISPLAY: Record<string, string> = {
 
 function componentBlock(
   name: string, id: string, link: string | undefined, url: string | undefined,
-  pending: string | undefined, deploymentUrl?: string,
+  pending: string | undefined, deploymentUrl?: string, apiUrl?: string,
 ): string {
   const lines = [`*${name}* (${id})`];
   if (link) lines.push(`<${link}|Source>`);
   lines.push(url ? `<${url}|Preview>` : `Preview _(${pending ?? 'pending'})_`);
+  if (apiUrl) lines.push(`API → ${apiUrl}`); // which backend this frontend is wired to
   if (deploymentUrl) lines.push(`<${deploymentUrl}|Deployment>`);
   return lines.join('\n');
 }
@@ -104,11 +105,12 @@ export function renderJobBlocks(job: Job): unknown[] {
   }
   // Tear down sits right after Porter, before the frontends.
   if (job.status === 'ready') blocks.push(tearDownButton);
+  const apiUrl = job.spec.backend?.url ? `${job.spec.backend.url}/api` : undefined;
   for (const f of job.spec.frontends ?? []) {
     blocks.push(section(componentBlock(REPO_DISPLAY[f.repo] ?? f.repo, f.ref, f.link,
       showUrls ? f.url : undefined,
       job.status === 'frontend_running' && !f.url ? 'building…' : undefined,
-      showUrls ? f.deploymentUrl : undefined)));
+      showUrls ? f.deploymentUrl : undefined, apiUrl)));
   }
   if (job.status === 'failed' && job.error) blocks.push(section(`*Error:* ${job.error}`));
   if (blocks.length === 1) blocks.push(section('_starting…_'));

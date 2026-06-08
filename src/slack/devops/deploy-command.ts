@@ -2,7 +2,7 @@ import type { App } from '@slack/bolt';
 import type { WebClient } from '@slack/web-api';
 import type { DevopsJobsRepo } from '../../devops/jobs-repo.js';
 import type { GithubDispatcher } from '../../devops/github.js';
-import type { FrontendRepo, DeployItem } from '../../devops/types.js';
+import type { FrontendRepo, DeployItem, Job } from '../../devops/types.js';
 import { renderJobBlocks } from '../../devops/messages.js';
 
 export interface DeployCommandDeps {
@@ -14,6 +14,32 @@ export interface DeployCommandDeps {
 
 function isOps(channelId: string, opsChannelId: string): boolean {
   return channelId === opsChannelId;
+}
+
+/**
+ * Tags still worth offering for deploy: those whose PR# is above the highest
+ * already-deployed PR# for this repo (the high-water mark). Deploying a tag
+ * ships every earlier commit too (they're bundled into it), so any tag at or
+ * below the mark is already in production — hide it. This keeps the picker to
+ * genuine candidates (on staging, not yet promoted) and prevents re-deploying
+ * an old tag, which would roll prod back. A failed deploy drops out of
+ * listDeployJobs, so its tag reappears for a retry (the mark falls back).
+ *
+ * One rule for every repo: porter reads the backend item, frontends read their
+ * own item. Tags without a parseable PR# are never hidden (shown by default).
+ */
+export function candidateDeployTags<T extends { pr: number | null }>(
+  tags: T[], deployJobs: Job[], repo: string,
+): T[] {
+  let maxDeployedPr = 0;
+  const bump = (it?: DeployItem): void => {
+    if (it?.pr != null) maxDeployedPr = Math.max(maxDeployedPr, it.pr);
+  };
+  for (const j of deployJobs) {
+    if (repo === 'porter') bump(j.spec.deployBackend);
+    for (const f of j.spec.deployFrontends ?? []) if (f.repo === repo) bump(f);
+  }
+  return tags.filter((t) => (t.pr ?? Infinity) > maxDeployedPr);
 }
 
 function buttons(): unknown[] {
@@ -222,12 +248,11 @@ export function registerDeployCommand(app: App, deps: DeployCommandDeps): void {
       const q = String(payload?.value ?? '').trim().toLowerCase();
       let opts: { text: { type: 'plain_text'; text: string }; value: string }[] = [];
       try {
-        const used = new Set<string>();
-        for (const j of await deps.repo.listDeployJobs()) {
-          if (src.repo === 'porter' && j.spec.deployBackend) used.add(j.spec.deployBackend.tag);
-          for (const f of j.spec.deployFrontends ?? []) if (f.repo === src.repo) used.add(f.tag);
-        }
-        const tags = (await deps.gh.listDeployTags(src.repo)).filter((t) => !used.has(t.tag));
+        const tags = candidateDeployTags(
+          await deps.gh.listDeployTags(src.repo),
+          await deps.repo.listDeployJobs(),
+          src.repo,
+        );
         const matched = (q ? tags.filter((t) => t.tag.toLowerCase().includes(q)) : tags).slice(0, 15);
         opts = await Promise.all(matched.map(async (t) => {
           let branch = '';

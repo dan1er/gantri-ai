@@ -29,6 +29,12 @@ export interface DeployItem {
   deploymentId?: string;   // frontend poll handle
   projectId?: string;      // frontend promote handle
   error?: string;          // set when this component's deploy failed (retriable)
+  // Per-frontend E2E gate: each frontend runs its own project's smoke in
+  // parallel with its build, then promotes once green — fully independent.
+  e2eRunId?: number | null;     // its gantri-e2e GitHub Actions run
+  e2eQaseRunId?: number | null; // its Qase TestOps run
+  e2eDispatched?: boolean;
+  e2ePassed?: boolean;          // undefined = testing, true = green, false = blocked
 }
 
 export interface JobSpec {
@@ -38,17 +44,9 @@ export interface JobSpec {
   // Deploy jobs (kind = 'deploy') ship tags to production.
   deployBackend?: DeployItem;
   deployFrontends?: DeployItem[];
-  // Pre-deploy E2E gate (deploy jobs). Absent = skipped. One gantri-e2e
-  // qase-trigger run (→ a Qase run) per distinct deployed frontend project.
-  e2e?: { scope: 'smoke' | 'both'; runs?: E2ERun[]; passed?: boolean };
-}
-
-export interface E2ERun {
-  project: string;             // gantri-e2e Playwright project (marketplace/factoryOs/madeOs)
-  runId?: number | null;       // the GitHub Actions run
-  qaseRunId?: number | null;   // the Qase TestOps run the bot created up front
-  dispatched?: boolean;        // guards against re-dispatch on a failed state update
-  passed?: boolean;
+  // Pre-deploy E2E gate config (deploy jobs). Absent = skipped (no gate). The
+  // per-frontend run state lives on each DeployItem (e2e*).
+  e2e?: { scope: 'smoke' | 'both' };
 }
 
 export interface Job {

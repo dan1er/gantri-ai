@@ -10,15 +10,14 @@ type Advance = (job: Job, deps: ProvisionerDeps) => Promise<JobPatch>;
 // Short progress line posted to the message thread on each status change.
 function statusNote(job: Job): string | null {
   switch (job.status) {
-    case 'e2e_running': return '🧪 Running E2E gate…';
-    case 'pending': return job.spec.e2e?.passed ? '✅ E2E passed — starting deploy' : null;
     case 'backend_running': return job.kind === 'deploy' ? '🚀 Deploying backend…' : '🛠️ Provisioning backend…';
-    case 'frontend_running': return job.kind === 'deploy' ? '🚀 Deploying frontend(s)…' : '🌐 Building frontend(s)…';
+    case 'frontend_running':
+      return job.kind === 'deploy'
+        ? (job.spec.e2e ? '🧪 Testing + deploying frontends…' : '🚀 Deploying frontends…')
+        : '🌐 Building frontend(s)…';
     case 'ready': return job.kind === 'deploy' ? '✅ Deployed to production' : '✅ Preview ready';
-    case 'failed': {
-      if (job.spec.e2e?.passed === false) return '🚫 Deploy blocked — E2E gate failed (results above)';
-      return `✗ Failed${job.error ? `: ${job.error}` : ''}`;
-    }
+    case 'failed':
+      return job.kind === 'deploy' ? '✗ Some frontends did not deploy — see message above' : `✗ Failed${job.error ? `: ${job.error}` : ''}`;
     case 'torn_down': return '🧹 Torn down';
     default: return null;
   }

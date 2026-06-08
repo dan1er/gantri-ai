@@ -303,14 +303,24 @@ export function registerDeployCommand(app: App, deps: DeployCommandDeps): void {
       const jobId = action.value as string;
       const job = await deps.repo.get(jobId);
       if (!job) throw new Error('job not found');
-      const deployFrontends = (job.spec.deployFrontends ?? []).map((f: DeployItem) =>
-        f.error ? { ...f, error: undefined, deploymentId: undefined, projectId: undefined, deploymentUrl: undefined } : f);
+      const deployFrontends = (job.spec.deployFrontends ?? []).map((f: DeployItem) => {
+        // E2E-blocked → re-run its gate + deploy from scratch.
+        if (f.e2ePassed === false) {
+          return {
+            ...f, e2ePassed: undefined, e2eDispatched: undefined, e2eRunId: undefined, e2eQaseRunId: undefined,
+            deploymentId: undefined, projectId: undefined, deploymentUrl: undefined, error: undefined,
+          };
+        }
+        // Deploy-errored (gate already green) → just re-deploy.
+        if (f.error) return { ...f, error: undefined, deploymentId: undefined, projectId: undefined, deploymentUrl: undefined };
+        return f; // already live — keep it
+      });
       const spec = { ...job.spec, deployFrontends };
-      await deps.repo.update(jobId, { status: 'pending', error: null, runId: null, spec });
+      await deps.repo.update(jobId, { status: 'frontend_running', error: null, spec });
       if (job.messageTs) {
         await deps.slack.chat.update({
           channel: job.channelId, ts: job.messageTs, text: 'retrying deploy…',
-          blocks: renderJobBlocks({ ...job, status: 'pending', error: null, spec } as any) as any,
+          blocks: renderJobBlocks({ ...job, status: 'frontend_running', error: null, spec } as any) as any,
           unfurl_links: false, unfurl_media: false,
         } as any).catch(() => undefined);
       }

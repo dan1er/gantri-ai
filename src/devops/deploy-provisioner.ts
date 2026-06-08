@@ -1,4 +1,4 @@
-import type { Job, JobSpec } from './types.js';
+import type { Job, JobSpec, DeployItem } from './types.js';
 import type { ProvisionerDeps, JobPatch } from './provisioner.js';
 
 const PORTER = 'porter';
@@ -8,61 +8,22 @@ const E2E_REPO = 'gantri-e2e';
 const E2E_WF = 'qase-trigger.yml';
 const E2E_PROJECT: Record<string, string> = { mantle: 'marketplace', core: 'factoryOs', made: 'madeOs' };
 
+type Vercel = NonNullable<ProvisionerDeps['vercel']>;
+
 /**
- * Advance a `deploy` job: ship the chosen tags to production. Backend goes
- * through the porter prod-deploy workflow; each frontend is a Vercel
- * production-target deploy (prod env vars) that is promoted once it's ready.
+ * Advance a `deploy` job: ship the chosen tags to production. For fullstack the
+ * backend goes through the porter prod-deploy workflow first. Each frontend
+ * then runs its OWN pipeline, independently and in parallel: its project's E2E
+ * smoke runs WHILE its Vercel production build builds (overlap), and it promotes
+ * the moment its own test is green. A frontend's failure never blocks a sibling
+ * — the fast ones go live while the slow one is still testing.
  */
 export async function advanceDeployJob(job: Job, deps: ProvisionerDeps): Promise<JobPatch> {
   const b = job.spec.deployBackend;
   const fes = job.spec.deployFrontends ?? [];
-  const e2e = job.spec.e2e;
+  const gateScope = job.spec.e2e?.scope;
 
-  // E2E gate — one qase-trigger run per distinct deployed frontend project, in
-  // parallel. Persist e2e_running FIRST, then dispatch (guarded per run by
-  // `dispatched`) so a failed state update can never re-fire a dispatch. The
-  // gate passes only when EVERY project's run is green.
-  if (e2e?.scope && e2e.passed !== true) {
-    const projects = [...new Set(fes.map((f) => E2E_PROJECT[f.repo ?? '']).filter(Boolean))];
-    if (job.status === 'pending') {
-      return { status: 'e2e_running', spec: { ...job.spec, e2e: { ...e2e, runs: projects.map((project) => ({ project })) } } };
-    }
-    if (job.status === 'e2e_running') {
-      const runs = e2e.runs ?? [];
-      const advanced = await Promise.all(runs.map(async (r) => {
-        if (r.passed !== undefined) return r;
-        const marker = `${job.id}:${r.project}`;
-        if (!r.dispatched) {
-          // Create the Qase run up front so we know its exact URL; qase-trigger
-          // appends the Playwright results to it via qase_run_id.
-          const qaseRunId = deps.qase ? await deps.qase.createRun(`Deploy gate · ${r.project} · ${e2e.scope}`) : null;
-          const inputs: Record<string, string> = {
-            project: r.project, scope: e2e.scope === 'both' ? 'all' : 'smoke', marker,
-          };
-          if (qaseRunId) inputs.qase_run_id = String(qaseRunId);
-          await deps.gh.dispatch(E2E_REPO, E2E_WF, 'main', inputs);
-          return { ...r, dispatched: true, qaseRunId };
-        }
-        if (r.runId == null) {
-          const runId = await deps.gh.findRunByMarker(E2E_REPO, E2E_WF, marker);
-          return runId == null ? r : { ...r, runId };
-        }
-        const state = await deps.gh.getRunState(E2E_REPO, r.runId);
-        if (state === 'running') return r;
-        if (deps.qase && r.qaseRunId) await deps.qase.completeRun(r.qaseRunId);
-        return { ...r, passed: state === 'success' };
-      }));
-      if (advanced.some((r) => r.passed === undefined)) {
-        return { status: 'e2e_running', spec: { ...job.spec, e2e: { ...e2e, runs: advanced } } };
-      }
-      if (advanced.some((r) => r.passed === false)) {
-        return { status: 'failed', error: 'E2E gate failed — deploy blocked', spec: { ...job.spec, e2e: { ...e2e, runs: advanced, passed: false } } };
-      }
-      return { status: 'pending', spec: { ...job.spec, e2e: { ...e2e, runs: advanced, passed: true } } };
-    }
-  }
-
-  // Backend half (backend + fullstack)
+  // Backend half (backend + fullstack) — deploys first.
   if ((job.target === 'backend' || job.target === 'fullstack') && b && !b.url) {
     if (job.status === 'pending') {
       await deps.gh.dispatch(PORTER, PROD_WF, 'master', { tag: b.tag, job_id: job.id });
@@ -83,35 +44,86 @@ export async function advanceDeployJob(job: Job, deps: ProvisionerDeps): Promise
     }
   }
 
-  // Frontend half (frontend + fullstack) — deploy(prod) -> poll -> promote, per
-  // repo, in parallel. A failure is recorded on that frontend (not thrown) so
-  // the siblings keep going and the failed one can be retried on its own.
-  if ((job.target === 'frontend' || job.target === 'fullstack') && fes.some((x) => x.repo && !x.url && !x.error)) {
+  // Frontend-only: enter the frontend phase (status transition only, no side
+  // effects — keeps the dispatch/build out of the status update).
+  if (job.target === 'frontend' && job.status === 'pending') {
+    return { status: 'frontend_running' };
+  }
+
+  // Frontend phase — each frontend its own test→build→promote pipeline, run in
+  // parallel and resolved independently.
+  if ((job.target === 'frontend' || job.target === 'fullstack') && job.status === 'frontend_running') {
     const vercel = deps.vercel;
     if (!vercel) return { status: 'failed', error: 'vercel reader not configured' };
-    const advanced = await Promise.all(fes.map(async (fe) => {
-      if (fe.url || !fe.repo || fe.error) return fe;
-      try {
-        if (!fe.deploymentId) {
-          const { projectId, deploymentId, inspectorUrl } = await vercel.deployToProd(fe.repo, fe.tag);
-          return { ...fe, projectId, deploymentId, deploymentUrl: inspectorUrl };
-        }
-        const state = await vercel.deploymentState(fe.deploymentId);
-        if (state === 'error') return { ...fe, error: 'Vercel deployment errored' };
-        if (state === 'ready') {
-          await vercel.promoteToProd(fe.projectId ?? '', fe.deploymentId);
-          return { ...fe, url: vercel.prodUrl(fe.repo) };
-        }
-        return fe;
-      } catch (err) {
-        return { ...fe, error: String((err as Error)?.message ?? err).slice(0, 120) };
-      }
-    }));
+    const advanced = await Promise.all(fes.map((f) => advanceFrontend(f, job.id, gateScope, deps, vercel)));
     const spec: JobSpec = { ...job.spec, deployFrontends: advanced };
-    if (advanced.some((x) => x.repo && !x.url && !x.error)) return { status: 'frontend_running', spec };
-    if (advanced.some((x) => x.error)) return { status: 'failed', error: 'one or more frontends failed to deploy', spec };
-    return { status: 'ready', spec };
+    if (advanced.some(inProgress)) return { status: 'frontend_running', spec };
+    return advanced.some((f) => f.error || f.e2ePassed === false)
+      ? { status: 'failed', error: 'one or more frontends did not deploy', spec }
+      : { status: 'ready', spec };
   }
 
   return {};
+}
+
+// A frontend still working: has a repo, isn't live, isn't deploy-errored, and
+// its gate hasn't blocked it.
+function inProgress(f: DeployItem): boolean {
+  return !!f.repo && !f.url && !f.error && f.e2ePassed !== false;
+}
+
+async function advanceFrontend(
+  fe: DeployItem, jobId: string, gateScope: 'smoke' | 'both' | undefined,
+  deps: ProvisionerDeps, vercel: Vercel,
+): Promise<DeployItem> {
+  if (!inProgress(fe)) return fe;
+  let f = fe;
+  // E2E leg (if gated) — advances one step; overlaps the build leg below.
+  if (gateScope && f.e2ePassed === undefined) {
+    f = await advanceE2eLeg(f, jobId, gateScope, deps);
+    if (f.e2ePassed === false) return f; // blocked — no build/promote
+  }
+  // Build leg — start the production build eagerly (it builds WHILE the test
+  // runs); promote only once the test is green (or there is no gate).
+  try {
+    if (!f.deploymentId) {
+      const r = await vercel.deployToProd(f.repo!, f.tag);
+      return { ...f, projectId: r.projectId, deploymentId: r.deploymentId, deploymentUrl: r.inspectorUrl };
+    }
+    if (!gateScope || f.e2ePassed === true) {
+      const state = await vercel.deploymentState(f.deploymentId);
+      if (state === 'error') return { ...f, error: 'Vercel deployment errored' };
+      if (state === 'ready') {
+        await vercel.promoteToProd(f.projectId ?? '', f.deploymentId);
+        return { ...f, url: vercel.prodUrl(f.repo!) };
+      }
+    }
+    return f;
+  } catch (err) {
+    return { ...f, error: String((err as Error)?.message ?? err).slice(0, 120) };
+  }
+}
+
+async function advanceE2eLeg(
+  f: DeployItem, jobId: string, scope: 'smoke' | 'both', deps: ProvisionerDeps,
+): Promise<DeployItem> {
+  const project = E2E_PROJECT[f.repo ?? ''] ?? 'marketplace';
+  const marker = `${jobId}:${f.repo}`;
+  if (!f.e2eDispatched) {
+    const qaseRunId = deps.qase ? await deps.qase.createRun(`Deploy gate · ${project} · ${scope}`) : null;
+    const inputs: Record<string, string> = {
+      project, scope: scope === 'both' ? 'all' : 'smoke', marker,
+    };
+    if (qaseRunId) inputs.qase_run_id = String(qaseRunId);
+    await deps.gh.dispatch(E2E_REPO, E2E_WF, 'main', inputs);
+    return { ...f, e2eDispatched: true, e2eQaseRunId: qaseRunId };
+  }
+  if (f.e2eRunId == null) {
+    const runId = await deps.gh.findRunByMarker(E2E_REPO, E2E_WF, marker);
+    return runId == null ? f : { ...f, e2eRunId: runId };
+  }
+  const state = await deps.gh.getRunState(E2E_REPO, f.e2eRunId);
+  if (state === 'running') return f;
+  if (deps.qase && f.e2eQaseRunId) await deps.qase.completeRun(f.e2eQaseRunId);
+  return { ...f, e2ePassed: state === 'success' };
 }

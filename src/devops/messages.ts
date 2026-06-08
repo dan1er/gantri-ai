@@ -1,4 +1,4 @@
-import type { Job, JobStatus } from './types.js';
+import type { Job, JobStatus, DeployItem } from './types.js';
 
 const ICON: Record<JobStatus, string> = {
   pending: '⏳', e2e_running: '🧪', backend_running: '⏳', frontend_running: '⏳',
@@ -20,79 +20,61 @@ function componentBlock(
   return lines.join('\n');
 }
 
-const PROD_URL: Record<string, string> = {
-  mantle: 'https://www.gantri.com', core: 'https://admin.gantri.com', made: 'https://made.gantri.com',
-};
+const ghRun = (id: number) => `https://github.com/gantri/gantri-e2e/actions/runs/${id}`;
+const qaseRun = (id: number) => `https://app.qase.io/run/GANTRI/dashboard/${id}`;
+
+// One line per frontend, reflecting its OWN pipeline phase: testing → deploying
+// → live, or blocked (E2E failed) / errored (deploy failed). Each frontend is
+// independent, so a deploy message can show some live while others still test.
+function frontendLine(f: DeployItem): string {
+  const name = REPO_DISPLAY[f.repo ?? ''] ?? f.repo ?? 'frontend';
+  const head = `*${name}* · \`${f.tag}\``;
+  if (f.url) return `<${f.url}|${name}> · \`${f.tag}\` ✅ live`;
+  if (f.error) return `${head} ✗ _${f.error}_`;
+  if (f.e2ePassed === false) {
+    const qase = f.e2eQaseRunId ? ` <${qaseRun(f.e2eQaseRunId)}|Check results>` : '';
+    const gh = f.e2eRunId ? ` (<${ghRun(f.e2eRunId)}|run>)` : '';
+    return `${head} 🚫 _E2E failed_ —${qase}${gh}`;
+  }
+  if (f.e2ePassed === true) return `${head} 🚀 _deploying…_`;
+  const gh = f.e2eRunId ? `<${ghRun(f.e2eRunId)}|test run>` : '_dispatching…_';
+  const qase = f.e2eQaseRunId ? ` · <${qaseRun(f.e2eQaseRunId)}|Qase>` : '';
+  return `${head} 🧪 _testing_ — ${gh}${qase}`;
+}
 
 function renderDeploy(job: Job): unknown[] {
   const icon = ICON[job.status];
   const headline = job.status === 'ready' ? 'Deployed to production'
     : job.status === 'failed' ? 'Deploy failed'
     : 'Deploy → production';
-  const header = `${icon} *${headline}* — requested by <@${job.requestedBy}>`;
   const section = (text: string) => ({ type: 'section', text: { type: 'mrkdwn', text } });
-  const item = (name: string, tag: string, target: string, url: string | undefined, pending: string | undefined, inspector?: string, error?: string) => {
-    const status = error ? ` ✗ _${error}_` : !url && pending ? ` _(${pending})_` : '';
-    const lines = [`<${url ?? target}|${name}> · \`${tag}\`${status}`];
-    if (inspector && !error) lines.push(`<${inspector}|Deployment>`);
-    return lines.join('\n');
-  };
-  const blocks: unknown[] = [section(header)];
-  if (job.spec.e2e && job.status === 'e2e_running') {
-    const e = job.spec.e2e;
-    const scope = e.scope === 'both' ? 'smoke + regression' : 'smoke';
-    const lines = (e.runs ?? []).map((r) => {
-      const run = r.runId
-        ? `<https://github.com/gantri/gantri-e2e/actions/runs/${r.runId}|GitHub run>`
-        : '_dispatching…_';
-      const qase = r.qaseRunId
-        ? `<https://app.qase.io/run/GANTRI/dashboard/${r.qaseRunId}|Qase>`
-        : '<https://app.qase.io/run/GANTRI|Qase>';
-      return `• *${r.project}* — ${run} · ${qase}`;
-    });
-    blocks.push(section(`🧪 E2E gate (${scope}) — deploy waits for green\n${lines.join('\n')}`));
-  }
-  // Status-aware "pending" text: a component isn't "deploying" until its own
-  // phase — during the E2E gate or while waiting on the backend it says so.
-  const pendText = (url: string | undefined, deployStatus: JobStatus): string | undefined => {
-    if (url) return undefined;
-    if (job.status === deployStatus) return 'deploying…';
-    if (job.status === 'e2e_running') return 'waiting for E2E';
-    if (job.status === 'backend_running') return 'waiting for backend';
-    return 'queued';
-  };
+  const blocks: unknown[] = [section(`${icon} *${headline}* — requested by <@${job.requestedBy}>`)];
+
   const b = job.spec.deployBackend;
   if (b) {
-    blocks.push(section(item('Porter', b.tag, 'https://api.gantri.com', b.url, pendText(b.url, 'backend_running'))));
+    const head = b.url ? `<${b.url}|Porter>` : '*Porter*';
+    const pend = b.url ? ' ✅ live' : job.status === 'backend_running' ? ' _(deploying…)_' : ' _(queued)_';
+    blocks.push(section(`${head} · \`${b.tag}\`${pend}`));
   }
+
+  let anyBlocked = false;
   for (const f of job.spec.deployFrontends ?? []) {
-    const name = REPO_DISPLAY[f.repo ?? ''] ?? f.repo ?? 'frontend';
-    blocks.push(section(item(name, f.tag, PROD_URL[f.repo ?? ''] ?? 'production', f.url,
-      pendText(f.url, 'frontend_running'), f.deploymentUrl, f.error)));
+    blocks.push(section(frontendLine(f)));
+    if (f.error || f.e2ePassed === false) anyBlocked = true;
   }
-  if (job.status === 'failed') {
-    const e = job.spec.e2e;
-    if (e?.passed === false) {
-      const links = (e.runs ?? []).filter((r) => r.passed === false).map((r) => {
-        const qase = r.qaseRunId
-          ? `<https://app.qase.io/run/GANTRI/dashboard/${r.qaseRunId}|${r.project} results in Qase>`
-          : `*${r.project}*`;
-        const gh = r.runId ? ` · <https://github.com/gantri/gantri-e2e/actions/runs/${r.runId}|run>` : '';
-        return `• ${qase}${gh}`;
-      });
-      blocks.push(section(`🚫 *Deploy blocked — E2E gate failed.* Check results:\n${links.join('\n')}`));
-    } else {
-      // Deploy-phase failure (E2E already passed) — show it + a Retry button
-      // that re-attempts only the failed components, skipping the gate.
-      if (job.error) blocks.push(section(`✗ *Deploy failed:* ${job.error}`));
-      blocks.push({
-        type: 'actions',
-        elements: [{
-          type: 'button', text: { type: 'plain_text', text: '🔄 Retry failed' },
-          style: 'primary', action_id: 'deploy_retry', value: job.id,
-        }],
-      });
-    }
+
+  // A frontend can fail its gate or its deploy without blocking the others;
+  // offer a retry that re-attempts only the unfinished ones.
+  if (job.status === 'failed' && anyBlocked) {
+    blocks.push({
+      type: 'actions',
+      elements: [{
+        type: 'button', text: { type: 'plain_text', text: '🔄 Retry failed' },
+        style: 'primary', action_id: 'deploy_retry', value: job.id,
+      }],
+    });
+  } else if (job.status === 'failed' && job.error) {
+    blocks.push(section(`*Error:* ${job.error}`));
   }
   if (blocks.length === 1) blocks.push(section('_starting…_'));
   return blocks;

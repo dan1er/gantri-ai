@@ -129,6 +129,14 @@ export class VercelClient {
       `https://api.vercel.com/v10/projects/${projectId}/promote/${deploymentId}?teamId=${this.deps.teamId}`,
       { method: 'POST', headers: this.headers() },
     );
-    if (!res.ok) throw new Error(`vercel promote failed: ${res.status}`);
+    if (res.ok) return;
+    // A target=production deployment can become production on its own (auto
+    // domain assignment); the explicit promote then 409s with "already the
+    // current production deployment" — that's success, not a failure.
+    if (res.status === 409) {
+      const body = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
+      if (/already the current production deployment/i.test(body.error?.message ?? '')) return;
+    }
+    throw new Error(`vercel promote failed: ${res.status}`);
   }
 }

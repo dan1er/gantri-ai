@@ -38,16 +38,17 @@ export interface JobSpec {
   // Deploy jobs (kind = 'deploy') ship tags to production.
   deployBackend?: DeployItem;
   deployFrontends?: DeployItem[];
-  // Pre-deploy E2E gate (deploy jobs). Absent = skipped. Dispatches gantri-e2e
-  // qase-trigger (→ a Qase run) for the deployed frontend's project.
-  e2e?: {
-    scope: 'smoke' | 'both';
-    project?: string;          // gantri-e2e Playwright project (marketplace/factoryOs/madeOs)
-    runId?: number | null;     // the GitHub Actions run
-    qaseRunId?: number | null; // the Qase TestOps run the bot created up front
-    passed?: boolean;
-    dispatched?: boolean;      // guards against re-dispatch on a failed state update
-  };
+  // Pre-deploy E2E gate (deploy jobs). Absent = skipped. One gantri-e2e
+  // qase-trigger run (→ a Qase run) per distinct deployed frontend project.
+  e2e?: { scope: 'smoke' | 'both'; runs?: E2ERun[]; passed?: boolean };
+}
+
+export interface E2ERun {
+  project: string;             // gantri-e2e Playwright project (marketplace/factoryOs/madeOs)
+  runId?: number | null;       // the GitHub Actions run
+  qaseRunId?: number | null;   // the Qase TestOps run the bot created up front
+  dispatched?: boolean;        // guards against re-dispatch on a failed state update
+  passed?: boolean;
 }
 
 export interface Job {

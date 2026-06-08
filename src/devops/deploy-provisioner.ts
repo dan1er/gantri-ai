@@ -18,40 +18,47 @@ export async function advanceDeployJob(job: Job, deps: ProvisionerDeps): Promise
   const fes = job.spec.deployFrontends ?? [];
   const e2e = job.spec.e2e;
 
-  // E2E gate — runs before any deploy. Persist e2e_running FIRST, then dispatch
-  // (guarded by `dispatched`) so a failed state update can never re-fire the
-  // dispatch. Passing hands off to the deploy phase (status back to 'pending').
+  // E2E gate — one qase-trigger run per distinct deployed frontend project, in
+  // parallel. Persist e2e_running FIRST, then dispatch (guarded per run by
+  // `dispatched`) so a failed state update can never re-fire a dispatch. The
+  // gate passes only when EVERY project's run is green.
   if (e2e?.scope && e2e.passed !== true) {
+    const projects = [...new Set(fes.map((f) => E2E_PROJECT[f.repo ?? '']).filter(Boolean))];
     if (job.status === 'pending') {
-      return { status: 'e2e_running' };
+      return { status: 'e2e_running', spec: { ...job.spec, e2e: { ...e2e, runs: projects.map((project) => ({ project })) } } };
     }
-    if (job.status === 'e2e_running' && !e2e.dispatched) {
-      const project = E2E_PROJECT[fes[0]?.repo ?? ''] ?? 'marketplace';
-      // Create the Qase run up front so we know its exact URL; qase-trigger
-      // appends the Playwright results to it via qase_run_id.
-      const qaseRunId = deps.qase
-        ? await deps.qase.createRun(`Deploy gate · ${project} · ${e2e.scope}`)
-        : null;
-      const inputs: Record<string, string> = {
-        project, scope: e2e.scope === 'both' ? 'all' : 'smoke', marker: job.id,
-      };
-      if (qaseRunId) inputs.qase_run_id = String(qaseRunId);
-      await deps.gh.dispatch(E2E_REPO, E2E_WF, 'main', inputs);
-      return { spec: { ...job.spec, e2e: { ...e2e, dispatched: true, project, qaseRunId } } };
-    }
-    if (job.status === 'e2e_running' && e2e.dispatched && e2e.runId == null) {
-      const runId = await deps.gh.findRunByMarker(E2E_REPO, E2E_WF, job.id);
-      return runId == null ? {} : { spec: { ...job.spec, e2e: { ...e2e, runId } } };
-    }
-    if (job.status === 'e2e_running' && e2e.runId != null) {
-      const state = await deps.gh.getRunState(E2E_REPO, e2e.runId);
-      if (state === 'running') return {};
-      // Gate concluded — the bot created the Qase run, so it closes it.
-      if (deps.qase && e2e.qaseRunId) await deps.qase.completeRun(e2e.qaseRunId);
-      if (state === 'failed') {
-        return { status: 'failed', error: 'E2E gate failed — deploy blocked', spec: { ...job.spec, e2e: { ...e2e, passed: false } } };
+    if (job.status === 'e2e_running') {
+      const runs = e2e.runs ?? [];
+      const advanced = await Promise.all(runs.map(async (r) => {
+        if (r.passed !== undefined) return r;
+        const marker = `${job.id}:${r.project}`;
+        if (!r.dispatched) {
+          // Create the Qase run up front so we know its exact URL; qase-trigger
+          // appends the Playwright results to it via qase_run_id.
+          const qaseRunId = deps.qase ? await deps.qase.createRun(`Deploy gate · ${r.project} · ${e2e.scope}`) : null;
+          const inputs: Record<string, string> = {
+            project: r.project, scope: e2e.scope === 'both' ? 'all' : 'smoke', marker,
+          };
+          if (qaseRunId) inputs.qase_run_id = String(qaseRunId);
+          await deps.gh.dispatch(E2E_REPO, E2E_WF, 'main', inputs);
+          return { ...r, dispatched: true, qaseRunId };
+        }
+        if (r.runId == null) {
+          const runId = await deps.gh.findRunByMarker(E2E_REPO, E2E_WF, marker);
+          return runId == null ? r : { ...r, runId };
+        }
+        const state = await deps.gh.getRunState(E2E_REPO, r.runId);
+        if (state === 'running') return r;
+        if (deps.qase && r.qaseRunId) await deps.qase.completeRun(r.qaseRunId);
+        return { ...r, passed: state === 'success' };
+      }));
+      if (advanced.some((r) => r.passed === undefined)) {
+        return { status: 'e2e_running', spec: { ...job.spec, e2e: { ...e2e, runs: advanced } } };
       }
-      return { status: 'pending', spec: { ...job.spec, e2e: { ...e2e, passed: true } } };
+      if (advanced.some((r) => r.passed === false)) {
+        return { status: 'failed', error: 'E2E gate failed — deploy blocked', spec: { ...job.spec, e2e: { ...e2e, runs: advanced, passed: false } } };
+      }
+      return { status: 'pending', spec: { ...job.spec, e2e: { ...e2e, runs: advanced, passed: true } } };
     }
   }
 

@@ -10,16 +10,13 @@ type Advance = (job: Job, deps: ProvisionerDeps) => Promise<JobPatch>;
 // Short progress line posted to the message thread on each status change.
 function statusNote(job: Job): string | null {
   switch (job.status) {
-    case 'e2e_running': return null; // posted separately with run links once the run id is found
+    case 'e2e_running': return '🧪 Running E2E gate…';
     case 'pending': return job.spec.e2e?.passed ? '✅ E2E passed — starting deploy' : null;
     case 'backend_running': return job.kind === 'deploy' ? '🚀 Deploying backend…' : '🛠️ Provisioning backend…';
     case 'frontend_running': return job.kind === 'deploy' ? '🚀 Deploying frontend(s)…' : '🌐 Building frontend(s)…';
     case 'ready': return job.kind === 'deploy' ? '✅ Deployed to production' : '✅ Preview ready';
     case 'failed': {
-      const e = job.spec.e2e;
-      if (e?.passed === false && e.qaseRunId) {
-        return `🚫 Deploy blocked — E2E gate failed. <https://app.qase.io/run/GANTRI/dashboard/${e.qaseRunId}|Check results in Qase>`;
-      }
+      if (job.spec.e2e?.passed === false) return '🚫 Deploy blocked — E2E gate failed (results above)';
       return `✗ Failed${job.error ? `: ${job.error}` : ''}`;
     }
     case 'torn_down': return '🧹 Torn down';
@@ -90,16 +87,6 @@ export class JobsRunner {
             .postMessage({ channel: job.channelId, thread_ts: job.messageTs, text: note, unfurl_links: false, unfurl_media: false })
             .catch((err) => logger.warn({ jobId: job.id, err: String((err as Error)?.message ?? err) }, 'devops thread note failed'));
         }
-      }
-      // The E2E run id lands a tick after e2e_running — post the run links then.
-      const newRunId = updated.spec.e2e?.runId;
-      if (updated.kind === 'deploy' && newRunId && !job.spec.e2e?.runId) {
-        const qaseId = updated.spec.e2e?.qaseRunId;
-        const qase = qaseId ? `https://app.qase.io/run/GANTRI/dashboard/${qaseId}` : 'https://app.qase.io/run/GANTRI';
-        const note = `🧪 Running E2E gate — <https://github.com/gantri/gantri-e2e/actions/runs/${newRunId}|GitHub run> · <${qase}|Qase>`;
-        await this.deps.slack.chat
-          .postMessage({ channel: job.channelId, thread_ts: job.messageTs, text: note, unfurl_links: false, unfurl_media: false })
-          .catch((err) => logger.warn({ jobId: job.id, err: String((err as Error)?.message ?? err) }, 'devops e2e thread note failed'));
       }
     }
   }

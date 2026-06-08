@@ -41,13 +41,16 @@ function renderDeploy(job: Job): unknown[] {
   if (job.spec.e2e && job.status === 'e2e_running') {
     const e = job.spec.e2e;
     const scope = e.scope === 'both' ? 'smoke + regression' : 'smoke';
-    const run = e.runId
-      ? `<https://github.com/gantri/gantri-e2e/actions/runs/${e.runId}|GitHub run>`
-      : '_dispatching…_';
-    const qase = e.qaseRunId
-      ? `<https://app.qase.io/run/GANTRI/dashboard/${e.qaseRunId}|Qase>`
-      : '<https://app.qase.io/run/GANTRI|Qase>';
-    blocks.push(section(`🧪 E2E gate (${scope}) — ${run} · ${qase} — deploy waits for green`));
+    const lines = (e.runs ?? []).map((r) => {
+      const run = r.runId
+        ? `<https://github.com/gantri/gantri-e2e/actions/runs/${r.runId}|GitHub run>`
+        : '_dispatching…_';
+      const qase = r.qaseRunId
+        ? `<https://app.qase.io/run/GANTRI/dashboard/${r.qaseRunId}|Qase>`
+        : '<https://app.qase.io/run/GANTRI|Qase>';
+      return `• *${r.project}* — ${run} · ${qase}`;
+    });
+    blocks.push(section(`🧪 E2E gate (${scope}) — deploy waits for green\n${lines.join('\n')}`));
   }
   // Status-aware "pending" text: a component isn't "deploying" until its own
   // phase — during the E2E gate or while waiting on the backend it says so.
@@ -69,9 +72,15 @@ function renderDeploy(job: Job): unknown[] {
   }
   if (job.status === 'failed') {
     const e = job.spec.e2e;
-    if (e?.passed === false && e.qaseRunId) {
-      const ghRun = e.runId ? ` · <https://github.com/gantri/gantri-e2e/actions/runs/${e.runId}|GitHub run>` : '';
-      blocks.push(section(`🚫 *Deploy blocked — E2E gate failed.* <https://app.qase.io/run/GANTRI/dashboard/${e.qaseRunId}|Check results in Qase>${ghRun}`));
+    if (e?.passed === false) {
+      const links = (e.runs ?? []).filter((r) => r.passed === false).map((r) => {
+        const qase = r.qaseRunId
+          ? `<https://app.qase.io/run/GANTRI/dashboard/${r.qaseRunId}|${r.project} results in Qase>`
+          : `*${r.project}*`;
+        const gh = r.runId ? ` · <https://github.com/gantri/gantri-e2e/actions/runs/${r.runId}|run>` : '';
+        return `• ${qase}${gh}`;
+      });
+      blocks.push(section(`🚫 *Deploy blocked — E2E gate failed.* Check results:\n${links.join('\n')}`));
     } else {
       // Deploy-phase failure (E2E already passed) — show it + a Retry button
       // that re-attempts only the failed components, skipping the gate.

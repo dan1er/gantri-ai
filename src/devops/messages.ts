@@ -78,9 +78,10 @@ function renderDeploy(job: Job): unknown[] {
     blocks.push(section(`*Error:* ${job.error}`));
   }
 
-  // On a successful deploy, offer a one-click rollback of the backend to the
-  // release that was live before it. Native Slack confirm — it touches prod.
-  if (job.status === 'ready' && b?.prevRelease) {
+  // On a successful deploy, offer a one-click rollback of the backend by
+  // re-promoting the deploy that was live before it. Native Slack confirm — it
+  // touches prod.
+  if (job.status === 'ready' && b?.prevDeployTag) {
     blocks.push({
       type: 'actions',
       elements: [{
@@ -88,7 +89,7 @@ function renderDeploy(job: Job): unknown[] {
         action_id: 'deploy_rollback', value: job.id,
         confirm: {
           title: { type: 'plain_text', text: 'Roll back production?' },
-          text: { type: 'mrkdwn', text: `Redeploy \`${b.prevRelease}\` to production — the release that was live before this deploy.` },
+          text: { type: 'mrkdwn', text: `Re-promote \`${b.prevDeployTag}\` to production — the deploy that was live before this one.` },
           confirm: { type: 'plain_text', text: 'Roll back' },
           deny: { type: 'plain_text', text: 'Cancel' },
         },

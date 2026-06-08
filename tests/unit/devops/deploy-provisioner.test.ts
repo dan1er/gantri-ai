@@ -10,7 +10,7 @@ const base: Job = {
 
 describe('advanceDeployJob', () => {
   it('pending backend → dispatches prod-deploy from master + backend_running', async () => {
-    const gh = { dispatch: vi.fn().mockResolvedValue(undefined), findRunByMarker: vi.fn(), getRunState: vi.fn(), listReleaseTags: vi.fn().mockResolvedValue([]) } as any;
+    const gh = { dispatch: vi.fn().mockResolvedValue(undefined), findRunByMarker: vi.fn(), getRunState: vi.fn() } as any;
     const patch = await advanceDeployJob(base, { gh });
     expect(gh.dispatch).toHaveBeenCalledWith('porter', 'prod-deploy.yml', 'master', {
       tag: 'deploy-5188-2026.06.07', job_id: 'd1',
@@ -23,23 +23,6 @@ describe('advanceDeployJob', () => {
     const patch = await advanceDeployJob({ ...base, status: 'backend_running', runId: 9 }, { gh });
     expect(patch.status).toBe('ready');
     expect(patch.spec?.deployBackend?.url).toBe('https://api.gantri.com');
-  });
-
-  it('captures the live release as prevRelease at dispatch and preserves it through to ready', async () => {
-    const gh = {
-      dispatch: vi.fn().mockResolvedValue(undefined),
-      listReleaseTags: vi.fn().mockResolvedValue([{ tag: 'v2026.06.07.1', sha: 'r' }, { tag: 'v2026.06.06.3', sha: 'q' }]),
-      getRunState: vi.fn().mockResolvedValue('success'),
-    } as any;
-    // pending → backend_running: snapshots the newest live release as the rollback target
-    const p1 = await advanceDeployJob(base, { gh });
-    expect(p1.status).toBe('backend_running');
-    expect(p1.spec?.deployBackend?.prevRelease).toBe('v2026.06.07.1');
-    // backend_running success → ready: prevRelease survives alongside the prod url
-    const p2 = await advanceDeployJob({ ...base, status: 'backend_running', runId: 9, spec: p1.spec! }, { gh });
-    expect(p2.status).toBe('ready');
-    expect(p2.spec?.deployBackend?.prevRelease).toBe('v2026.06.07.1');
-    expect(p2.spec?.deployBackend?.url).toBe('https://api.gantri.com');
   });
 
   it('frontend (no gate): pending → frontend_running (status only) → build → promote → ready', async () => {
@@ -125,7 +108,7 @@ describe('advanceDeployJob', () => {
   });
 
   it('gated frontend: frontend_running → dispatches its E2E AND starts its build (overlap)', async () => {
-    const gh = { dispatch: vi.fn().mockResolvedValue(undefined), findRunByMarker: vi.fn(), getRunState: vi.fn(), listReleaseTags: vi.fn().mockResolvedValue([]) } as any;
+    const gh = { dispatch: vi.fn().mockResolvedValue(undefined), findRunByMarker: vi.fn(), getRunState: vi.fn() } as any;
     const vercel = {
       deployToProd: vi.fn().mockResolvedValue({ projectId: 'p1', deploymentId: 'dpl_1', inspectorUrl: 'u' }),
       deploymentState: vi.fn(), promoteToProd: vi.fn(), prodUrl: vi.fn(),
@@ -195,7 +178,7 @@ describe('advanceDeployJob', () => {
   });
 
   it('Qase: creates a run + passes qase_run_id on dispatch, completes it on conclusion', async () => {
-    const gh1 = { dispatch: vi.fn().mockResolvedValue(undefined), findRunByMarker: vi.fn(), getRunState: vi.fn(), listReleaseTags: vi.fn().mockResolvedValue([]) } as any;
+    const gh1 = { dispatch: vi.fn().mockResolvedValue(undefined), findRunByMarker: vi.fn(), getRunState: vi.fn() } as any;
     const qase1 = { createRun: vi.fn().mockResolvedValue(297), completeRun: vi.fn(), runUrl: vi.fn() };
     const vercel = {
       deployToProd: vi.fn().mockResolvedValue({ projectId: 'p1', deploymentId: 'dpl_1', inspectorUrl: 'u' }),

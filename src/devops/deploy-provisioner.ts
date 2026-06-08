@@ -27,11 +27,7 @@ export async function advanceDeployJob(job: Job, deps: ProvisionerDeps): Promise
   if ((job.target === 'backend' || job.target === 'fullstack') && b && !b.url) {
     if (job.status === 'pending') {
       await deps.gh.dispatch(PORTER, PROD_WF, 'master', { tag: b.tag, job_id: job.id });
-      // Snapshot the release that's live right now — before this deploy cuts its
-      // own — so it's the exact rollback target if this one goes bad.
-      const releases = await deps.gh.listReleaseTags(PORTER).catch(() => [] as { tag: string }[]);
-      const spec: JobSpec = { ...job.spec, deployBackend: { ...b, prevRelease: releases[0]?.tag } };
-      return { status: 'backend_running', spec };
+      return { status: 'backend_running' };
     }
     if (job.status === 'backend_running' && job.runId == null) {
       const runId = await deps.gh.findRunByMarker(PORTER, PROD_WF, job.id);

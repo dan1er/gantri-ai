@@ -99,32 +99,6 @@ export class GithubDispatcher {
       .slice(0, limit);
   }
 
-  /**
-   * Production release tags (`vYYYY.MM.DD.i`) newest-first. These are cut by the
-   * prod deploy (porter `prod-deploy.yml`) and are the targets `rollback-production.yml`
-   * accepts. Sorted numerically by (date, increment) — NOT lexically, since `.10`
-   * must sort after `.2`.
-   */
-  async listReleaseTags(repo: string, limit = 10): Promise<{ tag: string; sha: string }[]> {
-    const res = await this.fetch(`${this.base(repo)}/git/matching-refs/tags/v`, { headers: this.headers() });
-    if (!res.ok) throw new Error(`list release tags failed: ${res.status}`);
-    const body = (await res.json()) as { ref: string; object: { sha: string } }[];
-    const RELEASE = /^v(\d{4})\.(\d{2})\.(\d{2})\.(\d+)$/;
-    return body
-      .map((r) => ({ tag: r.ref.replace('refs/tags/', ''), sha: r.object.sha }))
-      .map((t) => ({ ...t, m: t.tag.match(RELEASE) }))
-      .filter((t): t is typeof t & { m: RegExpMatchArray } => t.m !== null)
-      .sort((a, b) => {
-        for (let i = 1; i <= 4; i++) {
-          const d = Number(b.m[i]) - Number(a.m[i]);
-          if (d !== 0) return d;
-        }
-        return 0;
-      })
-      .slice(0, limit)
-      .map(({ tag, sha }) => ({ tag, sha }));
-  }
-
   /** Most recent workflow_dispatch run for a workflow (poll a dispatched run that has no marker). */
   async findLatestRun(repo: string, workflow: string): Promise<number | null> {
     const res = await this.fetch(

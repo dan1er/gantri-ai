@@ -17,11 +17,11 @@ function statusNote(job: Job): string | null {
         : '🌐 Building frontend(s)…';
     case 'ready': {
       if (job.kind !== 'deploy') return '✅ Preview ready';
-      const prev = job.spec.deployBackend?.prevRelease;
-      // Surface the prior release so a manual rollback is possible if the
-      // Rollback button ever fails (Actions → Rollback Production).
+      const prev = job.spec.deployBackend?.prevDeployTag;
+      // Surface the prior deploy so a manual rollback is possible if the
+      // *Rollback backend* button ever fails.
       return prev
-        ? `✅ Deployed to production\n↩️ Previous release: \`${prev}\` — if the *Rollback backend* button fails, run *Rollback Production* manually with release_tag \`${prev}\`, confirm \`rollback\`.`
+        ? `✅ Deployed to production\n↩️ Previous deploy: \`${prev}\` — if the *Rollback backend* button fails, roll back manually with \`/deploy ${prev}\` (or dispatch prod-deploy with that tag).`
         : '✅ Deployed to production';
     }
     case 'failed':

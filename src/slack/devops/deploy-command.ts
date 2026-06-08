@@ -42,6 +42,19 @@ export function candidateDeployTags<T extends { pr: number | null }>(
   return tags.filter((t) => (t.pr ?? Infinity) > maxDeployedPr);
 }
 
+/**
+ * The deploy tag of the most recent prior backend (porter) deploy = what's live
+ * in prod right now = the rollback target for a deploy about to start. `jobs` is
+ * listDeployJobs output (newest-first, failed excluded), captured before the new
+ * job exists, so the first one carrying a backend is the previous release.
+ */
+export function previousBackendDeployTag(jobs: Job[]): string | undefined {
+  for (const j of jobs) {
+    if (j.spec.deployBackend?.tag) return j.spec.deployBackend.tag;
+  }
+  return undefined;
+}
+
 function buttons(): unknown[] {
   const btn = (text: string, action_id: string) => ({ type: 'button', text: { type: 'plain_text', text }, action_id });
   return [
@@ -145,6 +158,12 @@ async function createDeployAndPost(
   deps: DeployCommandDeps, target: 'backend' | 'frontend' | 'fullstack',
   spec: { deployBackend?: DeployItem; deployFrontends?: DeployItem[]; e2e?: { scope: 'smoke' | 'both' } }, requestedBy: string,
 ) {
+  // Snapshot the deploy tag currently live in prod as the rollback target, before
+  // this job is created (so it's the PREVIOUS release, not this one).
+  if (spec.deployBackend) {
+    const prevDeployTag = previousBackendDeployTag(await deps.repo.listDeployJobs().catch(() => []));
+    spec = { ...spec, deployBackend: { ...spec.deployBackend, prevDeployTag } };
+  }
   const job = await deps.repo.create({ kind: 'deploy', target, spec, requestedBy, channelId: deps.opsChannelId });
   const posted = await deps.slack.chat.postMessage({
     channel: deps.opsChannelId, text: '🚀 deploy starting…', blocks: renderJobBlocks(job) as any,
@@ -354,32 +373,33 @@ export function registerDeployCommand(app: App, deps: DeployCommandDeps): void {
     }
   });
 
-  // One-click backend rollback: redeploy the release that was live before this
-  // deploy (captured at dispatch). The button carries a native Slack confirm, so
-  // by the time we get here the user has already confirmed.
+  // One-click backend rollback: re-promote the deploy tag that was live before
+  // this deploy (captured at creation) through the same prod-deploy path. The
+  // button carries a native Slack confirm, so the user has already confirmed.
   app.action('deploy_rollback', async ({ ack, body, action }: any) => {
     await ack();
     try {
       const jobId = action.value as string;
       const job = await deps.repo.get(jobId);
-      const prev = job?.spec.deployBackend?.prevRelease;
+      const prev = job?.spec.deployBackend?.prevDeployTag;
       if (!job || !prev) {
         await deps.slack.chat
           .postEphemeral({
             channel: body.channel?.id ?? deps.opsChannelId, user: body.user?.id,
-            text: 'No previous release recorded for this deploy — roll back manually via Actions → Rollback Production.',
+            text: 'No previous deploy recorded for this one — roll back manually with `/deploy` (or dispatch prod-deploy with the earlier tag).',
           })
           .catch(() => {});
         return;
       }
-      // rollback-production.yml gates on confirm === 'rollback'.
-      await deps.gh.dispatch('porter', 'rollback-production.yml', 'master', { release_tag: prev, confirm: 'rollback' });
+      // Rollback = a normal prod-deploy of the previous tag (resolves tag → its
+      // staging-built image → prod). Fire-and-forget; the user watches the run.
+      await deps.gh.dispatch('porter', 'prod-deploy.yml', 'master', { tag: prev, job_id: `rollback-${job.id}` });
       const channel = body.channel?.id ?? job.channelId;
       const ts = job.messageTs ?? body.container?.message_ts;
       await deps.slack.chat
         .postMessage({
           channel, thread_ts: ts ?? undefined,
-          text: `↩️ <@${body.user?.id}> dispatched a production rollback to \`${prev}\` — watch: https://github.com/gantri/porter/actions/workflows/rollback-production.yml`,
+          text: `↩️ <@${body.user?.id}> rolling production back to \`${prev}\` — watch: https://github.com/gantri/porter/actions/workflows/prod-deploy.yml`,
           unfurl_links: false, unfurl_media: false,
         })
         .catch(() => {});

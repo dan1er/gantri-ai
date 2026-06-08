@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { candidateDeployTags } from '../../../src/slack/devops/deploy-command.js';
+import { candidateDeployTags, previousBackendDeployTag } from '../../../src/slack/devops/deploy-command.js';
 import type { Job, JobSpec, DeployItem } from '../../../src/devops/types.js';
 
 function job(spec: JobSpec, status: Job['status'] = 'ready'): Job {
@@ -49,5 +49,21 @@ describe('candidateDeployTags', () => {
     const jobs = [job({ deployBackend: be(5199) })];
     // null-pr tag still shown; 5196 hidden (<= 5199)
     expect(candidateDeployTags(tags, jobs, 'porter').map((t) => t.pr)).toEqual([null]);
+  });
+});
+
+describe('previousBackendDeployTag', () => {
+  it('returns the most recent prior backend deploy tag (jobs are newest-first)', () => {
+    const jobs = [
+      job({ deployFrontends: [fe('mantle', 1203)] }),   // newest, no backend → skip
+      job({ deployBackend: be(5198) }),                 // the previous backend release
+      job({ deployBackend: be(5196) }),
+    ];
+    expect(previousBackendDeployTag(jobs)).toBe('deploy-5198-d');
+  });
+
+  it('returns undefined when no prior job carried a backend', () => {
+    expect(previousBackendDeployTag([job({ deployFrontends: [fe('core', 1) ] })])).toBeUndefined();
+    expect(previousBackendDeployTag([])).toBeUndefined();
   });
 });

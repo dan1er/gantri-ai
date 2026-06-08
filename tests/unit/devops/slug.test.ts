@@ -19,6 +19,6 @@ describe('slugFromRef', () => {
 
 describe('backendUrl', () => {
   it('builds the deterministic preview URL', () => {
-    expect(backendUrl('as-2215')).toBe('https://as-2215.api.preview.gantri.com');
+    expect(backendUrl('as-2215')).toBe('https://as-2215.preview.api.gantri.com');
   });
 });

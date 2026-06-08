@@ -21,10 +21,10 @@ describe('renderJobBlocks', () => {
   it('shows the URL and a Tear down button when ready', () => {
     const blocks = renderJobBlocks({
       ...baseJob, status: 'ready',
-      spec: { backend: { ref: 'feat/as-2215', slug: 'as-2215', url: 'https://as-2215.api.preview.gantri.com' } },
+      spec: { backend: { ref: 'feat/as-2215', slug: 'as-2215', url: 'https://as-2215.preview.api.gantri.com' } },
     });
     const text = JSON.stringify(blocks);
-    expect(text).toContain('https://as-2215.api.preview.gantri.com');
+    expect(text).toContain('https://as-2215.preview.api.gantri.com');
     expect(text).toContain('Tear down');
     expect(text).toContain('preview_teardown');
   });

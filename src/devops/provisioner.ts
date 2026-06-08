@@ -26,7 +26,11 @@ export interface JobPatch {
 }
 
 const PORTER = 'porter';
-const CREATE_WF = 'preview-create.yml';
+// Entry point: builds porter-api from the branch (→ ECR) then calls the reusable
+// preview-create.yml to provision. Takes { ref, slug, job_id }; its run-name
+// carries job_id so the bot can find the run. (preview-create.yml itself is now
+// the inner reusable workflow that takes a pre-built image.)
+const CREATE_WF = 'preview-from-branch.yml';
 // The workflow definition only lives on porter's default branch, so dispatch
 // the run from there. The actual preview target branch travels as the `ref`
 // input (a feature branch usually won't have the workflow file yet).

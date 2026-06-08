@@ -13,7 +13,7 @@ describe('advancePreviewJob', () => {
   it('pending backend → dispatches and moves to backend_running', async () => {
     const gh = { dispatch: vi.fn().mockResolvedValue(undefined), findRunByMarker: vi.fn(), getRunState: vi.fn() } as any;
     const patch = await advancePreviewJob(backendJob, { gh });
-    expect(gh.dispatch).toHaveBeenCalledWith('porter', 'preview-create.yml', 'master', { ref: 'feat/as-1', slug: 'as-1', job_id: 'j1' });
+    expect(gh.dispatch).toHaveBeenCalledWith('porter', 'preview-from-branch.yml', 'master', { ref: 'feat/as-1', slug: 'as-1', job_id: 'j1' });
     expect(patch.status).toBe('backend_running');
   });
 
@@ -27,7 +27,7 @@ describe('advancePreviewJob', () => {
     const gh = { getRunState: vi.fn().mockResolvedValue('success') } as any;
     const patch = await advancePreviewJob({ ...backendJob, status: 'backend_running', runId: 42 }, { gh });
     expect(patch.status).toBe('ready');
-    expect(patch.spec?.backend?.url).toBe('https://as-1.api.preview.gantri.com');
+    expect(patch.spec?.backend?.url).toBe('https://as-1.preview.api.gantri.com');
   });
 
   it('backend_running failed → failed with error', async () => {
@@ -56,12 +56,12 @@ describe('advancePreviewJob', () => {
     const job: Job = {
       ...backendJob, target: 'fullstack', status: 'frontend_running',
       spec: {
-        backend: { ref: 'feat/as-1', slug: 'as-1', url: 'https://as-1.api.preview.gantri.com' },
+        backend: { ref: 'feat/as-1', slug: 'as-1', url: 'https://as-1.preview.api.gantri.com' },
         frontends: [{ repo: 'mantle', ref: 'feat/as-1' }],
       },
     };
     const patch = await advancePreviewJob(job, { gh, vercel } as any);
-    expect(vercel.wireAndRedeploy).toHaveBeenCalledWith('mantle', 'feat/as-1', 'https://as-1.api.preview.gantri.com');
+    expect(vercel.wireAndRedeploy).toHaveBeenCalledWith('mantle', 'feat/as-1', 'https://as-1.preview.api.gantri.com');
     expect(patch.status).toBe('ready');
     expect(patch.spec?.frontends?.[0]?.deploymentUrl).toContain('marketplace-abc');
   });

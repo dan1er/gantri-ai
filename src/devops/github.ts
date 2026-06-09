@@ -1,5 +1,16 @@
 export type RunState = 'running' | 'success' | 'failed';
 
+/**
+ * Extract the PR number from a deploy tag. Accepts the current date-first format
+ * `deploy-<YYYY.MM.DD>-<pr>` and the legacy pr-first `deploy-<pr>-<YYYY.MM.DD>`
+ * so old tags still parse during/after the rename.
+ */
+export function prFromTag(tag: string): number | null {
+  const m =
+    tag.match(/^deploy-\d{4}\.\d{2}\.\d{2}-(\d+)$/) ?? tag.match(/^deploy-(\d+)-\d{4}\.\d{2}\.\d{2}$/);
+  return m ? Number(m[1]) : null;
+}
+
 export interface GithubDispatcherDeps {
   token: string;
   owner: string;
@@ -84,19 +95,31 @@ export class GithubDispatcher {
     return body.map((p) => ({ number: p.number, title: p.title, url: p.html_url, head: p.head.ref }));
   }
 
-  /** `deploy-*` tags for a repo, newest PR first (for the /deploy picker). */
-  async listDeployTags(repo: string, limit = 25): Promise<{ tag: string; sha: string; pr: number | null }[]> {
+  /**
+   * `deploy-*` tags for a repo, newest COMMIT first (for the /deploy picker).
+   * Ordered by the tag's commit date, not the PR number — a PR can be merged
+   * out of numeric order (a low number merged late), so PR number is not a
+   * reliable proxy for "what is newer / already shipped".
+   */
+  async listDeployTags(repo: string, limit = 25): Promise<{ tag: string; sha: string; pr: number | null; committedAt: string }[]> {
     const res = await this.fetch(`${this.base(repo)}/git/matching-refs/tags/deploy-`, { headers: this.headers() });
     if (!res.ok) throw new Error(`list tags failed: ${res.status}`);
     const body = (await res.json()) as { ref: string; object: { sha: string } }[];
-    return body
-      .map((r) => {
+    const withMeta = await Promise.all(
+      body.map(async (r) => {
         const tag = r.ref.replace('refs/tags/', '');
-        const pr = Number(tag.match(/^deploy-(\d+)-/)?.[1] ?? '') || null;
-        return { tag, sha: r.object.sha, pr };
-      })
-      .sort((a, b) => (b.pr ?? 0) - (a.pr ?? 0))
-      .slice(0, limit);
+        const sha = r.object.sha;
+        let committedAt = '';
+        try {
+          const c = await this.fetch(`${this.base(repo)}/commits/${sha}`, { headers: this.headers() });
+          if (c.ok) committedAt = ((await c.json()) as { commit?: { committer?: { date?: string } } })?.commit?.committer?.date ?? '';
+        } catch {
+          // leave empty — tag sorts last, still selectable
+        }
+        return { tag, sha, pr: prFromTag(tag), committedAt };
+      }),
+    );
+    return withMeta.sort((a, b) => b.committedAt.localeCompare(a.committedAt)).slice(0, limit);
   }
 
   /** Most recent workflow_dispatch run for a workflow (poll a dispatched run that has no marker). */

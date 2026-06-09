@@ -1,5 +1,18 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { GithubDispatcher } from '../../../src/devops/github.js';
+import { GithubDispatcher, prFromTag } from '../../../src/devops/github.js';
+
+describe('prFromTag', () => {
+  it('parses the date-first format (PR last)', () => {
+    expect(prFromTag('deploy-2026.06.09-5180')).toBe(5180);
+  });
+  it('still parses the legacy pr-first format', () => {
+    expect(prFromTag('deploy-5180-2026.06.09')).toBe(5180);
+  });
+  it('returns null for an unparseable tag', () => {
+    expect(prFromTag('deploy-weird')).toBeNull();
+    expect(prFromTag('v2026.06.09')).toBeNull();
+  });
+});
 
 function jsonResponse(body: unknown, status = 200) {
   return { ok: status < 300, status, json: async () => body } as Response;

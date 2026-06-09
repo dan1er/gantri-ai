@@ -15,29 +15,30 @@ export interface DeployCommandDeps {
 }
 
 /**
- * Tags still worth offering for deploy: those whose PR# is above the highest
- * already-deployed PR# for this repo (the high-water mark). Deploying a tag
+ * Tags still worth offering for deploy: those committed AFTER the most recent
+ * already-deployed tag for this repo (the high-water mark). Deploying a tag
  * ships every earlier commit too (they're bundled into it), so any tag at or
- * below the mark is already in production — hide it. This keeps the picker to
- * genuine candidates (on staging, not yet promoted) and prevents re-deploying
- * an old tag, which would roll prod back. A failed deploy drops out of
- * listDeployJobs, so its tag reappears for a retry (the mark falls back).
+ * before the live commit is already in production — hide it.
  *
- * One rule for every repo: porter reads the backend item, frontends read their
- * own item. Tags without a parseable PR# are never hidden (shown by default).
+ * Ordered by the tag's COMMIT date, not the PR number: a PR can merge out of
+ * numeric order (a low-numbered PR merged late), so a higher already-deployed
+ * PR# must not hide a newer, lower-numbered tag. The deployed tag's commit date
+ * is read from `tags` (matched by tag string). A failed deploy drops out of
+ * listDeployJobs, so its tag reappears for a retry (the mark falls back). Tags
+ * with no commit date are never hidden (shown by default).
  */
-export function candidateDeployTags<T extends { pr: number | null }>(
+export function candidateDeployTags<T extends { tag: string; committedAt: string }>(
   tags: T[], deployJobs: Job[], repo: string,
 ): T[] {
-  let maxDeployedPr = 0;
-  const bump = (it?: DeployItem): void => {
-    if (it?.pr != null) maxDeployedPr = Math.max(maxDeployedPr, it.pr);
-  };
+  const deployed = new Set<string>();
   for (const j of deployJobs) {
-    if (repo === 'porter') bump(j.spec.deployBackend);
-    for (const f of j.spec.deployFrontends ?? []) if (f.repo === repo) bump(f);
+    if (repo === 'porter' && j.spec.deployBackend?.tag) deployed.add(j.spec.deployBackend.tag);
+    for (const f of j.spec.deployFrontends ?? []) if (f.repo === repo && f.tag) deployed.add(f.tag);
   }
-  return tags.filter((t) => (t.pr ?? Infinity) > maxDeployedPr);
+  // Newest commit among already-deployed tags = what's live in prod.
+  let cutoff = '';
+  for (const t of tags) if (deployed.has(t.tag) && t.committedAt > cutoff) cutoff = t.committedAt;
+  return tags.filter((t) => !cutoff || !t.committedAt || t.committedAt > cutoff);
 }
 
 /**
@@ -201,7 +202,7 @@ function confirmBlocks(target: string, spec: { deployBackend?: DeployItem; deplo
   return blocks;
 }
 
-/** Per repo, earlier (lower PR#) tags that haven't been deployed and are being skipped. */
+/** Per repo, earlier (older commit) tags that haven't been deployed and are being skipped. */
 async function findSkipped(deps: DeployCommandDeps, spec: { deployBackend?: DeployItem; deployFrontends?: DeployItem[]; e2e?: { scope: 'smoke' | 'both' } }): Promise<string[]> {
   const jobs = await deps.repo.listDeployJobs();
   const usedFor = (repo: string): Set<string> => {
@@ -213,17 +214,18 @@ async function findSkipped(deps: DeployCommandDeps, spec: { deployBackend?: Depl
     return s;
   };
   const out: string[] = [];
-  const check = async (repo: string, name: string, pickedTag: string, pickedPr: number | null) => {
-    if (pickedPr == null) return;
+  const check = async (repo: string, name: string, pickedTag: string) => {
     const used = usedFor(repo);
     const tags = await deps.gh.listDeployTags(repo);
+    const picked = tags.find((t) => t.tag === pickedTag);
+    if (!picked?.committedAt) return;
     const skipped = tags
-      .filter((t) => t.pr != null && t.pr < pickedPr && t.tag !== pickedTag && !used.has(t.tag))
+      .filter((t) => t.committedAt && t.committedAt < picked.committedAt && t.tag !== pickedTag && !used.has(t.tag))
       .map((t) => `\`${t.tag}\``);
     if (skipped.length) out.push(`*${name}*: ${skipped.join(', ')}`);
   };
-  if (spec.deployBackend) await check('porter', 'Porter', spec.deployBackend.tag, spec.deployBackend.pr);
-  for (const f of spec.deployFrontends ?? []) await check(f.repo ?? '', REPO_NAME[f.repo ?? ''] ?? (f.repo ?? ''), f.tag, f.pr);
+  if (spec.deployBackend) await check('porter', 'Porter', spec.deployBackend.tag);
+  for (const f of spec.deployFrontends ?? []) await check(f.repo ?? '', REPO_NAME[f.repo ?? ''] ?? (f.repo ?? ''), f.tag);
   return out;
 }
 

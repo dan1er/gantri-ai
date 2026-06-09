@@ -32,6 +32,11 @@ const PORTER = 'porter';
 // carries job_id so the bot can find the run. (preview-create.yml itself is now
 // the inner reusable workflow that takes a pre-built image.)
 const CREATE_WF = 'preview-from-branch.yml';
+// Refresh path: rebuilds from the branch HEAD and rolls ONLY the existing
+// porter-api Deployment (run-migrations + api) — namespace, preview-db, secrets
+// and ingress stay untouched, so the preview's data survives. Fails fast if the
+// preview doesn't exist. Same { ref, slug, job_id } contract as CREATE_WF.
+const REFRESH_WF = 'preview-refresh.yml';
 // The workflow definition only lives on porter's default branch, so dispatch
 // the run from there. The actual preview target branch travels as the `ref`
 // input (a feature branch usually won't have the workflow file yet).
@@ -47,12 +52,15 @@ export async function advancePreviewJob(job: Job, deps: ProvisionerDeps): Promis
     // the original with a per-attempt suffix (job_id#N). The very first
     // provision (attempt unset) keeps the bare job id, unchanged.
     const marker = `${job.id}${b.attempt ? `#${b.attempt}` : ''}`;
+    // attempt set = the Refresh button bumped it → roll the existing preview in
+    // place (preview-refresh) instead of re-provisioning from scratch.
+    const wf = b.attempt ? REFRESH_WF : CREATE_WF;
     if (job.status === 'pending') {
-      await deps.gh.dispatch(PORTER, CREATE_WF, WORKFLOW_REF, { ref: b.ref, slug: b.slug, job_id: marker });
+      await deps.gh.dispatch(PORTER, wf, WORKFLOW_REF, { ref: b.ref, slug: b.slug, job_id: marker });
       return { status: 'backend_running' };
     }
     if (job.status === 'backend_running' && job.runId == null) {
-      const runId = await deps.gh.findRunByMarker(PORTER, CREATE_WF, marker);
+      const runId = await deps.gh.findRunByMarker(PORTER, wf, marker);
       return runId == null ? {} : { runId };
     }
     if (job.status === 'backend_running' && job.runId != null) {

@@ -327,12 +327,13 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
         .catch(() => {});
       return;
     }
-    // Re-provision the backend at the branch HEAD without tearing down: clear its
-    // URL and reset to pending so the runner re-dispatches preview-from-branch
-    // against the same slug (rebuild + run-migrations init-container). The
-    // frontends keep their URLs — the slug, hence the backend URL they're wired
-    // to, is unchanged — so no re-wire is needed. Bump `attempt` so the new run
-    // gets a unique marker (job_id#N) and findRunByMarker can't latch the old run.
+    // Refresh the backend at the branch HEAD without tearing down: clear its
+    // URL and reset to pending so the runner dispatches preview-refresh against
+    // the same slug (rebuild + roll porter-api in place; preview-db and its data
+    // survive). The frontends keep their URLs — the slug, hence the backend URL
+    // they're wired to, is unchanged — so no re-wire is needed. Bump `attempt`
+    // so the new run gets a unique marker (job_id#N), findRunByMarker can't
+    // latch the old run, and the runner picks the refresh workflow.
     const attempt = (b.attempt ?? 0) + 1;
     const spec: JobSpec = { ...job.spec, backend: { ...b, url: undefined, attempt } };
     // The button can live on a "reuse" note — a different message than the job's

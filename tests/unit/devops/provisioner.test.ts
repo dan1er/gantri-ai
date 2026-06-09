@@ -24,15 +24,15 @@ describe('advancePreviewJob', () => {
     expect(gh.findRunByMarker).toHaveBeenCalledWith('porter', 'preview-from-branch.yml', 'j1');
   });
 
-  it('refresh (attempt set) dispatches + looks up the run with a unique marker job_id#N', async () => {
+  it('refresh (attempt set) uses preview-refresh + a unique marker job_id#N (in-place roll, DB preserved)', async () => {
     const refreshJob: Job = { ...backendJob, spec: { backend: { ref: 'feat/as-1', slug: 'as-1', attempt: 2 } } };
     const gh = { dispatch: vi.fn().mockResolvedValue(undefined), findRunByMarker: vi.fn().mockResolvedValue(99) } as any;
     // pending → dispatch carries the suffixed marker so it can't collide with the original run
     await advancePreviewJob(refreshJob, { gh });
-    expect(gh.dispatch).toHaveBeenCalledWith('porter', 'preview-from-branch.yml', 'master', { ref: 'feat/as-1', slug: 'as-1', job_id: 'j1#2' });
-    // backend_running → findRunByMarker uses the same suffixed marker (not the bare job id)
+    expect(gh.dispatch).toHaveBeenCalledWith('porter', 'preview-refresh.yml', 'master', { ref: 'feat/as-1', slug: 'as-1', job_id: 'j1#2' });
+    // backend_running → findRunByMarker polls the SAME workflow with the same suffixed marker
     const patch = await advancePreviewJob({ ...refreshJob, status: 'backend_running', runId: null }, { gh });
-    expect(gh.findRunByMarker).toHaveBeenCalledWith('porter', 'preview-from-branch.yml', 'j1#2');
+    expect(gh.findRunByMarker).toHaveBeenCalledWith('porter', 'preview-refresh.yml', 'j1#2');
     expect(patch.runId).toBe(99);
   });
 

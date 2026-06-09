@@ -202,8 +202,13 @@ function confirmBlocks(target: string, spec: { deployBackend?: DeployItem; deplo
   return blocks;
 }
 
-/** Per repo, earlier (older commit) tags that haven't been deployed and are being skipped. */
-async function findSkipped(deps: DeployCommandDeps, spec: { deployBackend?: DeployItem; deployFrontends?: DeployItem[]; e2e?: { scope: 'smoke' | 'both' } }): Promise<string[]> {
+/**
+ * Per repo, tags being skipped over by this deploy: committed AFTER what's live
+ * in prod (same commit-date cutoff as candidateDeployTags — anything at/before
+ * the live commit is already shipped, bundled into a prior deploy) and BEFORE
+ * the picked tag, and never themselves deployed.
+ */
+export async function findSkipped(deps: Pick<DeployCommandDeps, 'repo' | 'gh'>, spec: { deployBackend?: DeployItem; deployFrontends?: DeployItem[]; e2e?: { scope: 'smoke' | 'both' } }): Promise<string[]> {
   const jobs = await deps.repo.listDeployJobs();
   const usedFor = (repo: string): Set<string> => {
     const s = new Set<string>();
@@ -219,8 +224,13 @@ async function findSkipped(deps: DeployCommandDeps, spec: { deployBackend?: Depl
     const tags = await deps.gh.listDeployTags(repo);
     const picked = tags.find((t) => t.tag === pickedTag);
     if (!picked?.committedAt) return;
+    // Newest commit among already-deployed tags = what's live in prod.
+    let cutoff = '';
+    for (const t of tags) if (used.has(t.tag) && t.committedAt > cutoff) cutoff = t.committedAt;
     const skipped = tags
-      .filter((t) => t.committedAt && t.committedAt < picked.committedAt && t.tag !== pickedTag && !used.has(t.tag))
+      .filter((t) =>
+        t.committedAt && t.committedAt < picked.committedAt && t.committedAt > cutoff &&
+        t.tag !== pickedTag && !used.has(t.tag))
       .map((t) => `\`${t.tag}\``);
     if (skipped.length) out.push(`*${name}*: ${skipped.join(', ')}`);
   };

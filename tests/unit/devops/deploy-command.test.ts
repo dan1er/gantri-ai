@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { candidateDeployTags, previousBackendDeployTag } from '../../../src/slack/devops/deploy-command.js';
+import { describe, it, expect, vi } from 'vitest';
+import { candidateDeployTags, previousBackendDeployTag, findSkipped } from '../../../src/slack/devops/deploy-command.js';
 import type { Job, JobSpec, DeployItem } from '../../../src/devops/types.js';
 
 function job(spec: JobSpec, status: Job['status'] = 'ready'): Job {
@@ -64,6 +64,39 @@ describe('candidateDeployTags', () => {
     expect(result).toContain(null); // no commit date → always shown
     expect(result).toContain(5196); // newer commit → shown
     expect(result).not.toContain(5195); // the live tag → hidden
+  });
+});
+
+describe('findSkipped', () => {
+  const t = (pr: number, committedAt: string) => ({ tag: `deploy-x-${pr}`, sha: 's', pr, committedAt });
+  const deps = (deployedPrs: number[], tags: ReturnType<typeof t>[]) => ({
+    repo: { listDeployJobs: vi.fn().mockResolvedValue(deployedPrs.map((pr) => job({ deployBackend: { tag: `deploy-x-${pr}`, sha: 's', pr } }))) },
+    gh: { listDeployTags: vi.fn().mockResolvedValue(tags) },
+  }) as any;
+
+  it('does not flag tags older than what is already live in prod (bundled into a prior deploy)', async () => {
+    // prod is at 5213; deploying 5214 right after → nothing is being skipped.
+    const tags = [
+      t(5214, '2026-06-09T21:14:00Z'), t(5213, '2026-06-09T20:13:00Z'),
+      t(5209, '2026-06-09T19:58:00Z'), t(5180, '2026-06-09T15:54:00Z'),
+      t(5196, '2026-06-08T16:09:00Z'),
+    ];
+    const out = await findSkipped(deps([5213, 5205], tags), { deployBackend: { tag: 'deploy-x-5214', sha: 's', pr: 5214 } });
+    expect(out).toEqual([]);
+  });
+
+  it('flags only undeployed tags between the live commit and the picked tag', async () => {
+    // prod at 5200; picking 5214 → 5209 and 5180 ride along; 5196 (older than live) does not.
+    const tags = [
+      t(5214, '2026-06-09T21:14:00Z'), t(5209, '2026-06-09T19:58:00Z'),
+      t(5180, '2026-06-09T15:54:00Z'), t(5200, '2026-06-08T17:58:00Z'),
+      t(5196, '2026-06-08T16:09:00Z'),
+    ];
+    const out = await findSkipped(deps([5200], tags), { deployBackend: { tag: 'deploy-x-5214', sha: 's', pr: 5214 } });
+    expect(out).toHaveLength(1);
+    expect(out[0]).toContain('deploy-x-5209');
+    expect(out[0]).toContain('deploy-x-5180');
+    expect(out[0]).not.toContain('deploy-x-5196');
   });
 });
 

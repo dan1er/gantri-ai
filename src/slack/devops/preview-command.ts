@@ -12,6 +12,12 @@ export function isOpsChannel(channelId: string, opsChannelId: string): boolean {
   return channelId === opsChannelId;
 }
 
+// Sentinel option value for "I have no frontend changes — let the bot create a
+// throwaway branch off the frontend's trunk and wire it to the backend preview".
+// Only offered in the full-stack modal (a preview-target env override never
+// applies to the production trunk, so we need a real non-trunk branch).
+export const AUTO_TRUNK = '__auto_trunk__';
+
 export function buildTypeButtons(): unknown[] {
   const btn = (text: string, action_id: string) => ({
     type: 'button', text: { type: 'plain_text', text }, action_id,
@@ -114,7 +120,7 @@ function jobKey(spec: { backend?: { slug: string }; frontends?: { repo: string; 
 
 async function createJobAndPost(
   deps: PreviewCommandDeps, target: JobTarget,
-  spec: { backend?: { ref: string; slug: string; link?: string }; frontends?: { repo: FrontendRepo; ref: string; link?: string }[] },
+  spec: { backend?: { ref: string; slug: string; link?: string }; frontends?: { repo: FrontendRepo; ref: string; link?: string; autoBranch?: boolean }[] },
   requestedBy: string,
 ) {
   // Reuse an existing preview (anything not failed/torn down) for the same target + identity.
@@ -173,11 +179,24 @@ async function postError(deps: PreviewCommandDeps, label: string, requestedBy: s
 }
 
 async function resolveFrontends(
-  deps: PreviewCommandDeps, inputs: { repo: FrontendRepo; ref: string }[],
-): Promise<{ repo: FrontendRepo; ref: string; link: string }[]> {
+  deps: PreviewCommandDeps, inputs: { repo: FrontendRepo; ref: string; autoBranch?: boolean }[],
+): Promise<{ repo: FrontendRepo; ref: string; link: string; autoBranch?: boolean }[]> {
   return Promise.all(inputs.map(async (f) => {
     const { ref, link } = await deps.gh.resolveRef(f.repo, f.ref);
-    return { repo: f.repo, ref, link };
+    return { repo: f.repo, ref, link, ...(f.autoBranch ? { autoBranch: true } : {}) };
+  }));
+}
+
+// Expand any "auto-trunk" frontend pick into a real throwaway branch created off
+// that frontend's trunk, named after the backend slug so it's unique + traceable.
+async function expandAutoFrontends(
+  deps: PreviewCommandDeps, inputs: { repo: FrontendRepo; ref: string }[], slug: string,
+): Promise<{ repo: FrontendRepo; ref: string; autoBranch?: boolean }[]> {
+  return Promise.all(inputs.map(async (f) => {
+    if (f.ref !== AUTO_TRUNK) return { repo: f.repo, ref: f.ref };
+    const branch = `preview-${slug}`;
+    await deps.gh.ensureBranch(f.repo, branch);
+    return { repo: f.repo, ref: branch, autoBranch: true };
   }));
 }
 
@@ -207,6 +226,7 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
     { action: 'be_ref_input', repo: 'porter' },
     ...FRONTEND_FIELDS.map((f) => ({ action: f.action, repo: f.repo as string })),
   ];
+  const FRONTEND_ACTIONS = new Set(FRONTEND_FIELDS.map((f) => f.action));
   for (const src of OPTION_SOURCES) {
     app.options(src.action, async ({ ack, payload }: any) => {
       const query = String(payload?.value ?? '').trim();
@@ -225,6 +245,9 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
       }
       if (query) {
         opts.unshift({ text: { type: 'plain_text' as const, text: `✍︎ Use "${query}"`.slice(0, 75) }, value: query.slice(0, 75) });
+      } else if (FRONTEND_ACTIONS.has(src.action) && payload?.view?.callback_id === 'preview_fullstack_submit') {
+        // Backend-only change but you still want a UI: let the bot branch off trunk.
+        opts.unshift({ text: { type: 'plain_text' as const, text: '🌱 No frontend changes — use latest trunk' }, value: AUTO_TRUNK });
       }
       await ack({ options: opts });
     });
@@ -245,6 +268,9 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
     const inputs = parseFrontendSubmission(view as any);
     try {
       if (inputs.length === 0) throw new Error('pick at least one frontend');
+      if (inputs.some((f) => f.ref === AUTO_TRUNK)) {
+        throw new Error('“use latest trunk” needs a backend to point at — use *Full stack* instead.');
+      }
       const frontends = await resolveFrontends(deps, inputs);
       await createJobAndPost(deps, 'frontend', { frontends }, body.user.id);
     } catch (err) {
@@ -256,9 +282,12 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
     const { backendRef, frontends: feInputs } = parseFullstackSubmission(view as any);
     try {
       const be = await deps.gh.resolveRef('porter', backendRef);
-      const frontends = await resolveFrontends(deps, feInputs);
+      const slug = slugFromRef(be.ref);
+      // Turn any "use latest trunk" pick into a real throwaway branch first.
+      const expanded = await expandAutoFrontends(deps, feInputs, slug);
+      const frontends = await resolveFrontends(deps, expanded);
       await createJobAndPost(deps, 'fullstack', {
-        backend: { ref: be.ref, slug: slugFromRef(be.ref), link: be.link },
+        backend: { ref: be.ref, slug, link: be.link },
         frontends,
       }, body.user.id);
     } catch (err) {
@@ -332,6 +361,12 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
     for (const f of job?.spec.frontends ?? []) {
       await deps.vercel?.removeBranchEnv(f.repo, f.ref)
         .catch((err) => logger.warn({ jobId, repo: f.repo, err: String((err as Error)?.message ?? err) }, 'env cleanup failed'));
+      // Delete branches the bot created off trunk (auto-trunk picks) — the user
+      // never made them, so they shouldn't linger after the preview is gone.
+      if (f.autoBranch) {
+        await deps.gh.deleteBranch(f.repo, f.ref)
+          .catch((err) => logger.warn({ jobId, repo: f.repo, err: String((err as Error)?.message ?? err) }, 'auto branch cleanup failed'));
+      }
     }
     // Update BOTH the message the button was clicked from AND the job's canonical
     // message: tearing down from a "reuse" note leaves the original message

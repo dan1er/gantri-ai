@@ -33,6 +33,23 @@ describe('renderJobBlocks', () => {
     const blocks = renderJobBlocks({ ...baseJob, status: 'failed', error: 'boom' });
     expect(JSON.stringify(blocks)).toContain('boom');
   });
+
+  it('marks a bot-created frontend branch with an "auto branch off trunk" hint', () => {
+    const job: Job = {
+      ...baseJob, target: 'fullstack', status: 'ready',
+      spec: {
+        backend: { ref: 'feat/as-9', slug: 'as-9', url: 'https://as-9.preview.api.gantri.com' },
+        frontends: [
+          { repo: 'mantle', ref: 'preview-as-9', url: 'https://marketplace-git-preview-as-9-gantri.vercel.app', autoBranch: true },
+          { repo: 'core', ref: 'feat/real', url: 'https://factoryos-git-feat-real-gantri.vercel.app' },
+        ],
+      },
+    };
+    const text = JSON.stringify(renderJobBlocks(job));
+    expect(text).toContain('auto branch off trunk'); // the auto one is annotated
+    // the non-auto frontend should not carry the hint (only one occurrence total)
+    expect(text.match(/auto branch off trunk/g)).toHaveLength(1);
+  });
 });
 
 const deployJob: Job = {

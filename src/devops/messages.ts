@@ -44,13 +44,14 @@ const REPO_DISPLAY: Record<string, string> = {
 
 function componentBlock(
   name: string, id: string, link: string | undefined, url: string | undefined,
-  pending: string | undefined, deploymentUrl?: string, apiUrl?: string,
+  pending: string | undefined, deploymentUrl?: string, apiUrl?: string, autoBranch?: boolean,
 ): string {
   const lines = [`*${name}* (${id})`];
   if (link) lines.push(`<${link}|Source>`);
   lines.push(url ? `<${url}|Preview>` : `Preview _(${pending ?? 'pending'})_`);
   if (apiUrl) lines.push(`API → ${apiUrl}`); // which backend this frontend is wired to
   if (deploymentUrl) lines.push(`<${deploymentUrl}|Deployment>`);
+  if (autoBranch) lines.push('_auto branch off trunk_'); // bot created this branch; deleted on teardown
   return lines.join('\n');
 }
 
@@ -168,7 +169,7 @@ export function renderJobBlocks(job: Job): unknown[] {
     blocks.push(section(componentBlock(REPO_DISPLAY[f.repo] ?? f.repo, f.ref, f.link,
       f.url,
       f.url ? undefined : 'building…',
-      f.url ? f.deploymentUrl : undefined, apiUrl)));
+      f.url ? f.deploymentUrl : undefined, apiUrl, f.autoBranch)));
   }
   if (job.status === 'failed' && job.error) blocks.push(section(`*Error:* ${job.error}`));
   if (blocks.length === 1) blocks.push(section('_starting…_'));

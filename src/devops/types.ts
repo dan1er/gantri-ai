@@ -17,6 +17,7 @@ export interface Frontend {
   url?: string;            // stable git-branch preview URL
   deploymentUrl?: string;  // the specific Vercel deployment that was triggered
   link?: string;           // PR / branch source link
+  autoBranch?: boolean;    // ref is a throwaway branch the bot created off trunk (delete on teardown)
 }
 
 export interface DeployItem {

@@ -109,4 +109,45 @@ export class GithubDispatcher {
     const body = (await res.json()) as { workflow_runs: { id: number }[] };
     return body.workflow_runs[0]?.id ?? null;
   }
+
+  /** The repo's default (trunk) branch name, e.g. `master`/`main`. */
+  async defaultBranch(repo: string): Promise<string> {
+    const res = await this.fetch(this.base(repo), { headers: this.headers() });
+    if (!res.ok) throw new Error(`get repo ${repo} failed: ${res.status}`);
+    const body = (await res.json()) as { default_branch?: string };
+    if (!body.default_branch) throw new Error(`repo ${repo} has no default branch`);
+    return body.default_branch;
+  }
+
+  /**
+   * Ensure a throwaway branch exists, created off the repo's trunk HEAD. Used to
+   * give a backend-only preview a real, non-production frontend branch to wire
+   * (a preview-target env override never applies to the production trunk).
+   * Idempotent: if the branch already exists, leaves it as-is.
+   */
+  async ensureBranch(repo: string, branch: string): Promise<void> {
+    const head = await this.fetch(`${this.base(repo)}/git/ref/heads/${branch}`, { headers: this.headers() });
+    if (head.ok) return; // already exists — reuse
+    const trunk = await this.defaultBranch(repo);
+    const trunkRef = await this.fetch(`${this.base(repo)}/git/ref/heads/${trunk}`, { headers: this.headers() });
+    if (!trunkRef.ok) throw new Error(`get ${repo} trunk ref failed: ${trunkRef.status}`);
+    const sha = ((await trunkRef.json()) as { object?: { sha?: string } }).object?.sha;
+    if (!sha) throw new Error(`${repo} trunk ${trunk} has no sha`);
+    const created = await this.fetch(`${this.base(repo)}/git/refs`, {
+      method: 'POST', headers: this.headers(),
+      body: JSON.stringify({ ref: `refs/heads/${branch}`, sha }),
+    });
+    // 422 = ref already exists (raced); treat as success.
+    if (!created.ok && created.status !== 422) throw new Error(`create branch ${repo}/${branch} failed: ${created.status}`);
+  }
+
+  /** Delete a branch (best-effort; used to clean up an auto-created preview branch on teardown). */
+  async deleteBranch(repo: string, branch: string): Promise<void> {
+    const res = await this.fetch(`${this.base(repo)}/git/refs/heads/${branch}`, {
+      method: 'DELETE', headers: this.headers(),
+    });
+    if (!res.ok && res.status !== 404 && res.status !== 422) {
+      throw new Error(`delete branch ${repo}/${branch} failed: ${res.status}`);
+    }
+  }
 }

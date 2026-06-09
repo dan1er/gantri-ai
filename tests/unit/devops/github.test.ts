@@ -71,4 +71,46 @@ describe('GithubDispatcher', () => {
     await expect(gh.resolveRef('porter', '999')).rejects.toThrow(/PR #999 not found/);
   });
 
+  it('ensureBranch is a no-op when the branch already exists', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ ref: 'refs/heads/preview-as-1' }, 200));
+    const gh = new GithubDispatcher({ token: 't', owner: 'gantri', fetch: fetchMock });
+    await gh.ensureBranch('mantle', 'preview-as-1');
+    expect(fetchMock).toHaveBeenCalledTimes(1); // only the existence check
+    expect(fetchMock.mock.calls[0][0]).toBe('https://api.github.com/repos/gantri/mantle/git/ref/heads/preview-as-1');
+  });
+
+  it('ensureBranch creates the branch off the trunk HEAD when missing', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ message: 'Not Found' }, 404))        // existence check: missing
+      .mockResolvedValueOnce(jsonResponse({ default_branch: 'master' }))          // repo → default branch
+      .mockResolvedValueOnce(jsonResponse({ object: { sha: 'abc123' } }))         // trunk ref → sha
+      .mockResolvedValueOnce(jsonResponse({}, 201));                              // create ref
+    const gh = new GithubDispatcher({ token: 't', owner: 'gantri', fetch: fetchMock });
+    await gh.ensureBranch('mantle', 'preview-as-1');
+    const createCall = fetchMock.mock.calls[3];
+    expect(createCall[0]).toBe('https://api.github.com/repos/gantri/mantle/git/refs');
+    expect(JSON.parse((createCall[1] as RequestInit).body as string)).toEqual({
+      ref: 'refs/heads/preview-as-1', sha: 'abc123',
+    });
+  });
+
+  it('ensureBranch tolerates a 422 race on create', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({}, 404))
+      .mockResolvedValueOnce(jsonResponse({ default_branch: 'main' }))
+      .mockResolvedValueOnce(jsonResponse({ object: { sha: 'deadbeef' } }))
+      .mockResolvedValueOnce(jsonResponse({ message: 'Reference already exists' }, 422));
+    const gh = new GithubDispatcher({ token: 't', owner: 'gantri', fetch: fetchMock });
+    await expect(gh.ensureBranch('core', 'preview-as-2')).resolves.toBeUndefined();
+  });
+
+  it('deleteBranch DELETEs the ref and tolerates a 404', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({}, 404));
+    const gh = new GithubDispatcher({ token: 't', owner: 'gantri', fetch: fetchMock });
+    await gh.deleteBranch('mantle', 'preview-as-1');
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://api.github.com/repos/gantri/mantle/git/refs/heads/preview-as-1');
+    expect((init as RequestInit).method).toBe('DELETE');
+  });
+
 });

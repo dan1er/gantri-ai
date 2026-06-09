@@ -6,7 +6,7 @@ interface Row {
   id: string; kind: JobKind; target: JobTarget; status: JobStatus;
   spec: JobSpec; requested_by: string; channel_id: string;
   message_ts: string | null; run_id: number | null; error: string | null;
-  created_at: string; updated_at: string;
+  created_at: string; updated_at: string; idle_pinged_at: string | null;
 }
 
 function toJob(r: Row): Job {
@@ -15,6 +15,7 @@ function toJob(r: Row): Job {
     spec: r.spec ?? {}, requestedBy: r.requested_by, channelId: r.channel_id,
     messageTs: r.message_ts, runId: r.run_id, error: r.error,
     createdAt: r.created_at, updatedAt: r.updated_at,
+    idlePingedAt: r.idle_pinged_at ?? null,
   };
 }
 
@@ -34,6 +35,7 @@ export interface UpdateJobInput {
   messageTs?: string;
   runId?: number | null;
   error?: string | null;
+  idlePingedAt?: string | null;
 }
 
 export class DevopsJobsRepo {
@@ -71,6 +73,7 @@ export class DevopsJobsRepo {
     if (patch.messageTs) row.message_ts = patch.messageTs; // truthy: never null out the canonical ts
     if (patch.runId !== undefined) row.run_id = patch.runId;
     if (patch.error !== undefined) row.error = patch.error;
+    if (patch.idlePingedAt !== undefined) row.idle_pinged_at = patch.idlePingedAt;
     const { error } = await this.client.from('devops_jobs').update(row).eq('id', id);
     if (error) throw new Error(`devops_jobs update failed: ${error.message}`);
   }

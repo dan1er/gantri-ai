@@ -2,8 +2,13 @@ import type { WebClient } from '@slack/web-api';
 import type { Job } from './types.js';
 import type { DevopsJobsRepo } from './jobs-repo.js';
 import type { JobPatch, ProvisionerDeps } from './provisioner.js';
-import { renderJobBlocks, e2eLocalConfig } from './messages.js';
+import { renderJobBlocks, e2eLocalConfig, idlePingBlocks } from './messages.js';
 import { logger } from '../logger.js';
+
+// Backend previews run in the cluster, so a ready one that's been forgotten
+// costs money. Once it's been up this long (and every interval after) the bot
+// pings the requester in the thread to tear it down or keep it.
+const IDLE_PING_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 
 type Advance = (job: Job, deps: ProvisionerDeps) => Promise<JobPatch>;
 
@@ -63,6 +68,9 @@ export class JobsRunner {
         await this.advanceOne(job).catch((err) =>
           logger.warn({ jobId: job.id, err: String((err as Error)?.message ?? err) }, 'devops job advance failed'),
         );
+        await this.maybePingIdle(job).catch((err) =>
+          logger.warn({ jobId: job.id, err: String((err as Error)?.message ?? err) }, 'devops idle ping failed'),
+        );
       }
     } catch (err) {
       logger.error({ err: String((err as Error)?.message ?? err) }, 'devops jobs tick failed');
@@ -105,5 +113,30 @@ export class JobsRunner {
       }
     }
   }
+
+  // Hourly reminder for a ready backend preview: ping the requester in the
+  // thread to tear it down (it's running in the cluster) or snooze.
+  private async maybePingIdle(job: Job): Promise<void> {
+    if (job.kind !== 'preview' || job.status !== 'ready' || !job.spec.backend || !job.messageTs) return;
+    const now = Date.now();
+    const since = new Date(job.idlePingedAt ?? job.createdAt).getTime();
+    if (!Number.isFinite(since) || now - since < IDLE_PING_INTERVAL_MS) return;
+
+    const { text, blocks } = idlePingBlocks(job, humanAge(now - new Date(job.createdAt).getTime()));
+    await this.deps.slack.chat.postMessage({
+      channel: job.channelId, thread_ts: job.messageTs, text,
+      blocks: blocks as any, unfurl_links: false, unfurl_media: false,
+    });
+    await this.deps.repo.update(job.id, { idlePingedAt: new Date(now).toISOString() });
+    logger.info({ jobId: job.id, by: job.requestedBy }, 'devops idle preview ping sent');
+  }
+}
+
+function humanAge(ms: number): string {
+  const h = Math.floor(ms / 3_600_000);
+  if (h < 1) return 'about an hour';
+  if (h < 24) return h === 1 ? '1 hour' : `${h} hours`;
+  const d = Math.floor(h / 24);
+  return d === 1 ? '1 day' : `${d} days`;
 }
 

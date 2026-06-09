@@ -70,6 +70,9 @@ export interface Job {
   error: string | null;
   createdAt: string;
   updatedAt: string;
+  // When the bot last pinged the requester that this (ready backend) preview is
+  // idle. NULL = never pinged; the first reminder fires ~1h after creation.
+  idlePingedAt: string | null;
 }
 
 export const TERMINAL_STATUSES: readonly JobStatus[] = ['ready', 'failed', 'torn_down'];

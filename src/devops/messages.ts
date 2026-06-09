@@ -38,6 +38,27 @@ export function e2eLocalConfig(job: Job): string | null {
   ].join('\n');
 }
 
+/**
+ * Hourly "is this still needed?" reminder for a ready backend preview, posted in
+ * the preview's thread @-mentioning the requester. Backend previews run in EKS,
+ * so an idle one costs money — offer a one-click tear down (or snooze).
+ */
+export function idlePingBlocks(job: Job, ageLabel: string): { text: string; blocks: unknown[] } {
+  const slug = job.spec.backend?.slug ?? 'preview';
+  const text = `⏰ <@${job.requestedBy}> your backend preview \`${slug}\` has been up for ${ageLabel}. Still need it? Tear it down if not — it runs in the cluster.`;
+  const blocks: unknown[] = [
+    { type: 'section', text: { type: 'mrkdwn', text } },
+    {
+      type: 'actions',
+      elements: [
+        { type: 'button', text: { type: 'plain_text', text: 'Tear down' }, style: 'danger', action_id: 'preview_teardown', value: job.id },
+        { type: 'button', text: { type: 'plain_text', text: 'Keep it (snooze 1h)' }, action_id: 'preview_keep', value: job.id },
+      ],
+    },
+  ];
+  return { text, blocks };
+}
+
 const REPO_DISPLAY: Record<string, string> = {
   mantle: 'Marketplace', core: 'Factoryos', made: 'Madeos',
 };

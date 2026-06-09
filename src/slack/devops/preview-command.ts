@@ -402,4 +402,19 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
     }
     logger.info({ jobId, by: body.user?.id }, 'devops preview torn down');
   });
+
+  // "Keep it (snooze 1h)" on an idle-preview ping: reset the idle timer so the
+  // next reminder is another hour out. Non-destructive — just silences the nag.
+  app.action('preview_keep', async ({ ack, body, action }: any) => {
+    await ack();
+    const jobId = action.value as string;
+    await deps.repo.update(jobId, { idlePingedAt: new Date().toISOString() }).catch(() => {});
+    await deps.slack.chat
+      .postEphemeral({
+        channel: body.channel?.id ?? deps.opsChannelId, user: body.user?.id,
+        text: '👍 Kept — I’ll check again in about an hour.',
+      })
+      .catch(() => {});
+    logger.info({ jobId, by: body.user?.id }, 'devops idle preview kept (snoozed)');
+  });
 }

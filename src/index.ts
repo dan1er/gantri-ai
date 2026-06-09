@@ -459,8 +459,9 @@ async function main() {
     klaviyoClient: klaviyoClientRef ?? { listLists: async () => [] },
     registerExtra: (a) => {
       if (devopsEnabled) {
-        registerPreviewCommand(a, { repo: jobsRepo, slack: a.client, opsChannelId: env.OPS_CHANNEL_ID!, gh: gh!, vercel: vercel ?? undefined });
-        registerDeployCommand(a, { repo: jobsRepo, slack: a.client, opsChannelId: env.OPS_CHANNEL_ID!, gh: gh! });
+        const dmUserIds = (env.DEVOPS_DM_USER_IDS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+        registerPreviewCommand(a, { repo: jobsRepo, slack: a.client, opsChannelId: env.OPS_CHANNEL_ID!, dmUserIds, gh: gh!, vercel: vercel ?? undefined });
+        registerDeployCommand(a, { repo: jobsRepo, slack: a.client, opsChannelId: env.OPS_CHANNEL_ID!, dmUserIds, gh: gh! });
       }
     },
   });

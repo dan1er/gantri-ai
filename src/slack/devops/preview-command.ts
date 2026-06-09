@@ -6,6 +6,7 @@ import type { VercelReader } from '../../devops/provisioner.js';
 import type { JobTarget, FrontendRepo, JobSpec } from '../../devops/types.js';
 import { slugFromRef } from '../../devops/slug.js';
 import { renderJobBlocks } from '../../devops/messages.js';
+import { decideCommandChannel, channelFromView } from './channel-access.js';
 import { logger } from '../../logger.js';
 
 export function isOpsChannel(channelId: string, opsChannelId: string): boolean {
@@ -105,6 +106,7 @@ export interface PreviewCommandDeps {
   repo: DevopsJobsRepo;
   slack: WebClient;
   opsChannelId: string;
+  dmUserIds: string[]; // users allowed to drive the bot from their DM with it
   gh: GithubDispatcher;
   vercel?: VercelReader;
 }
@@ -121,7 +123,7 @@ function jobKey(spec: { backend?: { slug: string }; frontends?: { repo: string; 
 async function createJobAndPost(
   deps: PreviewCommandDeps, target: JobTarget,
   spec: { backend?: { ref: string; slug: string; link?: string }; frontends?: { repo: FrontendRepo; ref: string; link?: string; autoBranch?: boolean }[] },
-  requestedBy: string,
+  requestedBy: string, channel: string,
 ) {
   // Reuse an existing preview (anything not failed/torn down) for the same target + identity.
   const key = jobKey(spec);
@@ -159,22 +161,22 @@ async function createJobAndPost(
       });
     }
     await deps.slack.chat
-      .postMessage({ channel: deps.opsChannelId, text: 'reusing existing preview', blocks: blocks as any })
+      .postMessage({ channel, text: 'reusing existing preview', blocks: blocks as any })
       .catch(() => {});
     return;
   }
-  const job = await deps.repo.create({ kind: 'preview', target, spec, requestedBy, channelId: deps.opsChannelId });
+  const job = await deps.repo.create({ kind: 'preview', target, spec, requestedBy, channelId: channel });
   const posted = await deps.slack.chat.postMessage({
-    channel: deps.opsChannelId, text: `🛠️ ${target} preview starting…`, blocks: renderJobBlocks(job) as any,
+    channel, text: `🛠️ ${target} preview starting…`, blocks: renderJobBlocks(job) as any,
     unfurl_links: false, unfurl_media: false,
   });
   if (posted.ts) await deps.repo.update(job.id, { messageTs: posted.ts });
 }
 
-async function postError(deps: PreviewCommandDeps, label: string, requestedBy: string, err: unknown): Promise<void> {
+async function postError(deps: PreviewCommandDeps, label: string, requestedBy: string, err: unknown, channel: string): Promise<void> {
   const msg = err instanceof Error ? err.message : String(err);
   await deps.slack.chat
-    .postMessage({ channel: deps.opsChannelId, text: `✗ ${label} preview — <@${requestedBy}>: ${msg}` })
+    .postMessage({ channel, text: `✗ ${label} preview — <@${requestedBy}>: ${msg}` })
     .catch(() => {});
 }
 
@@ -203,8 +205,9 @@ async function expandAutoFrontends(
 export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void {
   app.command('/preview', async ({ ack, body, respond }) => {
     await ack();
-    if (!isOpsChannel(body.channel_id, deps.opsChannelId)) {
-      await respond({ response_type: 'ephemeral', text: `Run \`/preview\` in <#${deps.opsChannelId}>.` });
+    const decision = decideCommandChannel('/preview', deps.opsChannelId, deps.dmUserIds, body.channel_id, body.user_id);
+    if (!decision.allowed) {
+      await respond({ response_type: 'ephemeral', text: decision.message });
       return;
     }
     await respond({ response_type: 'ephemeral', blocks: buildTypeButtons() as any });
@@ -214,7 +217,13 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
     await ack();
     // Remove the picker buttons; the modal opening is feedback enough.
     await respond({ delete_original: true });
-    await client.views.open({ trigger_id: body.trigger_id, view: build() });
+    // Carry the channel the command was invoked from (ops channel or a DM) so the
+    // result posts where the user is, not always the ops channel.
+    const channel = body.channel?.id ?? deps.opsChannelId;
+    await client.views.open({
+      trigger_id: body.trigger_id,
+      view: { ...build(), private_metadata: JSON.stringify({ channel }) },
+    });
   };
   app.action('preview_backend', openModal(buildBackendModal, 'Backend'));
   app.action('preview_frontend', openModal(buildFrontendModal, 'Frontend'));
@@ -255,16 +264,18 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
 
   app.view('preview_backend_submit', async ({ ack, body, view }) => {
     await ack();
+    const channel = channelFromView(view as any, deps.opsChannelId);
     const { ref } = parseBackendSubmission(view as any);
     try {
       const { ref: resolved, link } = await deps.gh.resolveRef('porter', ref);
-      await createJobAndPost(deps, 'backend', { backend: { ref: resolved, slug: slugFromRef(resolved), link } }, body.user.id);
+      await createJobAndPost(deps, 'backend', { backend: { ref: resolved, slug: slugFromRef(resolved), link } }, body.user.id, channel);
     } catch (err) {
-      await postError(deps, 'Backend', body.user.id, err);
+      await postError(deps, 'Backend', body.user.id, err, channel);
     }
   });
   app.view('preview_frontend_submit', async ({ ack, body, view }) => {
     await ack();
+    const channel = channelFromView(view as any, deps.opsChannelId);
     const inputs = parseFrontendSubmission(view as any);
     try {
       if (inputs.length === 0) throw new Error('pick at least one frontend');
@@ -272,13 +283,14 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
         throw new Error('“use latest trunk” needs a backend to point at — use *Full stack* instead.');
       }
       const frontends = await resolveFrontends(deps, inputs);
-      await createJobAndPost(deps, 'frontend', { frontends }, body.user.id);
+      await createJobAndPost(deps, 'frontend', { frontends }, body.user.id, channel);
     } catch (err) {
-      await postError(deps, 'Frontend', body.user.id, err);
+      await postError(deps, 'Frontend', body.user.id, err, channel);
     }
   });
   app.view('preview_fullstack_submit', async ({ ack, body, view }) => {
     await ack();
+    const channel = channelFromView(view as any, deps.opsChannelId);
     const { backendRef, frontends: feInputs } = parseFullstackSubmission(view as any);
     try {
       const be = await deps.gh.resolveRef('porter', backendRef);
@@ -289,9 +301,9 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
       await createJobAndPost(deps, 'fullstack', {
         backend: { ref: be.ref, slug, link: be.link },
         frontends,
-      }, body.user.id);
+      }, body.user.id, channel);
     } catch (err) {
-      await postError(deps, 'Full-stack', body.user.id, err);
+      await postError(deps, 'Full-stack', body.user.id, err, channel);
     }
   });
 

@@ -15,6 +15,9 @@ const envSchema = z.object({
   INTERNAL_SHARED_SECRET: z.string().optional(),
   MAINTAINER_SLACK_USER_ID: z.string().optional(),
   OPS_CHANNEL_ID: z.string().optional(),
+  // Comma-separated Slack user IDs allowed to drive /preview and /deploy from
+  // their DM with the bot (in addition to the ops channel). Empty = ops only.
+  DEVOPS_DM_USER_IDS: z.string().optional(),
   GITHUB_TOKEN: z.string().optional(),
   GITHUB_OWNER: z.string().default('gantri'),
   VERCEL_TOKEN: z.string().optional(),

@@ -4,16 +4,14 @@ import type { DevopsJobsRepo } from '../../devops/jobs-repo.js';
 import type { GithubDispatcher } from '../../devops/github.js';
 import type { FrontendRepo, DeployItem, Job } from '../../devops/types.js';
 import { renderJobBlocks } from '../../devops/messages.js';
+import { decideCommandChannel, channelFromView } from './channel-access.js';
 
 export interface DeployCommandDeps {
   repo: DevopsJobsRepo;
   slack: WebClient;
   opsChannelId: string;
+  dmUserIds: string[]; // users allowed to drive the bot from their DM with it
   gh: GithubDispatcher;
-}
-
-function isOps(channelId: string, opsChannelId: string): boolean {
-  return channelId === opsChannelId;
 }
 
 /**
@@ -149,16 +147,16 @@ async function resolveFeItems(gh: GithubDispatcher, v: ViewState): Promise<Deplo
   return items.filter((x): x is DeployItem => x !== null);
 }
 
-async function postErr(deps: DeployCommandDeps, label: string, requestedBy: string, err: unknown): Promise<void> {
+async function postErr(deps: DeployCommandDeps, label: string, requestedBy: string, err: unknown, channel: string): Promise<void> {
   const msg = err instanceof Error ? err.message : String(err);
   await deps.slack.chat
-    .postMessage({ channel: deps.opsChannelId, text: `✗ ${label} deploy — <@${requestedBy}>: ${msg}` })
+    .postMessage({ channel, text: `✗ ${label} deploy — <@${requestedBy}>: ${msg}` })
     .catch(() => {});
 }
 
 async function createDeployAndPost(
   deps: DeployCommandDeps, target: 'backend' | 'frontend' | 'fullstack',
-  spec: { deployBackend?: DeployItem; deployFrontends?: DeployItem[]; e2e?: { scope: 'smoke' | 'both' } }, requestedBy: string,
+  spec: { deployBackend?: DeployItem; deployFrontends?: DeployItem[]; e2e?: { scope: 'smoke' | 'both' } }, requestedBy: string, channel: string,
 ) {
   // Snapshot the deploy tag currently live in prod as the rollback target, before
   // this job is created (so it's the PREVIOUS release, not this one).
@@ -166,9 +164,9 @@ async function createDeployAndPost(
     const prevDeployTag = previousBackendDeployTag(await deps.repo.listDeployJobs().catch(() => []));
     spec = { ...spec, deployBackend: { ...spec.deployBackend, prevDeployTag } };
   }
-  const job = await deps.repo.create({ kind: 'deploy', target, spec, requestedBy, channelId: deps.opsChannelId });
+  const job = await deps.repo.create({ kind: 'deploy', target, spec, requestedBy, channelId: channel });
   const posted = await deps.slack.chat.postMessage({
-    channel: deps.opsChannelId, text: '🚀 deploy starting…', blocks: renderJobBlocks(job) as any,
+    channel, text: '🚀 deploy starting…', blocks: renderJobBlocks(job) as any,
     unfurl_links: false, unfurl_media: false,
   });
   if (posted.ts) await deps.repo.update(job.id, { messageTs: posted.ts });
@@ -232,18 +230,20 @@ async function findSkipped(deps: DeployCommandDeps, spec: { deployBackend?: Depl
 async function postConfirm(
   deps: DeployCommandDeps, userId: string, target: string,
   spec: { deployBackend?: DeployItem; deployFrontends?: DeployItem[]; e2e?: { scope: 'smoke' | 'both' } },
+  channel: string,
 ): Promise<void> {
   const skipped = await findSkipped(deps, spec).catch(() => [] as string[]);
   await deps.slack.chat
-    .postEphemeral({ channel: deps.opsChannelId, user: userId, text: 'Confirm deploy', blocks: confirmBlocks(target, spec, skipped) as any })
+    .postEphemeral({ channel, user: userId, text: 'Confirm deploy', blocks: confirmBlocks(target, spec, skipped) as any })
     .catch(() => {});
 }
 
 export function registerDeployCommand(app: App, deps: DeployCommandDeps): void {
   app.command('/deploy', async ({ ack, body, respond }) => {
     await ack();
-    if (!isOps(body.channel_id, deps.opsChannelId)) {
-      await respond({ response_type: 'ephemeral', text: `Run \`/deploy\` in <#${deps.opsChannelId}>.` });
+    const decision = decideCommandChannel('/deploy', deps.opsChannelId, deps.dmUserIds, body.channel_id, body.user_id);
+    if (!decision.allowed) {
+      await respond({ response_type: 'ephemeral', text: decision.message });
       return;
     }
     await respond({ response_type: 'ephemeral', blocks: buttons() as any });
@@ -253,7 +253,13 @@ export function registerDeployCommand(app: App, deps: DeployCommandDeps): void {
     await ack();
     // Remove the picker buttons; the modal opening is feedback enough.
     await respond({ delete_original: true });
-    await client.views.open({ trigger_id: body.trigger_id, view: build() });
+    // Carry the invoking channel (ops channel or a DM) through the modal so the
+    // confirm + result post where the user is.
+    const channel = body.channel?.id ?? deps.opsChannelId;
+    await client.views.open({
+      trigger_id: body.trigger_id,
+      view: { ...build(), private_metadata: JSON.stringify({ channel }) },
+    });
   };
   app.action('deploy_backend', open(backendModal, 'Backend'));
   app.action('deploy_frontend', open(frontendModal, 'Frontend'));
@@ -295,44 +301,48 @@ export function registerDeployCommand(app: App, deps: DeployCommandDeps): void {
 
   app.view('deploy_backend_submit', async ({ ack, body, view }) => {
     await ack();
+    const channel = channelFromView(view as any, deps.opsChannelId);
     try {
       const item = await resolveDeployItem(deps.gh, 'porter', sel(view as any, 'd_be_block', 'd_be_input'), true);
       if (!item) throw new Error('tag not found');
-      await postConfirm(deps, body.user.id, 'backend', { deployBackend: item });
+      await postConfirm(deps, body.user.id, 'backend', { deployBackend: item }, channel);
     } catch (err) {
-      await postErr(deps, 'Backend', body.user.id, err);
+      await postErr(deps, 'Backend', body.user.id, err, channel);
     }
   });
   app.view('deploy_frontend_submit', async ({ ack, body, view }) => {
     await ack();
+    const channel = channelFromView(view as any, deps.opsChannelId);
     try {
       const fes = await resolveFeItems(deps.gh, view as any);
       if (fes.length === 0) throw new Error('pick at least one frontend tag');
-      await postConfirm(deps, body.user.id, 'frontend', { deployFrontends: fes, ...e2eSpec(view as any) });
+      await postConfirm(deps, body.user.id, 'frontend', { deployFrontends: fes, ...e2eSpec(view as any) }, channel);
     } catch (err) {
-      await postErr(deps, 'Frontend', body.user.id, err);
+      await postErr(deps, 'Frontend', body.user.id, err, channel);
     }
   });
   app.view('deploy_fullstack_submit', async ({ ack, body, view }) => {
     await ack();
+    const channel = channelFromView(view as any, deps.opsChannelId);
     try {
       const be = await resolveDeployItem(deps.gh, 'porter', sel(view as any, 'd_be_block', 'd_be_input'), true);
       if (!be) throw new Error('porter tag not found');
       const fes = await resolveFeItems(deps.gh, view as any);
-      await postConfirm(deps, body.user.id, 'fullstack', { deployBackend: be, deployFrontends: fes, ...e2eSpec(view as any) });
+      await postConfirm(deps, body.user.id, 'fullstack', { deployBackend: be, deployFrontends: fes, ...e2eSpec(view as any) }, channel);
     } catch (err) {
-      await postErr(deps, 'Full-stack', body.user.id, err);
+      await postErr(deps, 'Full-stack', body.user.id, err, channel);
     }
   });
 
   app.action('deploy_confirm', async ({ ack, body, action, respond }: any) => {
     await ack();
     await respond({ delete_original: true });
+    const channel = body.channel?.id ?? deps.opsChannelId;
     try {
       const { target, spec } = JSON.parse(action.value as string);
-      await createDeployAndPost(deps, target, spec, body.user.id);
+      await createDeployAndPost(deps, target, spec, body.user.id, channel);
     } catch (err) {
-      await postErr(deps, 'Deploy', body.user?.id ?? '', err);
+      await postErr(deps, 'Deploy', body.user?.id ?? '', err, channel);
     }
   });
   app.action('deploy_cancel', async ({ ack, respond }: any) => {
@@ -371,7 +381,7 @@ export function registerDeployCommand(app: App, deps: DeployCommandDeps): void {
         } as any).catch(() => undefined);
       }
     } catch (err) {
-      await postErr(deps, 'Retry', body.user?.id ?? '', err);
+      await postErr(deps, 'Retry', body.user?.id ?? '', err, body.channel?.id ?? deps.opsChannelId);
     }
   });
 
@@ -406,7 +416,7 @@ export function registerDeployCommand(app: App, deps: DeployCommandDeps): void {
         })
         .catch(() => {});
     } catch (err) {
-      await postErr(deps, 'Rollback', body.user?.id ?? '', err);
+      await postErr(deps, 'Rollback', body.user?.id ?? '', err, body.channel?.id ?? deps.opsChannelId);
     }
   });
 }

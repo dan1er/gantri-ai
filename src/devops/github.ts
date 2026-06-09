@@ -1,13 +1,13 @@
 export type RunState = 'running' | 'success' | 'failed';
 
 /**
- * Extract the PR number from a deploy tag. Accepts the current date-first format
- * `deploy-<YYYY.MM.DD>-<pr>` and the legacy pr-first `deploy-<pr>-<YYYY.MM.DD>`
- * so old tags still parse during/after the rename.
+ * Extract the PR number from a deploy tag. Accepts the current timestamp-first
+ * format `deploy-<YYYY.MM.DD[.HH.MM.SS]>-<pr>` (date, optionally with time) and
+ * the legacy pr-first `deploy-<pr>-<YYYY.MM.DD>` so old tags still parse.
  */
 export function prFromTag(tag: string): number | null {
   const m =
-    tag.match(/^deploy-\d{4}\.\d{2}\.\d{2}-(\d+)$/) ?? tag.match(/^deploy-(\d+)-\d{4}\.\d{2}\.\d{2}$/);
+    tag.match(/^deploy-[\d.]+-(\d+)$/) ?? tag.match(/^deploy-(\d+)-\d{4}\.\d{2}\.\d{2}$/);
   return m ? Number(m[1]) : null;
 }
 

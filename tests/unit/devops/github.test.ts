@@ -5,6 +5,9 @@ describe('prFromTag', () => {
   it('parses the date-first format (PR last)', () => {
     expect(prFromTag('deploy-2026.06.09-5180')).toBe(5180);
   });
+  it('parses the timestamped date-first format (PR last)', () => {
+    expect(prFromTag('deploy-2026.06.09.15.54.07-5180')).toBe(5180);
+  });
   it('still parses the legacy pr-first format', () => {
     expect(prFromTag('deploy-5180-2026.06.09')).toBe(5180);
   });

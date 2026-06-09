@@ -45,7 +45,7 @@ export function e2eLocalConfig(job: Job): string | null {
  */
 export function idlePingBlocks(job: Job, ageLabel: string): { text: string; blocks: unknown[] } {
   const slug = job.spec.backend?.slug ?? 'preview';
-  const text = `⏰ <@${job.requestedBy}> your backend preview \`${slug}\` has been up for ${ageLabel}. Still need it? Tear it down if not — it runs in the cluster.`;
+  const text = `⏰ <@${job.requestedBy}> your backend preview \`${slug}\` has been up for ${ageLabel}. Still need it? If not, tear it down to keep costs low — it runs in the cluster.`;
   const blocks: unknown[] = [
     { type: 'section', text: { type: 'mrkdwn', text } },
     {

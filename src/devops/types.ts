@@ -1,5 +1,5 @@
-export type JobKind = 'preview' | 'deploy';
-export type JobTarget = 'backend' | 'frontend' | 'fullstack';
+export type JobKind = 'preview' | 'deploy' | 'e2e';
+export type JobTarget = 'backend' | 'frontend' | 'fullstack' | 'suite';
 export type FrontendRepo = 'mantle' | 'core' | 'made';
 
 export type JobStatus =
@@ -55,6 +55,16 @@ export interface JobSpec {
   // Pre-deploy E2E gate config (deploy jobs). Absent = skipped (no gate). The
   // per-frontend run state lives on each DeployItem (e2e*).
   e2e?: { scope: 'smoke' | 'both' };
+  // On-demand suite run (kind = 'e2e', the /e2e Slack command). Mirrors the
+  // qase-trigger.yml workflow inputs.
+  e2eRun?: {
+    project: 'marketplace' | 'factoryOs' | 'madeOs' | 'cross-product';
+    scope: 'smoke' | 'regression' | 'all';
+    area?: string;              // undefined = '(all areas)'
+    includeLongRunning?: boolean;
+    grepOverride?: string;
+    qaseRunId?: number | null;  // run the bot created up-front (linked in Slack)
+  };
 }
 
 export interface Job {

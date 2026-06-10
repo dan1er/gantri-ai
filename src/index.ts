@@ -59,6 +59,8 @@ import { QaseClient } from './devops/qase.js';
 import { registerPreviewCommand } from './slack/devops/preview-command.js';
 import { advanceDeployJob } from './devops/deploy-provisioner.js';
 import { registerDeployCommand } from './slack/devops/deploy-command.js';
+import { advanceE2eJob } from './devops/e2e-provisioner.js';
+import { registerE2eCommand } from './slack/devops/e2e-command.js';
 import { ReportSubscriptionsRepo } from './reports/reports-repo.js';
 import { ScheduledReportsConnector } from './reports/reports-connector.js';
 import { compilePlan } from './reports/plan-compiler.js';
@@ -462,6 +464,7 @@ async function main() {
         const dmUserIds = (env.DEVOPS_DM_USER_IDS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
         registerPreviewCommand(a, { repo: jobsRepo, slack: a.client, opsChannelId: env.OPS_CHANNEL_ID!, dmUserIds, gh: gh!, vercel: vercel ?? undefined });
         registerDeployCommand(a, { repo: jobsRepo, slack: a.client, opsChannelId: env.OPS_CHANNEL_ID!, dmUserIds, gh: gh! });
+        registerE2eCommand(a, { repo: jobsRepo, slack: a.client, opsChannelId: env.OPS_CHANNEL_ID!, dmUserIds, gh: gh! });
       }
     },
   });
@@ -648,7 +651,10 @@ async function main() {
   if (devopsEnabled && gh) {
     const jobsRunner = new JobsRunner({
       repo: jobsRepo, slack: app.client, gh, vercel: vercel ?? undefined, qase: qase ?? undefined,
-      advance: (job, d) => (job.kind === 'deploy' ? advanceDeployJob(job, d) : advancePreviewJob(job, d)),
+      advance: (job, d) =>
+        job.kind === 'deploy' ? advanceDeployJob(job, d)
+        : job.kind === 'e2e' ? advanceE2eJob(job, d)
+        : advancePreviewJob(job, d),
     });
     jobsRunner.start();
     logger.info({ vercelWiring: !!vercel }, 'devops jobs runner started');

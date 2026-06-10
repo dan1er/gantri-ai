@@ -133,6 +133,15 @@ export class GithubDispatcher {
     return body.workflow_runs[0]?.id ?? null;
   }
 
+  /** Raw text content of a file at a ref (GitHub contents API, raw accept). */
+  async fileText(repo: string, path: string, ref = 'HEAD'): Promise<string> {
+    const res = await this.fetch(`${this.base(repo)}/contents/${path}?ref=${encodeURIComponent(ref)}`, {
+      headers: { ...this.headers(), Accept: 'application/vnd.github.raw+json' },
+    });
+    if (!res.ok) throw new Error(`get ${repo}/${path} failed: ${res.status}`);
+    return res.text();
+  }
+
   /** The repo's default (trunk) branch name, e.g. `master`/`main`. */
   async defaultBranch(repo: string): Promise<string> {
     const res = await this.fetch(this.base(repo), { headers: this.headers() });

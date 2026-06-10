@@ -98,6 +98,34 @@ function frontendLine(f: DeployItem): string {
   return `${head} 🧪 _testing_ — ${gh}${qase}`;
 }
 
+// On-demand suite run (kind = 'e2e', the /e2e command): options + live links.
+function renderE2e(job: Job): unknown[] {
+  const r = job.spec.e2eRun;
+  const icon = ICON[job.status];
+  const headline = job.status === 'ready' ? 'E2E run passed'
+    : job.status === 'failed' ? 'E2E run failed'
+    : 'E2E run';
+  const section = (text: string) => ({ type: 'section', text: { type: 'mrkdwn', text } });
+  const opts = [
+    `*Project:* ${r?.project ?? '?'}`,
+    `*Scope:* ${r?.scope ?? '?'}`,
+    `*Area:* ${r?.area ?? '(all areas)'}`,
+    ...(r?.includeLongRunning ? ['*Long-running:* included'] : []),
+    ...(r?.grepOverride ? [`*Grep:* \`${r.grepOverride}\``] : []),
+  ].join('  ·  ');
+  const links = [
+    job.runId ? `<${ghRun(job.runId)}|GitHub run>` : '_dispatching…_',
+    ...(r?.qaseRunId ? [`<${qaseRun(r.qaseRunId)}|Qase run>`] : []),
+  ].join('  ·  ');
+  const blocks: unknown[] = [
+    section(`${icon} *${headline}* — requested by <@${job.requestedBy}>`),
+    section(opts),
+    section(links),
+  ];
+  if (job.status === 'failed' && job.error) blocks.push(section(`*Error:* ${job.error}`));
+  return blocks;
+}
+
 function renderDeploy(job: Job): unknown[] {
   const icon = ICON[job.status];
   const headline = job.status === 'ready' ? 'Deployed to production'
@@ -157,6 +185,7 @@ function renderDeploy(job: Job): unknown[] {
 
 export function renderJobBlocks(job: Job): unknown[] {
   if (job.kind === 'deploy') return renderDeploy(job);
+  if (job.kind === 'e2e') return renderE2e(job);
   const icon = ICON[job.status];
   const titleTarget = job.target === 'fullstack' ? 'Full-stack' : job.target[0].toUpperCase() + job.target.slice(1);
   const header = `${icon} ${titleTarget} preview — requested by <@${job.requestedBy}>`;

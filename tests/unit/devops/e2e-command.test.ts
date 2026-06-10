@@ -99,6 +99,24 @@ describe('e2e modal', () => {
     expect(text).toContain('(?=.*Checkout)(?=.*@smoke)'); // grep example in placeholder
   });
 
+  it('rotates the Areas block_id per project (busts the Slack options cache)', () => {
+    expect(JSON.stringify(buildE2eModal({ project: 'factoryOs' }))).toContain('area_block_factoryOs');
+    expect(JSON.stringify(buildE2eModal())).toContain('area_block_marketplace');
+  });
+
+  it('parseE2eSubmission finds the rotated area block by prefix', () => {
+    const v = {
+      state: {
+        values: {
+          project_block: { project_input: { selected_option: { value: 'factoryOs' } } },
+          scope_block: { scope_input: { selected_option: { value: 'smoke' } } },
+          area_block_factoryOs: { area_input: { selected_options: [{ value: 'Batches · listing' }] } },
+        },
+      },
+    };
+    expect(parseE2eSubmission(v as any).areas).toEqual(['Batches · listing']);
+  });
+
   it('parseE2eSubmission maps multi-select areas, dropping "(all areas)" and empties', () => {
     const v = {
       state: {

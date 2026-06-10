@@ -19,18 +19,27 @@ const PROJECTS = ['marketplace', 'factoryOs', 'madeOs', 'cross-product'] as cons
 const SCOPES = ['smoke', 'regression', 'all'] as const;
 const ALL_AREAS = '(all areas)';
 
+export interface AreaEntry {
+  area: string;
+  /** Owning Playwright project(s); empty = unknown → offered for every project. */
+  projects: string[];
+}
+
 /**
  * Areas come from gantri-e2e's qase-trigger.yml — the AUTO-GENERATED block kept
- * in sync by `yarn sync:qase-trigger-areas`. Reading the workflow keeps Slack
- * and GitHub showing the exact same list with zero duplication. Cached briefly:
- * the list changes only when a spec area is added.
+ * in sync by `yarn sync:qase-trigger-areas`, where each option carries a YAML
+ * comment with its owning project(s) (`- 'Batches · access' # factoryOs`).
+ * Reading the workflow keeps Slack and GitHub showing the exact same list with
+ * zero duplication. Cached briefly: it changes only when a spec area is added.
  */
-let areasCache: { at: number; areas: string[] } | null = null;
-export async function loadAreas(gh: GithubDispatcher): Promise<string[]> {
+let areasCache: { at: number; areas: AreaEntry[] } | null = null;
+export async function loadAreas(gh: GithubDispatcher): Promise<AreaEntry[]> {
   if (areasCache && Date.now() - areasCache.at < 5 * 60_000) return areasCache.areas;
   const yml = await gh.fileText('gantri-e2e', '.github/workflows/qase-trigger.yml', 'main');
   const block = yml.split('AUTO-GENERATED-AREAS-START')[1]?.split('AUTO-GENERATED-AREAS-END')[0] ?? '';
-  const areas = [...block.matchAll(/- '([^']+)'/g)].map((m) => m[1]).filter((a) => a !== ALL_AREAS);
+  const areas = [...block.matchAll(/- '([^']+)'(?:[ \t]*#[ \t]*([\w,-]+))?/g)]
+    .map((m) => ({ area: m[1], projects: m[2] ? m[2].split(',').map((p) => p.trim()) : [] }))
+    .filter((e) => e.area !== ALL_AREAS);
   areasCache = { at: Date.now(), areas };
   return areas;
 }
@@ -62,10 +71,12 @@ export function buildE2eModal() {
       },
       {
         type: 'input', block_id: 'area_block', optional: true,
-        label: { type: 'plain_text', text: 'Area' },
+        label: { type: 'plain_text', text: 'Areas' },
+        // Options are filtered to the selected Project (re-open the dropdown
+        // after changing Project). Multiple areas run together in one go.
         element: {
-          type: 'external_select', action_id: 'area_input', min_query_length: 0,
-          placeholder: { type: 'plain_text', text: 'All areas — or pick one to narrow…' },
+          type: 'multi_external_select', action_id: 'area_input', min_query_length: 0,
+          placeholder: { type: 'plain_text', text: 'All areas — or pick one or more to narrow…' },
         },
       },
       {
@@ -82,9 +93,13 @@ export function buildE2eModal() {
       {
         type: 'input', block_id: 'grep_block', optional: true,
         label: { type: 'plain_text', text: 'Advanced: grep override' },
+        hint: {
+          type: 'plain_text',
+          text: 'Regex matched against full test titles; replaces Scope + Areas entirely. e.g. "Checkout" (every checkout test), "(?=.*PDP)(?=.*@smoke)" (PDP smoke only), "gift card|promo code".',
+        },
         element: {
           type: 'plain_text_input', action_id: 'grep_input',
-          placeholder: { type: 'plain_text', text: 'Custom --grep regex (replaces scope + area)' },
+          placeholder: { type: 'plain_text', text: 'e.g. (?=.*Checkout)(?=.*@smoke)' },
         },
       },
     ],
@@ -103,12 +118,14 @@ type ViewState = {
 
 export function parseE2eSubmission(v: ViewState): NonNullable<JobSpec['e2eRun']> {
   const sel = (b: string, a: string) => v.state.values[b]?.[a]?.selected_option?.value ?? '';
-  const area = sel('area_block', 'area_input');
+  const areas = (v.state.values.area_block?.area_input?.selected_options ?? [])
+    .map((o) => o.value)
+    .filter((a) => a && a !== ALL_AREAS);
   const grep = v.state.values.grep_block?.grep_input?.value?.trim() ?? '';
   return {
     project: (sel('project_block', 'project_input') || 'marketplace') as NonNullable<JobSpec['e2eRun']>['project'],
     scope: (sel('scope_block', 'scope_input') || 'smoke') as NonNullable<JobSpec['e2eRun']>['scope'],
-    ...(area && area !== ALL_AREAS ? { area } : {}),
+    ...(areas.length ? { areas } : {}),
     ...(v.state.values.long_block?.long_input?.selected_options?.length ? { includeLongRunning: true } : {}),
     ...(grep ? { grepOverride: grep } : {}),
   };
@@ -128,18 +145,24 @@ export function registerE2eCommand(app: App, deps: E2eCommandDeps): void {
     });
   });
 
-  // Area typeahead: "(all areas)" + the synced list from qase-trigger.yml.
+  // Area typeahead: the synced list from qase-trigger.yml, narrowed to the
+  // project currently selected in the modal (Slack sends the live view state
+  // with every block_suggestion request).
   app.options('area_input', async ({ ack, payload }: any) => {
     const query = String(payload?.value ?? '').trim().toLowerCase();
-    let areas: string[] = [];
+    const project: string =
+      payload?.view?.state?.values?.project_block?.project_input?.selected_option?.value ?? 'marketplace';
+    let areas: AreaEntry[] = [];
     try {
       areas = await loadAreas(deps.gh);
     } catch (err) {
       logger.warn({ err: String((err as Error)?.message ?? err) }, 'e2e areas load failed');
     }
-    const matched = query ? areas.filter((a) => a.toLowerCase().includes(query)) : areas;
-    const opts = [ALL_AREAS, ...matched].slice(0, 100).map((a) => ({
-      text: { type: 'plain_text' as const, text: a.slice(0, 75) }, value: a.slice(0, 75),
+    const matched = areas
+      .filter((e) => e.projects.length === 0 || e.projects.includes(project))
+      .filter((e) => !query || e.area.toLowerCase().includes(query));
+    const opts = matched.slice(0, 100).map((e) => ({
+      text: { type: 'plain_text' as const, text: e.area.slice(0, 75) }, value: e.area.slice(0, 75),
     }));
     await ack({ options: opts });
   });

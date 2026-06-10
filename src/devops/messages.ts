@@ -109,7 +109,7 @@ function renderE2e(job: Job): unknown[] {
   const opts = [
     `*Project:* ${r?.project ?? '?'}`,
     `*Scope:* ${r?.scope ?? '?'}`,
-    `*Area:* ${r?.area ?? '(all areas)'}`,
+    `*Areas:* ${r?.areas?.length ? r.areas.join(', ') : '(all areas)'}`,
     ...(r?.includeLongRunning ? ['*Long-running:* included'] : []),
     ...(r?.grepOverride ? [`*Grep:* \`${r.grepOverride}\``] : []),
   ].join('  ·  ');

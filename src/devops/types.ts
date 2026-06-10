@@ -56,11 +56,12 @@ export interface JobSpec {
   // per-frontend run state lives on each DeployItem (e2e*).
   e2e?: { scope: 'smoke' | 'both' };
   // On-demand suite run (kind = 'e2e', the /e2e Slack command). Mirrors the
-  // qase-trigger.yml workflow inputs.
+  // qase-trigger.yml workflow inputs; 2+ areas are folded into a grep_override
+  // (the workflow's area input is single-choice).
   e2eRun?: {
     project: 'marketplace' | 'factoryOs' | 'madeOs' | 'cross-product';
     scope: 'smoke' | 'regression' | 'all';
-    area?: string;              // undefined = '(all areas)'
+    areas?: string[];           // empty/undefined = '(all areas)'
     includeLongRunning?: boolean;
     grepOverride?: string;
     qaseRunId?: number | null;  // run the bot created up-front (linked in Slack)

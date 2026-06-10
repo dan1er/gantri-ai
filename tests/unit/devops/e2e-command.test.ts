@@ -1,12 +1,12 @@
 import { describe, it, expect, vi } from 'vitest';
-import { advanceE2eJob } from '../../../src/devops/e2e-provisioner.js';
+import { advanceE2eJob, buildMultiAreaGrep } from '../../../src/devops/e2e-provisioner.js';
 import { buildE2eModal, parseE2eSubmission, loadAreas } from '../../../src/slack/devops/e2e-command.js';
 import { renderJobBlocks } from '../../../src/devops/messages.js';
 import type { Job } from '../../../src/devops/types.js';
 
 const e2eJob: Job = {
   id: 'e1', kind: 'e2e', target: 'suite', status: 'pending',
-  spec: { e2eRun: { project: 'marketplace', scope: 'smoke', area: 'Marketplace · Checkout' } },
+  spec: { e2eRun: { project: 'marketplace', scope: 'smoke', areas: ['Marketplace · Checkout'] } },
   requestedBy: 'U1', channelId: 'C1', messageTs: 'ts', runId: null,
   error: null, createdAt: 't', updatedAt: 't', idlePingedAt: null,
 };
@@ -25,7 +25,7 @@ describe('advanceE2eJob', () => {
     expect(patch.spec?.e2eRun?.qaseRunId).toBe(777);
   });
 
-  it('defaults area to "(all areas)" and passes grep/long-running through', async () => {
+  it('no areas → "(all areas)"; grep/long-running pass through', async () => {
     const gh = { dispatch: vi.fn().mockResolvedValue(undefined) } as any;
     const job: Job = {
       ...e2eJob,
@@ -36,6 +36,18 @@ describe('advanceE2eJob', () => {
       marker: 'e1', project: 'madeOs', scope: 'all',
       include_long_running: 'true', area: '(all areas)', grep_override: 'Wizard',
     });
+  });
+
+  it('2+ areas → folds them into a grep_override (area stays "(all areas)")', async () => {
+    const gh = { dispatch: vi.fn().mockResolvedValue(undefined) } as any;
+    const job: Job = {
+      ...e2eJob,
+      spec: { e2eRun: { project: 'factoryOs', scope: 'smoke', areas: ['Batches · listing', 'Machines · detail'] } },
+    };
+    await advanceE2eJob(job, { gh });
+    const inputs = gh.dispatch.mock.calls[0][3];
+    expect(inputs.area).toBe('(all areas)');
+    expect(inputs.grep_override).toBe('(?=.*(?:Batches · listing|Machines · detail))(?=.*(?:@smoke))(?!.*@long-running)');
   });
 
   it('e2e_running resolves the run id, then completes the Qase run on success', async () => {
@@ -61,44 +73,68 @@ describe('advanceE2eJob', () => {
   });
 });
 
+describe('buildMultiAreaGrep', () => {
+  it('intersects the area alternation with the scope tag and excludes @long-running', () => {
+    expect(buildMultiAreaGrep(['A', 'B'], 'smoke', false))
+      .toBe('(?=.*(?:A|B))(?=.*(?:@smoke))(?!.*@long-running)');
+  });
+  it('scope=all + long-running included is a bare alternation', () => {
+    expect(buildMultiAreaGrep(['A', 'B'], 'all', true)).toBe('(?:A|B)');
+  });
+  it('escapes regex metacharacters the way the workflow does', () => {
+    expect(buildMultiAreaGrep(['Returns & Refunds · A [x] $5 *'], 'all', true))
+      .toBe('(?:Returns & Refunds · A \\[x] \\$5 \\*)');
+  });
+});
+
 describe('e2e modal', () => {
-  it('has project/scope/area/extras/grep inputs and the submit callback', () => {
+  it('has project/scope/areas(multi)/extras/grep inputs and the submit callback', () => {
     const view = buildE2eModal();
     expect(view.callback_id).toBe('e2e_run_submit');
     const text = JSON.stringify(view);
     for (const id of ['project_input', 'scope_input', 'area_input', 'long_input', 'grep_input']) {
       expect(text).toContain(id);
     }
+    expect(text).toContain('multi_external_select');
+    expect(text).toContain('(?=.*Checkout)(?=.*@smoke)'); // grep example in placeholder
   });
 
-  it('parseE2eSubmission maps the view state, dropping "(all areas)" and empties', () => {
+  it('parseE2eSubmission maps multi-select areas, dropping "(all areas)" and empties', () => {
     const v = {
       state: {
         values: {
           project_block: { project_input: { selected_option: { value: 'factoryOs' } } },
           scope_block: { scope_input: { selected_option: { value: 'regression' } } },
-          area_block: { area_input: { selected_option: { value: '(all areas)' } } },
+          area_block: { area_input: { selected_options: [{ value: 'Batches · listing' }, { value: 'Machines · detail' }] } },
           long_block: { long_input: { selected_options: [{ value: 'long' }] } },
           grep_block: { grep_input: { value: '  ' } },
         },
       },
     };
-    expect(parseE2eSubmission(v as any)).toEqual({ project: 'factoryOs', scope: 'regression', includeLongRunning: true });
+    expect(parseE2eSubmission(v as any)).toEqual({
+      project: 'factoryOs', scope: 'regression',
+      areas: ['Batches · listing', 'Machines · detail'], includeLongRunning: true,
+    });
   });
 });
 
 describe('loadAreas', () => {
-  it('parses the AUTO-GENERATED block from qase-trigger.yml', async () => {
+  it('parses areas + project annotations from the AUTO-GENERATED block', async () => {
     const yml = [
       'options:',
       '  # AUTO-GENERATED-AREAS-START',
       "  - '(all areas)'",
-      "  - 'Marketplace · Checkout'",
-      "  - 'Made · Concepts'",
+      "  - 'Marketplace · Checkout' # marketplace",
+      "  - 'Made · Concepts' # madeOs",
+      "  - 'Legacy · Unannotated'",
       '  # AUTO-GENERATED-AREAS-END',
     ].join('\n');
     const gh = { fileText: vi.fn().mockResolvedValue(yml) } as any;
-    expect(await loadAreas(gh)).toEqual(['Marketplace · Checkout', 'Made · Concepts']);
+    // bust the module cache window by asserting shape only
+    const areas = await loadAreas(gh);
+    expect(areas).toContainEqual({ area: 'Marketplace · Checkout', projects: ['marketplace'] });
+    expect(areas).toContainEqual({ area: 'Made · Concepts', projects: ['madeOs'] });
+    expect(areas).toContainEqual({ area: 'Legacy · Unannotated', projects: [] });
   });
 });
 

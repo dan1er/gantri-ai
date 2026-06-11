@@ -78,14 +78,17 @@ function componentBlock(
 
 const ghRun = (id: number) => `https://github.com/gantri/gantri-e2e/actions/runs/${id}`;
 const qaseRun = (id: number) => `https://app.qase.io/run/GANTRI/dashboard/${id}`;
+// The deploy tag, clickable through to its GitHub tag page.
+const tagLink = (repo: string, tag: string) => `<https://github.com/gantri/${repo}/releases/tag/${tag}|${tag}>`;
 
 // One line per frontend, reflecting its OWN pipeline phase: testing → deploying
 // → live, or blocked (E2E failed) / errored (deploy failed). Each frontend is
 // independent, so a deploy message can show some live while others still test.
 function frontendLine(f: DeployItem): string {
   const name = REPO_DISPLAY[f.repo ?? ''] ?? f.repo ?? 'frontend';
-  const head = `*${name}* · \`${f.tag}\``;
-  if (f.url) return `<${f.url}|${name}> · \`${f.tag}\` ✅ live`;
+  const tag = tagLink(f.repo ?? '', f.tag);
+  const head = `*${name}* · ${tag}`;
+  if (f.url) return `<${f.url}|${name}> · ${tag} ✅ live`;
   if (f.error) return `${head} ✗ _${f.error}_`;
   if (f.e2ePassed === false) {
     const qase = f.e2eQaseRunId ? ` <${qaseRun(f.e2eQaseRunId)}|Check results>` : '';
@@ -169,7 +172,7 @@ function renderDeploy(job: Job): unknown[] {
   if (b) {
     const head = b.url ? `<${b.url}|Porter>` : '*Porter*';
     const pend = b.url ? ' ✅ live' : job.status === 'backend_running' ? ' _(deploying…)_' : ' _(queued)_';
-    blocks.push(section(`${head} · \`${b.tag}\`${pend}`));
+    blocks.push(section(`${head} · ${tagLink('porter', b.tag)}${pend}`));
   }
 
   let anyBlocked = false;

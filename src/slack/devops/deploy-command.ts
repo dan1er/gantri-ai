@@ -175,12 +175,29 @@ async function createDeployAndPost(
 
 const PROD_DOMAIN: Record<string, string> = { mantle: 'www.gantri.com', core: 'admin.gantri.com', made: 'made.gantri.com' };
 const REPO_NAME: Record<string, string> = { mantle: 'Marketplace', core: 'Factoryos', made: 'Madeos' };
+const GH = 'https://github.com/gantri';
 
-function confirmBlocks(target: string, spec: { deployBackend?: DeployItem; deployFrontends?: DeployItem[]; e2e?: { scope: 'smoke' | 'both' } }, skipped: string[]): unknown[] {
+/** The tag, clickable through to its GitHub tag page. */
+const tagLink = (repo: string, tag: string) => `<${GH}/${repo}/releases/tag/${tag}|${tag}>`;
+
+/**
+ * The same context the deploy modal's tag picker shows — the PR (linked) and
+ * its branch name — so the confirm reads like the option the user just picked.
+ */
+async function tagContext(gh: GithubDispatcher, repo: string, pr: number | null | undefined): Promise<string> {
+  if (!pr) return '';
+  let branch = '';
+  try { branch = (await gh.resolveRef(repo, String(pr))).ref; } catch { /* keep just the PR link */ }
+  return `  ·  <${GH}/${repo}/pull/${pr}|#${pr}>${branch ? ` \`${branch}\`` : ''}`;
+}
+
+async function confirmBlocks(gh: GithubDispatcher, target: string, spec: { deployBackend?: DeployItem; deployFrontends?: DeployItem[]; e2e?: { scope: 'smoke' | 'both' } }, skipped: string[]): Promise<unknown[]> {
   const lines: string[] = [];
-  if (spec.deployBackend) lines.push(`• *Porter* \`${spec.deployBackend.tag}\` → api.gantri.com`);
+  if (spec.deployBackend) {
+    lines.push(`• *Porter* ${tagLink('porter', spec.deployBackend.tag)}${await tagContext(gh, 'porter', spec.deployBackend.pr)} → api.gantri.com`);
+  }
   for (const f of spec.deployFrontends ?? []) {
-    lines.push(`• *${REPO_NAME[f.repo ?? ''] ?? f.repo}* \`${f.tag}\` → ${PROD_DOMAIN[f.repo ?? ''] ?? 'production'}`);
+    lines.push(`• *${REPO_NAME[f.repo ?? ''] ?? f.repo}* ${tagLink(f.repo ?? '', f.tag)}${await tagContext(gh, f.repo ?? '', f.pr)} → ${PROD_DOMAIN[f.repo ?? ''] ?? 'production'}`);
   }
   lines.push(`🧪 *E2E gate:* ${spec.e2e ? (spec.e2e.scope === 'both' ? 'Smoke + Regression' : 'Smoke') + ' (runs before deploy)' : '_skipped_'}`);
   const blocks: unknown[] = [
@@ -227,12 +244,15 @@ export async function findSkipped(deps: Pick<DeployCommandDeps, 'repo' | 'gh'>, 
     // Newest commit among already-deployed tags = what's live in prod.
     let cutoff = '';
     for (const t of tags) if (used.has(t.tag) && t.committedAt > cutoff) cutoff = t.committedAt;
-    const skipped = tags
-      .filter((t) =>
-        t.committedAt && t.committedAt < picked.committedAt && t.committedAt > cutoff &&
-        t.tag !== pickedTag && !used.has(t.tag))
-      .map((t) => `\`${t.tag}\``);
-    if (skipped.length) out.push(`*${name}*: ${skipped.join(', ')}`);
+    const skippedTags = tags.filter((t) =>
+      t.committedAt && t.committedAt < picked.committedAt && t.committedAt > cutoff &&
+      t.tag !== pickedTag && !used.has(t.tag));
+    if (skippedTags.length) {
+      const parts = await Promise.all(
+        skippedTags.map(async (t) => `${tagLink(repo, t.tag)}${await tagContext(deps.gh, repo, t.pr)}`),
+      );
+      out.push(`*${name}*:\n${parts.map((p) => `    • ${p}`).join('\n')}`);
+    }
   };
   if (spec.deployBackend) await check('porter', 'Porter', spec.deployBackend.tag);
   for (const f of spec.deployFrontends ?? []) await check(f.repo ?? '', REPO_NAME[f.repo ?? ''] ?? (f.repo ?? ''), f.tag);
@@ -245,8 +265,9 @@ async function postConfirm(
   channel: string,
 ): Promise<void> {
   const skipped = await findSkipped(deps, spec).catch(() => [] as string[]);
+  const blocks = await confirmBlocks(deps.gh, target, spec, skipped);
   await deps.slack.chat
-    .postEphemeral({ channel, user: userId, text: 'Confirm deploy', blocks: confirmBlocks(target, spec, skipped) as any })
+    .postEphemeral({ channel, user: userId, text: 'Confirm deploy', blocks: blocks as any })
     .catch(() => {});
 }
 

@@ -97,6 +97,9 @@ describe('findSkipped', () => {
     expect(out[0]).toContain('deploy-x-5209');
     expect(out[0]).toContain('deploy-x-5180');
     expect(out[0]).not.toContain('deploy-x-5196');
+    // Tags are clickable through to their GitHub tag page + linked PR.
+    expect(out[0]).toContain('https://github.com/gantri/porter/releases/tag/deploy-x-5209');
+    expect(out[0]).toContain('https://github.com/gantri/porter/pull/5209');
   });
 });
 

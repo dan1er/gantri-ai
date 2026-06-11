@@ -1,5 +1,5 @@
-export type JobKind = 'preview' | 'deploy' | 'e2e';
-export type JobTarget = 'backend' | 'frontend' | 'fullstack' | 'suite';
+export type JobKind = 'preview' | 'deploy' | 'e2e' | 'cron';
+export type JobTarget = 'backend' | 'frontend' | 'fullstack' | 'suite' | 'cron';
 export type FrontendRepo = 'mantle' | 'core' | 'made';
 
 export type JobStatus =
@@ -65,6 +65,11 @@ export interface JobSpec {
     includeLongRunning?: boolean;
     grepOverride?: string;
     qaseRunId?: number | null;  // run the bot created up-front (linked in Slack)
+  };
+  // On-demand porter CronJob run (kind = 'cron', the /cron Slack command).
+  cronRun?: {
+    environment: 'staging' | 'production';
+    cronjob: string; // name WITHOUT the env prefix (run-cron.yml adds it)
   };
 }
 

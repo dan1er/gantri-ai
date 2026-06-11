@@ -98,6 +98,31 @@ function frontendLine(f: DeployItem): string {
   return `${head} 🧪 _testing_ — ${gh}${qase}`;
 }
 
+// On-demand porter CronJob run (kind = 'cron', the /cron command).
+function renderCron(job: Job): unknown[] {
+  const r = job.spec.cronRun;
+  const icon = ICON[job.status];
+  const headline =
+    job.status === 'ready'
+      ? 'Cron run completed'
+      : job.status === 'failed'
+        ? 'Cron run failed'
+        : 'Cron run';
+  const section = (text: string) => ({ type: 'section', text: { type: 'mrkdwn', text } });
+  const envBadge = r?.environment === 'production' ? '🔴 *production*' : '🟢 staging';
+  const blocks: unknown[] = [
+    section(`${icon} *${headline}* — requested by <@${job.requestedBy}>`),
+    section(`*Cron:* \`${r?.cronjob ?? '?'}\`  ·  *Environment:* ${envBadge}`),
+    section(
+      job.runId
+        ? `<https://github.com/gantri/porter/actions/runs/${job.runId}|Workflow run (logs in the summary)>`
+        : '_dispatching…_',
+    ),
+  ];
+  if (job.status === 'failed' && job.error) blocks.push(section(`*Error:* ${job.error}`));
+  return blocks;
+}
+
 // On-demand suite run (kind = 'e2e', the /e2e command): options + live links.
 function renderE2e(job: Job): unknown[] {
   const r = job.spec.e2eRun;
@@ -186,6 +211,7 @@ function renderDeploy(job: Job): unknown[] {
 export function renderJobBlocks(job: Job): unknown[] {
   if (job.kind === 'deploy') return renderDeploy(job);
   if (job.kind === 'e2e') return renderE2e(job);
+  if (job.kind === 'cron') return renderCron(job);
   const icon = ICON[job.status];
   const titleTarget = job.target === 'fullstack' ? 'Full-stack' : job.target[0].toUpperCase() + job.target.slice(1);
   const header = `${icon} ${titleTarget} preview — requested by <@${job.requestedBy}>`;

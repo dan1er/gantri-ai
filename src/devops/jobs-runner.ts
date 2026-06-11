@@ -14,6 +14,14 @@ type Advance = (job: Job, deps: ProvisionerDeps) => Promise<JobPatch>;
 
 // Short progress line posted to the message thread on each status change.
 function statusNote(job: Job): string | null {
+  if (job.kind === 'cron') {
+    switch (job.status) {
+      case 'backend_running': return '⏱️ Cron dispatched — running…';
+      case 'ready': return '✅ Cron run completed';
+      case 'failed': return `✗ Cron run failed${job.error ? ` — ${job.error}` : ''}`;
+      default: return null;
+    }
+  }
   if (job.kind === 'e2e') {
     switch (job.status) {
       case 'e2e_running': return '🧪 Suite dispatched — running…';

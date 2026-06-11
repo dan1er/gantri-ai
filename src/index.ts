@@ -61,6 +61,8 @@ import { advanceDeployJob } from './devops/deploy-provisioner.js';
 import { registerDeployCommand } from './slack/devops/deploy-command.js';
 import { advanceE2eJob } from './devops/e2e-provisioner.js';
 import { registerE2eCommand } from './slack/devops/e2e-command.js';
+import { advanceCronJob } from './devops/cron-provisioner.js';
+import { registerCronCommand } from './slack/devops/cron-command.js';
 import { ReportSubscriptionsRepo } from './reports/reports-repo.js';
 import { ScheduledReportsConnector } from './reports/reports-connector.js';
 import { compilePlan } from './reports/plan-compiler.js';
@@ -465,6 +467,7 @@ async function main() {
         registerPreviewCommand(a, { repo: jobsRepo, slack: a.client, opsChannelId: env.OPS_CHANNEL_ID!, dmUserIds, gh: gh!, vercel: vercel ?? undefined });
         registerDeployCommand(a, { repo: jobsRepo, slack: a.client, opsChannelId: env.OPS_CHANNEL_ID!, dmUserIds, gh: gh! });
         registerE2eCommand(a, { repo: jobsRepo, slack: a.client, opsChannelId: env.OPS_CHANNEL_ID!, dmUserIds, gh: gh! });
+        registerCronCommand(a, { repo: jobsRepo, slack: a.client, opsChannelId: env.OPS_CHANNEL_ID!, dmUserIds, gh: gh! });
       }
     },
   });
@@ -654,6 +657,7 @@ async function main() {
       advance: (job, d) =>
         job.kind === 'deploy' ? advanceDeployJob(job, d)
         : job.kind === 'e2e' ? advanceE2eJob(job, d)
+        : job.kind === 'cron' ? advanceCronJob(job, d)
         : advancePreviewJob(job, d),
     });
     jobsRunner.start();

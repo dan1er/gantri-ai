@@ -136,17 +136,18 @@ export class JobsRunner {
     }
   }
 
-  // Hourly reminder for a ready backend preview: ping the requester in the
-  // thread to tear it down (it's running in the cluster) or snooze.
+  // Hourly reminder for a ready backend preview: ping the requester with a
+  // top-level channel message (visible without opening the thread) to tear it
+  // down (it's running in the cluster) or snooze.
   private async maybePingIdle(job: Job): Promise<void> {
-    if (job.kind !== 'preview' || job.status !== 'ready' || !job.spec.backend || !job.messageTs) return;
+    if (job.kind !== 'preview' || job.status !== 'ready' || !job.spec.backend) return;
     const now = Date.now();
     const since = new Date(job.idlePingedAt ?? job.createdAt).getTime();
     if (!Number.isFinite(since) || now - since < IDLE_PING_INTERVAL_MS) return;
 
     const { text, blocks } = idlePingBlocks(job, humanAge(now - new Date(job.createdAt).getTime()));
     await this.deps.slack.chat.postMessage({
-      channel: job.channelId, thread_ts: job.messageTs, text,
+      channel: job.channelId, text,
       blocks: blocks as any, unfurl_links: false, unfurl_media: false,
     });
     await this.deps.repo.update(job.id, { idlePingedAt: new Date(now).toISOString() });

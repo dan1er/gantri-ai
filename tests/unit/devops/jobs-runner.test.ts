@@ -55,7 +55,7 @@ describe('JobsRunner.tick', () => {
     await runner.tick();
     expect(slack.chat.postMessage).toHaveBeenCalledOnce();
     const arg = slack.chat.postMessage.mock.calls[0][0];
-    expect(arg.thread_ts).toBe('tsP');
+    expect(arg.thread_ts).toBeUndefined(); // top-level channel message, not threaded
     expect(arg.text).toContain('<@U9>');
     expect(JSON.stringify(arg.blocks)).toContain('preview_teardown');
     expect(JSON.stringify(arg.blocks)).toContain('preview_keep');

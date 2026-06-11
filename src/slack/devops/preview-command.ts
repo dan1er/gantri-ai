@@ -381,7 +381,8 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
           .catch((err) => logger.warn({ jobId, repo: f.repo, err: String((err as Error)?.message ?? err) }, 'auto branch cleanup failed'));
       }
     }
-    // The job's canonical message becomes the single torn-down record. If the
+    // The job's canonical message becomes the single torn-down record (one
+    // line + who/when as context); the full story goes to its thread. If the
     // button was clicked elsewhere (an idle ping / reuse note), DELETE that
     // message instead of leaving a duplicate torn-down copy in the channel.
     const channel = body.channel?.id ?? job?.channelId;
@@ -394,6 +395,13 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
       if (job.messageTs) {
         await deps.slack.chat
           .update({ channel, ts: job.messageTs, text: 'preview torn down', blocks })
+          .catch(() => {});
+        await deps.slack.chat
+          .postMessage({
+            channel, thread_ts: job.messageTs,
+            text: `🧹 Torn down by <@${body.user?.id}> after ${age} — environment deleted, the preview URLs above no longer work. Run \`/preview\` to spin up a fresh one.`,
+            unfurl_links: false, unfurl_media: false,
+          })
           .catch(() => {});
       }
       const clickedTs = body.container?.message_ts ?? body.message?.ts;

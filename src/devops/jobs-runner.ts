@@ -132,8 +132,11 @@ export class JobsRunner {
             .catch((err) => logger.warn({ jobId: job.id, err: String((err as Error)?.message ?? err) }, 'devops thread note failed'));
         }
         // The main message stays compact (1-2 lines); the full per-component
-        // breakdown lands in the thread once the job settles.
-        if (updated.status === 'ready' || updated.status === 'failed') {
+        // breakdown (branches, Source links, tags) lands in the thread — once
+        // when the job starts moving, and again with final URLs when it settles.
+        const startedMoving = job.status === 'pending';
+        const settled = updated.status === 'ready' || updated.status === 'failed';
+        if (startedMoving || settled) {
           const detail = renderJobDetailBlocks(updated);
           if (detail) {
             await this.deps.slack.chat

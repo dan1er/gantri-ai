@@ -257,15 +257,11 @@ export function renderJobBlocks(job: Job): unknown[] {
   const id = job.spec.backend?.slug ?? job.spec.frontends?.[0]?.ref;
   const section = (text: string) => ({ type: 'section', text: { type: 'mrkdwn', text } });
 
-  // Torn down = terminal: the environment is gone. Two lines, no dead links;
-  // the teardown handler appends who/when as context.
+  // Torn down = terminal: one line; who/when rides as context from the
+  // teardown handler, and the "URLs are dead" hint lives in the thread.
   if (job.status === 'torn_down') {
     return [
       section(`🧹 *${titleTarget} preview torn down*${id ? ` \`${id}\`` : ''} — requested by <@${job.requestedBy}>`),
-      {
-        type: 'context',
-        elements: [{ type: 'mrkdwn', text: '_Environment deleted — preview URLs no longer work. Run `/preview` to spin up a fresh one._' }],
-      },
     ];
   }
 

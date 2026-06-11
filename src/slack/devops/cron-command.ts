@@ -24,8 +24,9 @@ type CronEnv = 'staging' | 'production';
  * production-only crons. Cached briefly; it changes only when a cron ships.
  */
 export interface CronEntry {
-  name: string;    // the k8s CronJob name (what run-cron.yml receives)
-  display: string; // human label for the picker
+  name: string;          // the k8s CronJob name (what run-cron.yml receives)
+  display: string;       // human label for the picker
+  description?: string;  // optional one-liner of what the job does
 }
 
 let cronsCache: { at: number; base: CronEntry[]; prodOnly: CronEntry[] } | null = null;
@@ -43,7 +44,12 @@ function parseCronEntries(yaml: string): CronEntry[] {
     const m = doc.match(/^\s{2}name:\s*([a-z0-9-]+)\s*$/m);
     if (!m) continue;
     const d = doc.match(/gantri\.com\/display-name:\s*"?([^"\n]+?)"?\s*$/m);
-    entries.push({ name: m[1], display: d ? d[1] : humanize(m[1]) });
+    const desc = doc.match(/gantri\.com\/description:\s*"?([^"\n]+?)"?\s*$/m);
+    entries.push({
+      name: m[1],
+      display: d ? d[1] : humanize(m[1]),
+      ...(desc ? { description: desc[1] } : {}),
+    });
   }
   return entries;
 }
@@ -157,15 +163,23 @@ export function registerCronCommand(app: App, deps: CronCommandDeps): void {
       logger.warn({ err: String((err as Error)?.message ?? err) }, 'cron list load failed');
     }
     const matched = crons.filter(
-      (c) => !query || c.name.includes(query) || c.display.toLowerCase().includes(query),
+      (c) =>
+        !query ||
+        c.name.includes(query) ||
+        c.display.toLowerCase().includes(query) ||
+        (c.description ?? '').toLowerCase().includes(query),
     );
     await ack({
-      options: matched.slice(0, 100).map((c) => ({
-        text: { type: 'plain_text' as const, text: c.display.slice(0, 75) },
-        // The raw k8s name rides along dimmed, so label + id are both visible.
-        ...(c.display !== c.name ? { description: { type: 'plain_text' as const, text: c.name.slice(0, 75) } } : {}),
-        value: c.name.slice(0, 75),
-      })),
+      options: matched.slice(0, 100).map((c) => {
+        // Dimmed line under the title: what the job does when we know it,
+        // otherwise the raw k8s name so label + id stay visible.
+        const sub = c.description ?? (c.display !== c.name ? c.name : undefined);
+        return {
+          text: { type: 'plain_text' as const, text: c.display.slice(0, 75) },
+          ...(sub ? { description: { type: 'plain_text' as const, text: sub.slice(0, 75) } } : {}),
+          value: c.name.slice(0, 75),
+        };
+      }),
     });
   });
 

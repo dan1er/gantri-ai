@@ -60,6 +60,7 @@ describe('loadCronjobs', () => {
     const base = [
       '---', 'apiVersion: batch/v1', 'kind: CronJob', 'metadata:', '  name: alpha-cron',
       '  annotations:', '    gantri.com/display-name: "Alpha (curated)"',
+      '    gantri.com/description: "Does the alpha thing nightly"',
       '---', 'kind: CronJob', 'metadata:', '  name: send-gift-cards',
     ].join('\n');
     const prod = ['---', 'kind: CronJob', 'metadata:', '  name: prod-only-cron'].join('\n');
@@ -69,8 +70,8 @@ describe('loadCronjobs', () => {
     } as any;
     const staging = await loadCronjobs(gh, 'staging');
     expect(staging).toEqual([
-      { name: 'alpha-cron', display: 'Alpha (curated)' },
-      { name: 'send-gift-cards', display: 'Send gift cards' }, // humanized fallback
+      { name: 'alpha-cron', display: 'Alpha (curated)', description: 'Does the alpha thing nightly' },
+      { name: 'send-gift-cards', display: 'Send gift cards' }, // humanized fallback, no description
     ]);
     const production = await loadCronjobs(gh, 'production');
     expect(production.map((c) => c.name)).toEqual(['alpha-cron', 'prod-only-cron', 'send-gift-cards']);

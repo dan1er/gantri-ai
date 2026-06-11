@@ -161,7 +161,10 @@ export function registerCronCommand(app: App, deps: CronCommandDeps): void {
     );
     await ack({
       options: matched.slice(0, 100).map((c) => ({
-        text: { type: 'plain_text' as const, text: c.display.slice(0, 75) }, value: c.name.slice(0, 75),
+        text: { type: 'plain_text' as const, text: c.display.slice(0, 75) },
+        // The raw k8s name rides along dimmed, so label + id are both visible.
+        ...(c.display !== c.name ? { description: { type: 'plain_text' as const, text: c.name.slice(0, 75) } } : {}),
+        value: c.name.slice(0, 75),
       })),
     });
   });

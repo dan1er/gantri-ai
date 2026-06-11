@@ -98,17 +98,6 @@ function frontendLine(f: DeployItem): string {
   return `${head} 🧪 _testing_ — ${gh}${qase}`;
 }
 
-/**
- * The cron pod's log tail, threaded under the run message once it settles.
- * Null until the run is terminal or when no logs could be fetched.
- */
-export function cronLogsNote(job: Job): string | null {
-  const tail = job.spec.cronRun?.logsTail;
-  if (job.kind !== 'cron' || !tail) return null;
-  if (job.status !== 'ready' && job.status !== 'failed') return null;
-  return `📜 *Cron logs (tail)*\n\`\`\`${tail}\`\`\``;
-}
-
 // On-demand porter CronJob run (kind = 'cron', the /cron command).
 function renderCron(job: Job): unknown[] {
   const r = job.spec.cronRun;

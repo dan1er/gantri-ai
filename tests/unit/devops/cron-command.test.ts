@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { advanceCronJob, extractCronLogs } from '../../../src/devops/cron-provisioner.js';
+import { advanceCronJob } from '../../../src/devops/cron-provisioner.js';
 import { buildCronModal, parseCronSubmission, loadCronjobs } from '../../../src/slack/devops/cron-command.js';
 import { renderJobBlocks } from '../../../src/devops/messages.js';
 import type { Job } from '../../../src/devops/types.js';
@@ -75,25 +75,6 @@ describe('loadCronjobs', () => {
     ]);
     const production = await loadCronjobs(gh, 'production');
     expect(production.map((c) => c.name)).toEqual(['alpha-cron', 'prod-only-cron', 'send-gift-cards']);
-  });
-});
-
-describe('extractCronLogs', () => {
-  it('extracts the marker-bracketed section and strips Actions timestamps', () => {
-    const raw = [
-      '2026-06-11T01:00:00.0000000Z setup noise',
-      '2026-06-11T01:00:01.0000000Z ===CRON-LOGS-START===',
-      '2026-06-11T01:00:02.0000000Z processing 12 gift cards',
-      '2026-06-11T01:00:03.0000000Z done',
-      '2026-06-11T01:00:04.0000000Z ===CRON-LOGS-END===',
-      '2026-06-11T01:00:05.0000000Z teardown noise',
-    ].join('\n');
-    expect(extractCronLogs(raw)).toBe('processing 12 gift cards\ndone');
-  });
-
-  it('falls back to the whole log tail when markers are absent', () => {
-    const raw = '2026-06-11T01:00:00.0000000Z only line';
-    expect(extractCronLogs(raw)).toBe('only line');
   });
 });
 

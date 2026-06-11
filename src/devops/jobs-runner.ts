@@ -2,7 +2,7 @@ import type { WebClient } from '@slack/web-api';
 import type { Job } from './types.js';
 import type { DevopsJobsRepo } from './jobs-repo.js';
 import type { JobPatch, ProvisionerDeps } from './provisioner.js';
-import { renderJobBlocks, e2eLocalConfig, idlePingBlocks, cronLogsNote } from './messages.js';
+import { renderJobBlocks, e2eLocalConfig, idlePingBlocks } from './messages.js';
 import { logger } from '../logger.js';
 
 // Backend previews run in the cluster, so a ready one that's been forgotten
@@ -125,13 +125,6 @@ export class JobsRunner {
           await this.deps.slack.chat
             .postMessage({ channel: job.channelId, thread_ts: job.messageTs, text: e2eCfg, unfurl_links: false, unfurl_media: false })
             .catch((err) => logger.warn({ jobId: job.id, err: String((err as Error)?.message ?? err) }, 'devops e2e config note failed'));
-        }
-        // When a cron run settles, thread its pod-log tail.
-        const cronLogs = cronLogsNote(updated);
-        if (cronLogs) {
-          await this.deps.slack.chat
-            .postMessage({ channel: job.channelId, thread_ts: job.messageTs, text: cronLogs, unfurl_links: false, unfurl_media: false })
-            .catch((err) => logger.warn({ jobId: job.id, err: String((err as Error)?.message ?? err) }, 'devops cron logs note failed'));
         }
       }
     }

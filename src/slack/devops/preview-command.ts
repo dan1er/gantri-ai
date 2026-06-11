@@ -381,10 +381,9 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
           .catch((err) => logger.warn({ jobId, repo: f.repo, err: String((err as Error)?.message ?? err) }, 'auto branch cleanup failed'));
       }
     }
-    // Update BOTH the message the button was clicked from AND the job's canonical
-    // message: tearing down from a "reuse" note leaves the original message
-    // otherwise showing a stale "live" preview with active buttons. The torn-down
-    // render (status='torn_down') drops the buttons; sync them to the same state.
+    // The job's canonical message becomes the single torn-down record. If the
+    // button was clicked elsewhere (an idle ping / reuse note), DELETE that
+    // message instead of leaving a duplicate torn-down copy in the channel.
     const channel = body.channel?.id ?? job?.channelId;
     if (job && channel) {
       const age = humanAge(Date.now() - new Date(job.createdAt).getTime());
@@ -392,14 +391,14 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
         ...(renderJobBlocks(job) as any[]),
         { type: 'context', elements: [{ type: 'mrkdwn', text: `🧹 Torn down by <@${body.user?.id}> · was up for ${age}` }] },
       ];
-      const targets = new Set<string>();
-      const clickedTs = body.container?.message_ts ?? body.message?.ts;
-      if (clickedTs) targets.add(clickedTs);
-      if (job.messageTs) targets.add(job.messageTs);
-      for (const ts of targets) {
+      if (job.messageTs) {
         await deps.slack.chat
-          .update({ channel, ts, text: 'preview torn down', blocks })
+          .update({ channel, ts: job.messageTs, text: 'preview torn down', blocks })
           .catch(() => {});
+      }
+      const clickedTs = body.container?.message_ts ?? body.message?.ts;
+      if (clickedTs && clickedTs !== job.messageTs) {
+        await deps.slack.chat.delete({ channel, ts: clickedTs }).catch(() => {});
       }
     }
     logger.info({ jobId, by: body.user?.id }, 'devops preview torn down');
@@ -411,6 +410,11 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
     await ack();
     const jobId = action.value as string;
     await deps.repo.update(jobId, { idlePingedAt: new Date().toISOString() }).catch(() => {});
+    // The ping served its purpose — remove it so the channel stays clean.
+    const clickedTs = body.container?.message_ts ?? body.message?.ts;
+    if (clickedTs) {
+      await deps.slack.chat.delete({ channel: body.channel?.id ?? deps.opsChannelId, ts: clickedTs }).catch(() => {});
+    }
     await deps.slack.chat
       .postEphemeral({
         channel: body.channel?.id ?? deps.opsChannelId, user: body.user?.id,

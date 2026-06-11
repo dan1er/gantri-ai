@@ -2,7 +2,7 @@ import type { WebClient } from '@slack/web-api';
 import type { Job } from './types.js';
 import type { DevopsJobsRepo } from './jobs-repo.js';
 import type { JobPatch, ProvisionerDeps } from './provisioner.js';
-import { renderJobBlocks, e2eLocalConfig, idlePingBlocks } from './messages.js';
+import { renderJobBlocks, e2eLocalConfig, idlePingBlocks, humanAge } from './messages.js';
 import { logger } from '../logger.js';
 
 // Backend previews run in the cluster, so a ready one that's been forgotten
@@ -153,13 +153,5 @@ export class JobsRunner {
     await this.deps.repo.update(job.id, { idlePingedAt: new Date(now).toISOString() });
     logger.info({ jobId: job.id, by: job.requestedBy }, 'devops idle preview ping sent');
   }
-}
-
-function humanAge(ms: number): string {
-  const h = Math.floor(ms / 3_600_000);
-  if (h < 1) return 'about an hour';
-  if (h < 24) return h === 1 ? '1 hour' : `${h} hours`;
-  const d = Math.floor(h / 24);
-  return d === 1 ? '1 day' : `${d} days`;
 }
 

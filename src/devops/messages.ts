@@ -45,7 +45,7 @@ export function e2eLocalConfig(job: Job): string | null {
  */
 export function idlePingBlocks(job: Job, ageLabel: string): { text: string; blocks: unknown[] } {
   const slug = job.spec.backend?.slug ?? 'preview';
-  const text = `⏰ <@${job.requestedBy}> your backend preview \`${slug}\` has been up for ${ageLabel}. Still need it? If not, tear it down to keep costs low — it runs in the cluster.`;
+  const text = `⏰ <@${job.requestedBy}> your test environment \`${slug}\` has been running for ${ageLabel}. Still using it? Every open preview costs money while it's up — if you're done, hit *Tear down*.`;
   const blocks: unknown[] = [
     { type: 'section', text: { type: 'mrkdwn', text } },
     {
@@ -62,6 +62,15 @@ export function idlePingBlocks(job: Job, ageLabel: string): { text: string; bloc
 const REPO_DISPLAY: Record<string, string> = {
   mantle: 'Marketplace', core: 'Factoryos', made: 'Madeos',
 };
+
+/** "about an hour" / "5 hours" / "2 days" — for idle pings + teardown notes. */
+export function humanAge(ms: number): string {
+  const h = Math.floor(ms / 3_600_000);
+  if (h < 1) return 'about an hour';
+  if (h < 24) return h === 1 ? '1 hour' : `${h} hours`;
+  const d = Math.floor(h / 24);
+  return d === 1 ? '1 day' : `${d} days`;
+}
 
 function componentBlock(
   name: string, id: string, link: string | undefined, url: string | undefined,
@@ -226,6 +235,29 @@ export function renderJobBlocks(job: Job): unknown[] {
   const header = `${icon} ${titleTarget} preview — requested by <@${job.requestedBy}>`;
 
   const section = (text: string) => ({ type: 'section', text: { type: 'mrkdwn', text } });
+
+  // Torn down = terminal: the environment is gone, so don't render dead
+  // Preview/Deployment links or action buttons. Source links survive (the
+  // branches still exist). The teardown handler appends who/when as context.
+  if (job.status === 'torn_down') {
+    const parts: string[] = [];
+    if (job.spec.backend) {
+      const b = job.spec.backend;
+      parts.push(`*Porter* (${b.slug})${b.link ? ` · <${b.link}|Source>` : ''}`);
+    }
+    for (const f of job.spec.frontends ?? []) {
+      parts.push(`*${REPO_DISPLAY[f.repo] ?? f.repo}* (${f.ref})${f.link ? ` · <${f.link}|Source>` : ''}`);
+    }
+    return [
+      section(`🧹 *${titleTarget} preview torn down* — requested by <@${job.requestedBy}>`),
+      ...(parts.length ? [section(parts.join('\n'))] : []),
+      {
+        type: 'context',
+        elements: [{ type: 'mrkdwn', text: '_Environment deleted — preview URLs no longer work. Run `/preview` to spin up a fresh one._' }],
+      },
+    ];
+  }
+
   const buttons = {
     type: 'actions',
     elements: [

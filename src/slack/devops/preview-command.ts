@@ -5,7 +5,7 @@ import type { GithubDispatcher } from '../../devops/github.js';
 import type { VercelReader } from '../../devops/provisioner.js';
 import type { JobTarget, FrontendRepo, JobSpec } from '../../devops/types.js';
 import { slugFromRef } from '../../devops/slug.js';
-import { renderJobBlocks } from '../../devops/messages.js';
+import { renderJobBlocks, humanAge } from '../../devops/messages.js';
 import { decideCommandChannel, channelFromView } from './channel-access.js';
 import { logger } from '../../logger.js';
 
@@ -387,9 +387,10 @@ export function registerPreviewCommand(app: App, deps: PreviewCommandDeps): void
     // render (status='torn_down') drops the buttons; sync them to the same state.
     const channel = body.channel?.id ?? job?.channelId;
     if (job && channel) {
+      const age = humanAge(Date.now() - new Date(job.createdAt).getTime());
       const blocks = [
         ...(renderJobBlocks(job) as any[]),
-        { type: 'context', elements: [{ type: 'mrkdwn', text: `🧹 <@${body.user?.id}> tore down this preview` }] },
+        { type: 'context', elements: [{ type: 'mrkdwn', text: `🧹 Torn down by <@${body.user?.id}> · was up for ${age}` }] },
       ];
       const targets = new Set<string>();
       const clickedTs = body.container?.message_ts ?? body.message?.ts;

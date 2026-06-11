@@ -70,6 +70,7 @@ export interface JobSpec {
   cronRun?: {
     environment: 'staging' | 'production';
     cronjob: string; // name WITHOUT the env prefix (run-cron.yml adds it)
+    logsTail?: string; // last lines of the pod logs, threaded on completion
   };
 }
 

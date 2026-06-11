@@ -23,34 +23,46 @@ type CronEnv = 'staging' | 'production';
  * both environments; `k8s/overlays/prod/cronjobs-prod.yaml` adds
  * production-only crons. Cached briefly; it changes only when a cron ships.
  */
-let cronsCache: { at: number; base: string[]; prodOnly: string[] } | null = null;
+export interface CronEntry {
+  name: string;    // the k8s CronJob name (what run-cron.yml receives)
+  display: string; // human label for the picker
+}
 
-function parseCronNames(yaml: string): string[] {
-  // Each manifest doc is `kind: CronJob` + `metadata.name`; grab the first
-  // name after each CronJob kind line.
-  const names: string[] = [];
+let cronsCache: { at: number; base: CronEntry[]; prodOnly: CronEntry[] } | null = null;
+
+/** "calc-usage-discarded-inv" → "Calc usage discarded inv". */
+const humanize = (name: string): string =>
+  (name.charAt(0).toUpperCase() + name.slice(1)).replace(/-/g, ' ');
+
+function parseCronEntries(yaml: string): CronEntry[] {
+  // Each manifest doc is `kind: CronJob` + `metadata.name`. An optional
+  // `gantri.com/display-name` annotation overrides the humanized label.
+  const entries: CronEntry[] = [];
   for (const doc of yaml.split(/^---$/m)) {
     if (!/kind:\s*CronJob/.test(doc)) continue;
     const m = doc.match(/^\s{2}name:\s*([a-z0-9-]+)\s*$/m);
-    if (m) names.push(m[1]);
+    if (!m) continue;
+    const d = doc.match(/gantri\.com\/display-name:\s*"?([^"\n]+?)"?\s*$/m);
+    entries.push({ name: m[1], display: d ? d[1] : humanize(m[1]) });
   }
-  return names;
+  return entries;
 }
 
-export async function loadCronjobs(gh: GithubDispatcher, env: CronEnv): Promise<string[]> {
+export async function loadCronjobs(gh: GithubDispatcher, env: CronEnv): Promise<CronEntry[]> {
   if (!cronsCache || Date.now() - cronsCache.at >= 5 * 60_000) {
     const [base, prod] = await Promise.all([
       gh.fileText('porter', 'k8s/base/cronjobs.yaml', 'master'),
       gh.fileText('porter', 'k8s/overlays/prod/cronjobs-prod.yaml', 'master').catch(() => ''),
     ]);
+    const byDisplay = (a: CronEntry, b: CronEntry) => a.display.localeCompare(b.display);
     cronsCache = {
       at: Date.now(),
-      base: parseCronNames(base).sort(),
-      prodOnly: parseCronNames(prod).sort(),
+      base: parseCronEntries(base).sort(byDisplay),
+      prodOnly: parseCronEntries(prod).sort(byDisplay),
     };
   }
   return env === 'production'
-    ? [...cronsCache.base, ...cronsCache.prodOnly].sort()
+    ? [...cronsCache.base, ...cronsCache.prodOnly].sort((a, b) => a.display.localeCompare(b.display))
     : cronsCache.base;
 }
 
@@ -138,16 +150,18 @@ export function registerCronCommand(app: App, deps: CronCommandDeps): void {
     try {
       env = JSON.parse((payload?.view ?? body?.view)?.private_metadata || '{}').env ?? 'staging';
     } catch { /* default */ }
-    let crons: string[] = [];
+    let crons: CronEntry[] = [];
     try {
       crons = await loadCronjobs(deps.gh, env);
     } catch (err) {
       logger.warn({ err: String((err as Error)?.message ?? err) }, 'cron list load failed');
     }
-    const matched = crons.filter((c) => !query || c.includes(query));
+    const matched = crons.filter(
+      (c) => !query || c.name.includes(query) || c.display.toLowerCase().includes(query),
+    );
     await ack({
       options: matched.slice(0, 100).map((c) => ({
-        text: { type: 'plain_text' as const, text: c.slice(0, 75) }, value: c.slice(0, 75),
+        text: { type: 'plain_text' as const, text: c.display.slice(0, 75) }, value: c.name.slice(0, 75),
       })),
     });
   });

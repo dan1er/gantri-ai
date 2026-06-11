@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { advanceCronJob } from '../../../src/devops/cron-provisioner.js';
+import { advanceCronJob, extractCronLogs } from '../../../src/devops/cron-provisioner.js';
 import { buildCronModal, parseCronSubmission, loadCronjobs } from '../../../src/slack/devops/cron-command.js';
 import { renderJobBlocks } from '../../../src/devops/messages.js';
 import type { Job } from '../../../src/devops/types.js';
@@ -56,17 +56,43 @@ describe('cron modal', () => {
 });
 
 describe('loadCronjobs', () => {
-  it('parses CronJob names from base + prod overlay, scoping prod-only to production', async () => {
-    const base = ['---', 'apiVersion: batch/v1', 'kind: CronJob', 'metadata:', '  name: alpha-cron', '---', 'kind: CronJob', 'metadata:', '  name: beta-cron'].join('\n');
+  it('parses names + labels from base + prod overlay, honoring display-name annotations', async () => {
+    const base = [
+      '---', 'apiVersion: batch/v1', 'kind: CronJob', 'metadata:', '  name: alpha-cron',
+      '  annotations:', '    gantri.com/display-name: "Alpha (curated)"',
+      '---', 'kind: CronJob', 'metadata:', '  name: send-gift-cards',
+    ].join('\n');
     const prod = ['---', 'kind: CronJob', 'metadata:', '  name: prod-only-cron'].join('\n');
     const gh = {
       fileText: vi.fn().mockImplementation((_r: string, path: string) =>
         Promise.resolve(path.includes('prod') ? prod : base)),
     } as any;
     const staging = await loadCronjobs(gh, 'staging');
-    expect(staging).toEqual(['alpha-cron', 'beta-cron']);
+    expect(staging).toEqual([
+      { name: 'alpha-cron', display: 'Alpha (curated)' },
+      { name: 'send-gift-cards', display: 'Send gift cards' }, // humanized fallback
+    ]);
     const production = await loadCronjobs(gh, 'production');
-    expect(production).toEqual(['alpha-cron', 'beta-cron', 'prod-only-cron']);
+    expect(production.map((c) => c.name)).toEqual(['alpha-cron', 'prod-only-cron', 'send-gift-cards']);
+  });
+});
+
+describe('extractCronLogs', () => {
+  it('extracts the marker-bracketed section and strips Actions timestamps', () => {
+    const raw = [
+      '2026-06-11T01:00:00.0000000Z setup noise',
+      '2026-06-11T01:00:01.0000000Z ===CRON-LOGS-START===',
+      '2026-06-11T01:00:02.0000000Z processing 12 gift cards',
+      '2026-06-11T01:00:03.0000000Z done',
+      '2026-06-11T01:00:04.0000000Z ===CRON-LOGS-END===',
+      '2026-06-11T01:00:05.0000000Z teardown noise',
+    ].join('\n');
+    expect(extractCronLogs(raw)).toBe('processing 12 gift cards\ndone');
+  });
+
+  it('falls back to the whole log tail when markers are absent', () => {
+    const raw = '2026-06-11T01:00:00.0000000Z only line';
+    expect(extractCronLogs(raw)).toBe('only line');
   });
 });
 

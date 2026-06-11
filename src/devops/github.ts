@@ -133,6 +133,20 @@ export class GithubDispatcher {
     return body.workflow_runs[0]?.id ?? null;
   }
 
+  /**
+   * Plain-text logs of a workflow run's first job (the runner job). Used to
+   * thread a cron run's pod logs back into Slack.
+   */
+  async runJobLogs(repo: string, runId: number): Promise<string> {
+    const jobsRes = await this.fetch(`${this.base(repo)}/actions/runs/${runId}/jobs?per_page=5`, { headers: this.headers() });
+    if (!jobsRes.ok) throw new Error(`list run jobs failed: ${jobsRes.status}`);
+    const jobs = ((await jobsRes.json()) as { jobs: { id: number }[] }).jobs;
+    if (!jobs?.length) throw new Error('run has no jobs');
+    const logsRes = await this.fetch(`${this.base(repo)}/actions/jobs/${jobs[0].id}/logs`, { headers: this.headers() });
+    if (!logsRes.ok) throw new Error(`job logs failed: ${logsRes.status}`);
+    return logsRes.text();
+  }
+
   /** Raw text content of a file at a ref (GitHub contents API, raw accept). */
   async fileText(repo: string, path: string, ref = 'HEAD'): Promise<string> {
     const res = await this.fetch(`${this.base(repo)}/contents/${path}?ref=${encodeURIComponent(ref)}`, {

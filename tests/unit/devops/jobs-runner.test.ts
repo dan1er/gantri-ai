@@ -94,10 +94,14 @@ describe('JobsRunner.tick', () => {
     const slack = { chat: { update: vi.fn().mockResolvedValue({}), postMessage: vi.fn().mockResolvedValue({}) } } as any;
     const runner = new JobsRunner({ repo, advance, slack, gh: {} as any });
     await runner.tick();
-    expect(slack.chat.postMessage).toHaveBeenCalledOnce();
-    const arg = slack.chat.postMessage.mock.calls[0][0];
-    expect(arg.thread_ts).toBe('tsD');
-    expect(arg.text).toContain('deploy-5196-2026.06.08');
-    expect(arg.text).toMatch(/\/deploy/i);
+    // Two thread posts on settle: the status note + the verbose detail blocks.
+    expect(slack.chat.postMessage).toHaveBeenCalledTimes(2);
+    const note = slack.chat.postMessage.mock.calls[0][0];
+    expect(note.thread_ts).toBe('tsD');
+    expect(note.text).toContain('deploy-5196-2026.06.08');
+    expect(note.text).toMatch(/\/deploy/i);
+    const detail = slack.chat.postMessage.mock.calls[1][0];
+    expect(detail.thread_ts).toBe('tsD');
+    expect(JSON.stringify(detail.blocks)).toContain('releases/tag/deploy-5198-2026.06.08');
   });
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { renderJobBlocks, e2eLocalConfig } from '../../../src/devops/messages.js';
+import { renderJobBlocks, renderJobDetailBlocks, e2eLocalConfig } from '../../../src/devops/messages.js';
 import type { Job } from '../../../src/devops/types.js';
 
 const baseJob: Job = {
@@ -34,18 +34,28 @@ describe('renderJobBlocks', () => {
     expect(JSON.stringify(blocks)).toContain('boom');
   });
 
-  it('marks a bot-created frontend branch with an "auto branch off trunk" hint', () => {
-    const job: Job = {
-      ...baseJob, target: 'fullstack', status: 'ready',
-      spec: {
-        backend: { ref: 'feat/as-9', slug: 'as-9', url: 'https://as-9.preview.api.gantri.com' },
-        frontends: [
-          { repo: 'mantle', ref: 'preview-as-9', url: 'https://marketplace-git-preview-as-9-gantri.vercel.app', autoBranch: true },
-          { repo: 'core', ref: 'feat/real', url: 'https://factoryos-git-feat-real-gantri.vercel.app' },
-        ],
-      },
-    };
-    const text = JSON.stringify(renderJobBlocks(job));
+  const fullstackReady: Job = {
+    ...baseJob, target: 'fullstack', status: 'ready',
+    spec: {
+      backend: { ref: 'feat/as-9', slug: 'as-9', url: 'https://as-9.preview.api.gantri.com', link: 'https://github.com/gantri/porter/tree/feat/as-9' },
+      frontends: [
+        { repo: 'mantle', ref: 'preview-as-9', url: 'https://marketplace-git-preview-as-9-gantri.vercel.app', autoBranch: true },
+        { repo: 'core', ref: 'feat/real', url: 'https://factoryos-git-feat-real-gantri.vercel.app' },
+      ],
+    },
+  };
+
+  it('keeps the main message compact: one links line, no Source/Deployment detail', () => {
+    const text = JSON.stringify(renderJobBlocks(fullstackReady));
+    expect(text).toContain('https://marketplace-git-preview-as-9-gantri.vercel.app');
+    expect(text).not.toContain('Source');            // detail lives in the thread
+    expect(text).not.toContain('auto branch off trunk');
+  });
+
+  it('threads the verbose breakdown via renderJobDetailBlocks (incl. auto-branch hint)', () => {
+    const text = JSON.stringify(renderJobDetailBlocks(fullstackReady));
+    expect(text).toContain('Source');
+    expect(text).toContain('API → https://as-9.preview.api.gantri.com/api');
     expect(text).toContain('auto branch off trunk'); // the auto one is annotated
     // the non-auto frontend should not carry the hint (only one occurrence total)
     expect(text.match(/auto branch off trunk/g)).toHaveLength(1);

@@ -169,6 +169,21 @@ function renderE2e(job: Job): unknown[] {
   return blocks;
 }
 
+// One compact fragment per deploy component for the main message — name
+// (linked to prod once live) + a phase emoji; verbose tags/links live in the
+// threaded details.
+function deployFragment(name: string, item: DeployItem, backendDeploying: boolean): string {
+  if (item.url) return `<${item.url}|${name}> ✅`;
+  if (item.error) return `*${name}* ✗`;
+  if (item.e2ePassed === false) {
+    const link = item.e2eQaseRunId ? qaseRun(item.e2eQaseRunId) : item.e2eRunId ? ghRun(item.e2eRunId) : undefined;
+    return link ? `*${name}* 🚫 <${link}|E2E failed>` : `*${name}* 🚫 E2E failed`;
+  }
+  if (item.e2ePassed === true || backendDeploying) return `*${name}* 🚀`;
+  if (item.e2eRunId) return `*${name}* <${ghRun(item.e2eRunId)}|🧪 testing>`;
+  return `*${name}* ⏳`;
+}
+
 function renderDeploy(job: Job): unknown[] {
   const icon = ICON[job.status];
   const headline = job.status === 'ready' ? 'Deployed to production'
@@ -178,17 +193,14 @@ function renderDeploy(job: Job): unknown[] {
   const blocks: unknown[] = [section(`${icon} *${headline}* — requested by <@${job.requestedBy}>`)];
 
   const b = job.spec.deployBackend;
-  if (b) {
-    const head = b.url ? `<${b.url}|Porter>` : '*Porter*';
-    const pend = b.url ? ' ✅ live' : job.status === 'backend_running' ? ' _(deploying…)_' : ' _(queued)_';
-    blocks.push(section(`${head} · ${tagLink('porter', b.tag)}${pend}`));
-  }
-
+  const frags: string[] = [];
+  if (b) frags.push(deployFragment('Porter', b, job.status === 'backend_running'));
   let anyBlocked = false;
   for (const f of job.spec.deployFrontends ?? []) {
-    blocks.push(section(frontendLine(f)));
+    frags.push(deployFragment(REPO_DISPLAY[f.repo ?? ''] ?? f.repo ?? 'frontend', f, false));
     if (f.error || f.e2ePassed === false) anyBlocked = true;
   }
+  if (frags.length) blocks.push(section(frags.join('  ·  ')));
 
   // A frontend can fail its gate or its deploy without blocking the others;
   // offer a retry that re-attempts only the unfinished ones.
@@ -226,31 +238,25 @@ function renderDeploy(job: Job): unknown[] {
   return blocks;
 }
 
+/**
+ * The compact main-channel message: 1-2 lines + action buttons. Everything
+ * verbose (per-component Source/API/Deployment links) goes to the thread via
+ * renderJobDetailBlocks — the channel stays scannable.
+ */
 export function renderJobBlocks(job: Job): unknown[] {
   if (job.kind === 'deploy') return renderDeploy(job);
   if (job.kind === 'e2e') return renderE2e(job);
   if (job.kind === 'cron') return renderCron(job);
-  const icon = ICON[job.status];
   const titleTarget = job.target === 'fullstack' ? 'Full-stack' : job.target[0].toUpperCase() + job.target.slice(1);
-  const header = `${icon} ${titleTarget} preview — requested by <@${job.requestedBy}>`;
-
+  // The preview's identifier: the backend slug, or the first frontend branch.
+  const id = job.spec.backend?.slug ?? job.spec.frontends?.[0]?.ref;
   const section = (text: string) => ({ type: 'section', text: { type: 'mrkdwn', text } });
 
-  // Torn down = terminal: the environment is gone, so don't render dead
-  // Preview/Deployment links or action buttons. Source links survive (the
-  // branches still exist). The teardown handler appends who/when as context.
+  // Torn down = terminal: the environment is gone. Two lines, no dead links;
+  // the teardown handler appends who/when as context.
   if (job.status === 'torn_down') {
-    const parts: string[] = [];
-    if (job.spec.backend) {
-      const b = job.spec.backend;
-      parts.push(`*Porter* (${b.slug})${b.link ? ` · <${b.link}|Source>` : ''}`);
-    }
-    for (const f of job.spec.frontends ?? []) {
-      parts.push(`*${REPO_DISPLAY[f.repo] ?? f.repo}* (${f.ref})${f.link ? ` · <${f.link}|Source>` : ''}`);
-    }
     return [
-      section(`🧹 *${titleTarget} preview torn down* — requested by <@${job.requestedBy}>`),
-      ...(parts.length ? [section(parts.join('\n'))] : []),
+      section(`🧹 *${titleTarget} preview torn down*${id ? ` \`${id}\`` : ''} — requested by <@${job.requestedBy}>`),
       {
         type: 'context',
         elements: [{ type: 'mrkdwn', text: '_Environment deleted — preview URLs no longer work. Run `/preview` to spin up a fresh one._' }],
@@ -258,37 +264,76 @@ export function renderJobBlocks(job: Job): unknown[] {
     ];
   }
 
-  const buttons = {
-    type: 'actions',
-    elements: [
-      // Refresh re-provisions the backend at the branch HEAD (rebuild + migrations);
-      // only meaningful when there's a backend preview.
-      ...(job.spec.backend ? [{
-        type: 'button', text: { type: 'plain_text', text: '🔄 Refresh backend' },
-        action_id: 'preview_refresh', value: job.id,
-      }] : []),
-      {
-        type: 'button', text: { type: 'plain_text', text: 'Tear down' },
-        style: 'danger', action_id: 'preview_teardown', value: job.id,
-      },
-    ],
-  };
-
+  const header = `${ICON[job.status]} *${titleTarget} preview*${id ? ` \`${id}\`` : ''} — requested by <@${job.requestedBy}>`;
   const blocks: unknown[] = [section(header)];
-  if (job.spec.backend) {
-    const b = job.spec.backend;
-    blocks.push(section(componentBlock('Porter', b.slug, b.link, b.url, b.url ? undefined : 'provisioning…')));
-  }
-  // Action buttons sit right after Porter, before the frontends.
-  if (job.status === 'ready') blocks.push(buttons);
-  const apiUrl = job.spec.backend?.url ? `${job.spec.backend.url}/api` : undefined;
+
+  // One links line: whatever is already up, pending markers for the rest.
+  const links: string[] = [];
+  const b = job.spec.backend;
+  if (b) links.push(b.url ? `<${b.url}|API>` : '_API (provisioning…)_');
   for (const f of job.spec.frontends ?? []) {
-    blocks.push(section(componentBlock(REPO_DISPLAY[f.repo] ?? f.repo, f.ref, f.link,
-      f.url,
-      f.url ? undefined : 'building…',
-      f.url ? f.deploymentUrl : undefined, apiUrl, f.autoBranch)));
+    const name = REPO_DISPLAY[f.repo] ?? f.repo;
+    links.push(f.url ? `<${f.url}|${name}>` : `_${name} (building…)_`);
+  }
+  if (links.length) blocks.push(section(links.join('  ·  ')));
+
+  if (job.status === 'ready') {
+    blocks.push({
+      type: 'actions',
+      elements: [
+        // Refresh re-provisions the backend at the branch HEAD (rebuild + migrations);
+        // only meaningful when there's a backend preview.
+        ...(job.spec.backend ? [{
+          type: 'button', text: { type: 'plain_text', text: '🔄 Refresh backend' },
+          action_id: 'preview_refresh', value: job.id,
+        }] : []),
+        {
+          type: 'button', text: { type: 'plain_text', text: 'Tear down' },
+          style: 'danger', action_id: 'preview_teardown', value: job.id,
+        },
+      ],
+    });
   }
   if (job.status === 'failed' && job.error) blocks.push(section(`*Error:* ${job.error}`));
   if (blocks.length === 1) blocks.push(section('_starting…_'));
   return blocks;
+}
+
+/**
+ * The verbose per-component breakdown, posted to the job's THREAD when it
+ * settles: branches, Source links, API URLs, deploy tags. Null when there is
+ * nothing beyond what the compact main message already shows.
+ */
+export function renderJobDetailBlocks(job: Job): unknown[] | null {
+  const section = (text: string) => ({ type: 'section', text: { type: 'mrkdwn', text } });
+
+  if (job.kind === 'preview') {
+    const blocks: unknown[] = [];
+    if (job.spec.backend) {
+      const b = job.spec.backend;
+      blocks.push(section(componentBlock('Porter', b.slug, b.link, b.url, b.url ? undefined : 'provisioning…')));
+    }
+    const apiUrl = job.spec.backend?.url ? `${job.spec.backend.url}/api` : undefined;
+    for (const f of job.spec.frontends ?? []) {
+      blocks.push(section(componentBlock(REPO_DISPLAY[f.repo] ?? f.repo, f.ref, f.link,
+        f.url,
+        f.url ? undefined : 'building…',
+        f.url ? f.deploymentUrl : undefined, apiUrl, f.autoBranch)));
+    }
+    return blocks.length ? blocks : null;
+  }
+
+  if (job.kind === 'deploy') {
+    const blocks: unknown[] = [];
+    const b = job.spec.deployBackend;
+    if (b) {
+      const head = b.url ? `<${b.url}|Porter>` : '*Porter*';
+      const state = b.url ? ' ✅ live' : ' _(not deployed)_';
+      blocks.push(section(`${head} · ${tagLink('porter', b.tag)}${state}`));
+    }
+    for (const f of job.spec.deployFrontends ?? []) blocks.push(section(frontendLine(f)));
+    return blocks.length ? blocks : null;
+  }
+
+  return null; // e2e + cron main messages are already compact
 }

@@ -2,7 +2,7 @@ import type { WebClient } from '@slack/web-api';
 import type { Job } from './types.js';
 import type { DevopsJobsRepo } from './jobs-repo.js';
 import type { JobPatch, ProvisionerDeps } from './provisioner.js';
-import { renderJobBlocks, e2eLocalConfig, idlePingBlocks, humanAge } from './messages.js';
+import { renderJobBlocks, renderJobDetailBlocks, e2eLocalConfig, idlePingBlocks, humanAge } from './messages.js';
 import { logger } from '../logger.js';
 
 // Backend previews run in the cluster, so a ready one that's been forgotten
@@ -123,6 +123,16 @@ export class JobsRunner {
           await this.deps.slack.chat
             .postMessage({ channel: job.channelId, thread_ts: job.messageTs, text: note, unfurl_links: false, unfurl_media: false })
             .catch((err) => logger.warn({ jobId: job.id, err: String((err as Error)?.message ?? err) }, 'devops thread note failed'));
+        }
+        // The main message stays compact (1-2 lines); the full per-component
+        // breakdown lands in the thread once the job settles.
+        if (updated.status === 'ready' || updated.status === 'failed') {
+          const detail = renderJobDetailBlocks(updated);
+          if (detail) {
+            await this.deps.slack.chat
+              .postMessage({ channel: job.channelId, thread_ts: job.messageTs, text: 'details', blocks: detail as any, unfurl_links: false, unfurl_media: false })
+              .catch((err) => logger.warn({ jobId: job.id, err: String((err as Error)?.message ?? err) }, 'devops detail note failed'));
+          }
         }
         // When a preview with a backend goes ready, thread the ready-to-run
         // gantri-e2e config (env + tunnel command) for that specific preview.

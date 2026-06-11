@@ -111,6 +111,7 @@ function frontendLine(f: DeployItem): string {
 }
 
 // On-demand porter CronJob run (kind = 'cron', the /cron command).
+// One line + a dimmed description; the run link doubles as the log link.
 function renderCron(job: Job): unknown[] {
   const r = job.spec.cronRun;
   const icon = ICON[job.status];
@@ -127,21 +128,19 @@ function renderCron(job: Job): unknown[] {
   const cronLabel = r?.display
     ? `*${r.display}* (\`${r?.cronjob ?? '?'}\`)`
     : `\`${r?.cronjob ?? '?'}\``;
+  const run = job.runId
+    ? `<https://github.com/gantri/porter/actions/runs/${job.runId}|logs>`
+    : '_dispatching…_';
   const blocks: unknown[] = [
-    section(`${icon} *${headline}* — requested by <@${job.requestedBy}>`),
-    section(`*Cron:* ${cronLabel}  ·  *Environment:* ${envBadge}`),
+    section(`${icon} *${headline}* — ${cronLabel} · ${envBadge} · requested by <@${job.requestedBy}> · ${run}`),
     ...(r?.description ? [{ type: 'context', elements: [{ type: 'mrkdwn', text: r.description }] }] : []),
-    section(
-      job.runId
-        ? `<https://github.com/gantri/porter/actions/runs/${job.runId}|Workflow run (logs in the summary)>`
-        : '_dispatching…_',
-    ),
   ];
   if (job.status === 'failed' && job.error) blocks.push(section(`*Error:* ${job.error}`));
   return blocks;
 }
 
-// On-demand suite run (kind = 'e2e', the /e2e command): options + live links.
+// On-demand suite run (kind = 'e2e', the /e2e command).
+// Line 1: status + links; line 2 (context): the run's options.
 function renderE2e(job: Job): unknown[] {
   const r = job.spec.e2eRun;
   const icon = ICON[job.status];
@@ -150,20 +149,19 @@ function renderE2e(job: Job): unknown[] {
     : 'E2E run';
   const section = (text: string) => ({ type: 'section', text: { type: 'mrkdwn', text } });
   const opts = [
-    `*Project:* ${r?.project ?? '?'}`,
-    `*Scope:* ${r?.scope ?? '?'}`,
-    `*Areas:* ${r?.areas?.length ? r.areas.join(', ') : '(all areas)'}`,
-    ...(r?.includeLongRunning ? ['*Long-running:* included'] : []),
-    ...(r?.grepOverride ? [`*Grep:* \`${r.grepOverride}\``] : []),
+    `${r?.project ?? '?'}`,
+    `${r?.scope ?? '?'}`,
+    r?.areas?.length ? r.areas.join(', ') : '(all areas)',
+    ...(r?.includeLongRunning ? ['long-running included'] : []),
+    ...(r?.grepOverride ? [`grep: \`${r.grepOverride}\``] : []),
   ].join('  ·  ');
   const links = [
     job.runId ? `<${ghRun(job.runId)}|GitHub run>` : '_dispatching…_',
     ...(r?.qaseRunId ? [`<${qaseRun(r.qaseRunId)}|Qase run>`] : []),
-  ].join('  ·  ');
+  ].join(' · ');
   const blocks: unknown[] = [
-    section(`${icon} *${headline}* — requested by <@${job.requestedBy}>`),
-    section(opts),
-    section(links),
+    section(`${icon} *${headline}* — requested by <@${job.requestedBy}> · ${links}`),
+    { type: 'context', elements: [{ type: 'mrkdwn', text: opts }] },
   ];
   if (job.status === 'failed' && job.error) blocks.push(section(`*Error:* ${job.error}`));
   return blocks;

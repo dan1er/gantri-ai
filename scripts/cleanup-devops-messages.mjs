@@ -29,11 +29,9 @@ async function slack(method, payload) {
   return res.json();
 }
 
-// Only preview + deploy renders changed; cron/e2e messages were already compact.
 const { data, error } = await supabase
   .from('devops_jobs')
   .select('*')
-  .in('kind', ['preview', 'deploy'])
   .not('message_ts', 'is', null)
   .order('created_at', { ascending: true });
 if (error) throw new Error(error.message);

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { renderJobBlocks, renderJobDetailBlocks, e2eLocalConfig } from '../../../src/devops/messages.js';
+import { renderJobBlocks, renderJobDetailBlocks, deployRollbackActions, e2eLocalConfig } from '../../../src/devops/messages.js';
 import type { Job } from '../../../src/devops/types.js';
 
 const baseJob: Job = {
@@ -103,30 +103,39 @@ describe('e2eLocalConfig', () => {
   });
 });
 
-describe('renderJobBlocks — deploy rollback button', () => {
-  it('shows a Rollback backend button with a confirm dialog naming the previous deploy when ready', () => {
-    const text = JSON.stringify(renderJobBlocks(deployJob));
+describe('deploy rendering', () => {
+  it('renders the deploy as a single line — components inline, no buttons in main', () => {
+    const blocks = renderJobBlocks(deployJob) as any[];
+    expect(blocks).toHaveLength(1);
+    const text = blocks[0].text.text as string;
+    expect(text).toContain('Deployed to production');
+    expect(text).toContain('<https://api.gantri.com|Porter> ✅');
+    expect(JSON.stringify(blocks)).not.toContain('deploy_rollback'); // lives in the thread
+  });
+
+  it('deployRollbackActions builds the threaded button with a confirm naming the previous deploy', () => {
+    const text = JSON.stringify(deployRollbackActions(deployJob));
     expect(text).toContain('deploy_rollback');
     expect(text).toContain('Rollback backend');
     expect(text).toContain('deploy-5196-2026.06.08'); // the rollback target, inside the confirm dialog
     expect(text).toContain('Roll back production?');
   });
 
-  it('hides the rollback button when there is no previous deploy', () => {
+  it('no rollback action when there is no previous deploy', () => {
     const job = { ...deployJob, spec: { deployBackend: { ...deployJob.spec.deployBackend!, prevDeployTag: undefined } } };
-    expect(JSON.stringify(renderJobBlocks(job))).not.toContain('deploy_rollback');
+    expect(deployRollbackActions(job)).toBeNull();
   });
 
-  it('hides the rollback button on a failed deploy', () => {
+  it('no rollback action on a failed deploy', () => {
     const job = { ...deployJob, status: 'failed' as const, error: 'boom' };
-    expect(JSON.stringify(renderJobBlocks(job))).not.toContain('deploy_rollback');
+    expect(deployRollbackActions(job)).toBeNull();
   });
 
-  it('hides the rollback button on a frontend-only deploy (no backend)', () => {
+  it('no rollback action on a frontend-only deploy (no backend)', () => {
     const job: Job = {
       ...deployJob,
       spec: { deployFrontends: [{ repo: 'mantle', tag: 'deploy-1203-2026.06.08', sha: 's', pr: 1203, url: 'https://www.gantri.com' }] },
     };
-    expect(JSON.stringify(renderJobBlocks(job))).not.toContain('deploy_rollback');
+    expect(deployRollbackActions(job)).toBeNull();
   });
 });

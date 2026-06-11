@@ -190,7 +190,6 @@ function renderDeploy(job: Job): unknown[] {
     : job.status === 'failed' ? 'Deploy failed'
     : 'Deploy → production';
   const section = (text: string) => ({ type: 'section', text: { type: 'mrkdwn', text } });
-  const blocks: unknown[] = [section(`${icon} *${headline}* — requested by <@${job.requestedBy}>`)];
 
   const b = job.spec.deployBackend;
   const frags: string[] = [];
@@ -200,10 +199,14 @@ function renderDeploy(job: Job): unknown[] {
     frags.push(deployFragment(REPO_DISPLAY[f.repo ?? ''] ?? f.repo ?? 'frontend', f, false));
     if (f.error || f.e2ePassed === false) anyBlocked = true;
   }
-  if (frags.length) blocks.push(section(frags.join('  ·  ')));
+  // Single line: status + requester + components. Rollback lives in the thread.
+  const blocks: unknown[] = [
+    section(`${icon} *${headline}* — requested by <@${job.requestedBy}>${frags.length ? `  ·  ${frags.join('  ·  ')}` : ''}`),
+  ];
 
   // A frontend can fail its gate or its deploy without blocking the others;
-  // offer a retry that re-attempts only the unfinished ones.
+  // offer a retry that re-attempts only the unfinished ones. Kept on the main
+  // message — a failed deploy needs its fix visible, not buried in the thread.
   if (job.status === 'failed' && anyBlocked) {
     blocks.push({
       type: 'actions',
@@ -215,27 +218,31 @@ function renderDeploy(job: Job): unknown[] {
   } else if (job.status === 'failed' && job.error) {
     blocks.push(section(`*Error:* ${job.error}`));
   }
-
-  // On a successful deploy, offer a one-click rollback of the backend by
-  // re-promoting the deploy that was live before it. Native Slack confirm — it
-  // touches prod.
-  if (job.status === 'ready' && b?.prevDeployTag) {
-    blocks.push({
-      type: 'actions',
-      elements: [{
-        type: 'button', text: { type: 'plain_text', text: '↩️ Rollback backend' }, style: 'danger',
-        action_id: 'deploy_rollback', value: job.id,
-        confirm: {
-          title: { type: 'plain_text', text: 'Roll back production?' },
-          text: { type: 'mrkdwn', text: `Re-promote \`${b.prevDeployTag}\` to production — the deploy that was live before this one.` },
-          confirm: { type: 'plain_text', text: 'Roll back' },
-          deny: { type: 'plain_text', text: 'Cancel' },
-        },
-      }],
-    });
-  }
-  if (blocks.length === 1) blocks.push(section('_starting…_'));
   return blocks;
+}
+
+/**
+ * One-click backend rollback (re-promote the deploy live before this one),
+ * posted in the deploy's THREAD when it goes ready. Native Slack confirm — it
+ * touches prod. Null unless this is a successful backend deploy with a
+ * recorded predecessor.
+ */
+export function deployRollbackActions(job: Job): unknown | null {
+  const prev = job.spec.deployBackend?.prevDeployTag;
+  if (job.kind !== 'deploy' || job.status !== 'ready' || !prev) return null;
+  return {
+    type: 'actions',
+    elements: [{
+      type: 'button', text: { type: 'plain_text', text: '↩️ Rollback backend' }, style: 'danger',
+      action_id: 'deploy_rollback', value: job.id,
+      confirm: {
+        title: { type: 'plain_text', text: 'Roll back production?' },
+        text: { type: 'mrkdwn', text: `Re-promote \`${prev}\` to production — the deploy that was live before this one.` },
+        confirm: { type: 'plain_text', text: 'Roll back' },
+        deny: { type: 'plain_text', text: 'Cancel' },
+      },
+    }],
+  };
 }
 
 /**

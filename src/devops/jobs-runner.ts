@@ -2,7 +2,7 @@ import type { WebClient } from '@slack/web-api';
 import type { Job } from './types.js';
 import type { DevopsJobsRepo } from './jobs-repo.js';
 import type { JobPatch, ProvisionerDeps } from './provisioner.js';
-import { renderJobBlocks, renderJobDetailBlocks, e2eLocalConfig, idlePingBlocks, humanAge } from './messages.js';
+import { renderJobBlocks, renderJobDetailBlocks, deployRollbackActions, e2eLocalConfig, idlePingBlocks, humanAge } from './messages.js';
 import { logger } from '../logger.js';
 
 // Backend previews run in the cluster, so a ready one that's been forgotten
@@ -120,8 +120,15 @@ export class JobsRunner {
       if (patch.status && patch.status !== job.status) {
         const note = statusNote(updated);
         if (note) {
+          // A successful backend deploy carries its rollback button along with
+          // the note — actions live in the thread, the main message stays slim.
+          const rollback = deployRollbackActions(updated);
           await this.deps.slack.chat
-            .postMessage({ channel: job.channelId, thread_ts: job.messageTs, text: note, unfurl_links: false, unfurl_media: false })
+            .postMessage({
+              channel: job.channelId, thread_ts: job.messageTs, text: note,
+              ...(rollback ? { blocks: [{ type: 'section', text: { type: 'mrkdwn', text: note } }, rollback] as any } : {}),
+              unfurl_links: false, unfurl_media: false,
+            })
             .catch((err) => logger.warn({ jobId: job.id, err: String((err as Error)?.message ?? err) }, 'devops thread note failed'));
         }
         // The main message stays compact (1-2 lines); the full per-component

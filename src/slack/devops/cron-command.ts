@@ -241,6 +241,18 @@ export function registerCronCommand(app: App, deps: CronCommandDeps): void {
 async function createCronJobAndPost(
   deps: CronCommandDeps, cronRun: NonNullable<JobSpec['cronRun']>, requestedBy: string, channel: string,
 ): Promise<void> {
+  // Carry the human label + description into the job so the Slack message can
+  // show them (best-effort — the catalog cache is warm right after the picker).
+  try {
+    const entry = (await loadCronjobs(deps.gh, cronRun.environment)).find((c) => c.name === cronRun.cronjob);
+    if (entry) {
+      cronRun = {
+        ...cronRun,
+        ...(entry.display !== entry.name ? { display: entry.display } : {}),
+        ...(entry.description ? { description: entry.description } : {}),
+      };
+    }
+  } catch { /* render falls back to the raw name */ }
   const job = await deps.repo.create({
     kind: 'cron', target: 'cron', spec: { cronRun }, requestedBy, channelId: channel,
   });

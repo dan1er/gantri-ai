@@ -70,6 +70,8 @@ export interface JobSpec {
   cronRun?: {
     environment: 'staging' | 'production';
     cronjob: string; // name WITHOUT the env prefix (run-cron.yml adds it)
+    display?: string; // human label from the gantri.com/display-name annotation
+    description?: string; // one-liner from the gantri.com/description annotation
     logsTail?: string; // last lines of the pod logs, threaded on completion
   };
 }

@@ -121,9 +121,15 @@ function renderCron(job: Job): unknown[] {
         : 'Cron run';
   const section = (text: string) => ({ type: 'section', text: { type: 'mrkdwn', text } });
   const envBadge = r?.environment === 'production' ? '🔴 *production*' : '🟢 staging';
+  // Lead with the human label when porter annotates one; the raw k8s name
+  // stays visible so logs/kubectl cross-referencing is one copy-paste away.
+  const cronLabel = r?.display
+    ? `*${r.display}* (\`${r?.cronjob ?? '?'}\`)`
+    : `\`${r?.cronjob ?? '?'}\``;
   const blocks: unknown[] = [
     section(`${icon} *${headline}* — requested by <@${job.requestedBy}>`),
-    section(`*Cron:* \`${r?.cronjob ?? '?'}\`  ·  *Environment:* ${envBadge}`),
+    section(`*Cron:* ${cronLabel}  ·  *Environment:* ${envBadge}`),
+    ...(r?.description ? [{ type: 'context', elements: [{ type: 'mrkdwn', text: r.description }] }] : []),
     section(
       job.runId
         ? `<https://github.com/gantri/porter/actions/runs/${job.runId}|Workflow run (logs in the summary)>`

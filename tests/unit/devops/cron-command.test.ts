@@ -106,4 +106,14 @@ describe('renderJobBlocks (cron)', () => {
     expect(text).toContain('production');
     expect(text).toContain('porter/actions/runs/77');
   });
+
+  it('leads with the display name and shows the description when annotated', () => {
+    const job: Job = {
+      ...cronJob, status: 'backend_running',
+      spec: { cronRun: { environment: 'staging', cronjob: 'send-gift-cards', display: 'Send gift cards', description: 'Emails gift cards on their scheduled send date' } },
+    };
+    const text = JSON.stringify(renderJobBlocks(job));
+    expect(text).toContain('*Send gift cards* (`send-gift-cards`)');
+    expect(text).toContain('Emails gift cards on their scheduled send date');
+  });
 });

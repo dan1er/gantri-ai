@@ -84,6 +84,12 @@ export class JobsRunner {
         await this.advanceOne(job).catch((err) =>
           logger.warn({ jobId: job.id, err: String((err as Error)?.message ?? err) }, 'devops job advance failed'),
         );
+      }
+      // Idle reminders poll ready previews separately: 'ready' is a terminal
+      // status, so listActive never returns them — but a ready backend preview
+      // is still a live (billable) environment until torn down.
+      const readyPreviews = await this.deps.repo.listReadyPreviews(25);
+      for (const job of readyPreviews) {
         await this.maybePingIdle(job).catch((err) =>
           logger.warn({ jobId: job.id, err: String((err as Error)?.message ?? err) }, 'devops idle ping failed'),
         );

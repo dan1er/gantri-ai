@@ -11,7 +11,7 @@ const job: Job = {
 
 describe('JobsRunner.tick', () => {
   it('advances each active job, persists the patch, and refreshes Slack', async () => {
-    const repo = { listActive: vi.fn().mockResolvedValue([job]), update: vi.fn().mockResolvedValue(undefined) } as any;
+    const repo = { listActive: vi.fn().mockResolvedValue([job]), listReadyPreviews: vi.fn().mockResolvedValue([]), update: vi.fn().mockResolvedValue(undefined) } as any;
     const advance = vi.fn().mockResolvedValue({ status: 'backend_running' });
     const slack = { chat: { update: vi.fn().mockResolvedValue({}) } } as any;
     const runner = new JobsRunner({ repo, advance, slack, gh: {} as any });
@@ -21,7 +21,7 @@ describe('JobsRunner.tick', () => {
   });
 
   it('does not update Slack when the patch is empty', async () => {
-    const repo = { listActive: vi.fn().mockResolvedValue([job]), update: vi.fn() } as any;
+    const repo = { listActive: vi.fn().mockResolvedValue([job]), listReadyPreviews: vi.fn().mockResolvedValue([]), update: vi.fn() } as any;
     const advance = vi.fn().mockResolvedValue({});
     const slack = { chat: { update: vi.fn() } } as any;
     const runner = new JobsRunner({ repo, advance, slack, gh: {} as any });
@@ -31,7 +31,7 @@ describe('JobsRunner.tick', () => {
   });
 
   it('marks a job failed when advance throws', async () => {
-    const repo = { listActive: vi.fn().mockResolvedValue([job]), update: vi.fn().mockResolvedValue(undefined) } as any;
+    const repo = { listActive: vi.fn().mockResolvedValue([job]), listReadyPreviews: vi.fn().mockResolvedValue([]), update: vi.fn().mockResolvedValue(undefined) } as any;
     const advance = vi.fn().mockRejectedValue(new Error('kaboom'));
     const slack = { chat: { update: vi.fn().mockResolvedValue({}) } } as any;
     const runner = new JobsRunner({ repo, advance, slack, gh: {} as any });
@@ -49,7 +49,7 @@ describe('JobsRunner.tick', () => {
   it('pings the requester when a ready backend preview has been idle over an hour', async () => {
     const old = new Date(Date.now() - 2 * 3_600_000).toISOString();
     const preview = readyPreview({ createdAt: old });
-    const repo = { listActive: vi.fn().mockResolvedValue([preview]), update: vi.fn().mockResolvedValue(undefined) } as any;
+    const repo = { listActive: vi.fn().mockResolvedValue([]), listReadyPreviews: vi.fn().mockResolvedValue([preview]), update: vi.fn().mockResolvedValue(undefined) } as any;
     const slack = { chat: { update: vi.fn(), postMessage: vi.fn().mockResolvedValue({}) } } as any;
     const runner = new JobsRunner({ repo, advance: vi.fn().mockResolvedValue({}), slack, gh: {} as any });
     await runner.tick();
@@ -66,7 +66,7 @@ describe('JobsRunner.tick', () => {
     const fresh = readyPreview({ createdAt: new Date().toISOString() });
     const recentlyPinged = readyPreview({ createdAt: new Date(Date.now() - 5 * 3_600_000).toISOString(), idlePingedAt: new Date().toISOString() });
     for (const preview of [fresh, recentlyPinged]) {
-      const repo = { listActive: vi.fn().mockResolvedValue([preview]), update: vi.fn() } as any;
+      const repo = { listActive: vi.fn().mockResolvedValue([]), listReadyPreviews: vi.fn().mockResolvedValue([preview]), update: vi.fn() } as any;
       const slack = { chat: { update: vi.fn(), postMessage: vi.fn() } } as any;
       const runner = new JobsRunner({ repo, advance: vi.fn().mockResolvedValue({}), slack, gh: {} as any });
       await runner.tick();
@@ -76,7 +76,7 @@ describe('JobsRunner.tick', () => {
 
   it('does not ping a frontend-only preview (no backend cost)', async () => {
     const fe = readyPreview({ createdAt: new Date(Date.now() - 2 * 3_600_000).toISOString(), spec: { frontends: [{ repo: 'mantle', ref: 'x', url: 'https://u' }] } });
-    const repo = { listActive: vi.fn().mockResolvedValue([fe]), update: vi.fn() } as any;
+    const repo = { listActive: vi.fn().mockResolvedValue([]), listReadyPreviews: vi.fn().mockResolvedValue([fe]), update: vi.fn() } as any;
     const slack = { chat: { update: vi.fn(), postMessage: vi.fn() } } as any;
     const runner = new JobsRunner({ repo, advance: vi.fn().mockResolvedValue({}), slack, gh: {} as any });
     await runner.tick();
@@ -89,7 +89,7 @@ describe('JobsRunner.tick', () => {
       spec: { deployBackend: { tag: 'deploy-5198-2026.06.08', sha: 's', pr: 5198, url: 'https://api.gantri.com', prevDeployTag: 'deploy-5196-2026.06.08' } },
       requestedBy: 'U1', channelId: 'C1', messageTs: 'tsD', runId: 9, error: null, createdAt: 't', updatedAt: 't',
     };
-    const repo = { listActive: vi.fn().mockResolvedValue([deployJob]), update: vi.fn().mockResolvedValue(undefined) } as any;
+    const repo = { listActive: vi.fn().mockResolvedValue([deployJob]), listReadyPreviews: vi.fn().mockResolvedValue([]), update: vi.fn().mockResolvedValue(undefined) } as any;
     const advance = vi.fn().mockResolvedValue({ status: 'ready' });
     const slack = { chat: { update: vi.fn().mockResolvedValue({}), postMessage: vi.fn().mockResolvedValue({}) } } as any;
     const runner = new JobsRunner({ repo, advance, slack, gh: {} as any });

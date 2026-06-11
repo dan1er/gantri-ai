@@ -66,6 +66,23 @@ export class DevopsJobsRepo {
     return (data as Row[]).map(toJob);
   }
 
+  /**
+   * Ready previews — live environments, NOT returned by listActive ('ready' is
+   * a terminal status there). The runner polls these separately for the hourly
+   * idle reminder; they only leave this list when torn down.
+   */
+  async listReadyPreviews(limit = 25): Promise<Job[]> {
+    const { data, error } = await this.client
+      .from('devops_jobs')
+      .select('*')
+      .eq('kind', 'preview')
+      .eq('status', 'ready')
+      .order('created_at', { ascending: true })
+      .limit(limit);
+    if (error) throw new Error(`devops_jobs ready previews list failed: ${error.message}`);
+    return (data as Row[]).map(toJob);
+  }
+
   async update(id: string, patch: UpdateJobInput): Promise<void> {
     const row: Record<string, unknown> = { updated_at: new Date().toISOString() };
     if (patch.status !== undefined) row.status = patch.status;

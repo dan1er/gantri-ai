@@ -23,14 +23,16 @@ export async function advanceDeployJob(job: Job, deps: ProvisionerDeps): Promise
   const fes = job.spec.deployFrontends ?? [];
   const gateScope = job.spec.e2e?.scope;
 
-  // Backend half (backend + fullstack) — deploys first.
+  // Backend half (backend + fullstack) — deploys first. The marker gains a
+  // #attempt suffix on retries so the poller can't latch onto the failed run.
   if ((job.target === 'backend' || job.target === 'fullstack') && b && !b.url) {
+    const marker = b.attempt ? `${job.id}#${b.attempt}` : job.id;
     if (job.status === 'pending') {
-      await deps.gh.dispatch(PORTER, PROD_WF, 'master', { tag: b.tag, job_id: job.id });
+      await deps.gh.dispatch(PORTER, PROD_WF, 'master', { tag: b.tag, job_id: marker });
       return { status: 'backend_running' };
     }
     if (job.status === 'backend_running' && job.runId == null) {
-      const runId = await deps.gh.findRunByMarker(PORTER, PROD_WF, job.id);
+      const runId = await deps.gh.findRunByMarker(PORTER, PROD_WF, marker);
       return runId == null ? {} : { runId };
     }
     if (job.status === 'backend_running' && job.runId != null) {

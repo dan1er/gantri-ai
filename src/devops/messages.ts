@@ -205,10 +205,11 @@ function renderDeploy(job: Job): unknown[] {
     section(`${icon} *${headline}* — requested by <@${job.requestedBy}>${frags.length ? `  ·  ${frags.join('  ·  ')}` : ''}`),
   ];
 
-  // A frontend can fail its gate or its deploy without blocking the others;
-  // offer a retry that re-attempts only the unfinished ones. Kept on the main
-  // message — a failed deploy needs its fix visible, not buried in the thread.
-  if (job.status === 'failed' && anyBlocked) {
+  // A failed component is retriable: frontends re-run their own pipelines, a
+  // failed backend re-dispatches prod-deploy. Kept on the main message — a
+  // failed deploy needs its fix visible, not buried in the thread.
+  const backendFailed = !!b && !b.url && job.status === 'failed';
+  if (job.status === 'failed' && (anyBlocked || backendFailed)) {
     blocks.push({
       type: 'actions',
       elements: [{

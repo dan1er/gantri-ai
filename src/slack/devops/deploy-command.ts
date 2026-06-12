@@ -383,9 +383,10 @@ export function registerDeployCommand(app: App, deps: DeployCommandDeps): void {
     await respond({ replace_original: true, text: '🚫 Deploy cancelled.' });
   });
 
-  // Retry after a deploy-phase failure (E2E already passed): clear the failed
-  // frontends' progress and re-enter the deploy phase, skipping the gate.
-  // Succeeded components keep their URLs and aren't redeployed.
+  // Retry after a deploy failure. Frontends: clear the failed ones' progress
+  // and re-enter the deploy phase (succeeded components keep their URLs).
+  // Backend: bump the attempt (fresh run marker) and restart from pending so
+  // the runner re-dispatches prod-deploy.
   app.action('deploy_retry', async ({ ack, body, action }: any) => {
     await ack();
     try {
@@ -404,12 +405,22 @@ export function registerDeployCommand(app: App, deps: DeployCommandDeps): void {
         if (f.error) return { ...f, error: undefined, deploymentId: undefined, projectId: undefined, deploymentUrl: undefined };
         return f; // already live — keep it
       });
-      const spec = { ...job.spec, deployFrontends };
-      await deps.repo.update(jobId, { status: 'frontend_running', error: null, spec });
+      const be = job.spec.deployBackend;
+      const backendFailed = !!be && !be.url;
+      const spec = {
+        ...job.spec,
+        deployFrontends,
+        ...(backendFailed ? { deployBackend: { ...be, attempt: (be.attempt ?? 0) + 1 } } : {}),
+      };
+      await deps.repo.update(jobId, {
+        status: backendFailed ? 'pending' : 'frontend_running',
+        ...(backendFailed ? { runId: null } : {}),
+        error: null, spec,
+      });
       if (job.messageTs) {
         await deps.slack.chat.update({
           channel: job.channelId, ts: job.messageTs, text: 'retrying deploy…',
-          blocks: renderJobBlocks({ ...job, status: 'frontend_running', error: null, spec } as any) as any,
+          blocks: renderJobBlocks({ ...job, status: backendFailed ? 'pending' : 'frontend_running', error: null, spec } as any) as any,
           unfurl_links: false, unfurl_media: false,
         } as any).catch(() => undefined);
       }

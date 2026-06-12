@@ -40,6 +40,9 @@ export interface DeployItem {
   // deploy — captured at job creation. Rolling back = re-promoting it through the
   // same prod-deploy path. Also shown in the thread as the manual fallback.
   prevDeployTag?: string;
+  // Backend only: bumps on each retry so the re-dispatched prod-deploy run gets
+  // a fresh marker (job_id#N) and the poller can't latch onto the failed run.
+  attempt?: number;
 }
 
 export interface JobSpec {

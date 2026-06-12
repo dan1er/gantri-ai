@@ -170,13 +170,14 @@ function renderE2e(job: Job): unknown[] {
 // One compact fragment per deploy component for the main message — name
 // (linked to prod once live) + a phase emoji; verbose tags/links live in the
 // threaded details.
-function deployFragment(name: string, item: DeployItem, backendDeploying: boolean): string {
+function deployFragment(name: string, item: DeployItem, backendDeploying: boolean, jobFailed = false): string {
   if (item.url) return `<${item.url}|${name}> ✅`;
-  if (item.error) return `*${name}* ✗`;
+  // An E2E block beats the generic ✗ — its link explains WHY it didn't ship.
   if (item.e2ePassed === false) {
     const link = item.e2eQaseRunId ? qaseRun(item.e2eQaseRunId) : item.e2eRunId ? ghRun(item.e2eRunId) : undefined;
     return link ? `*${name}* 🚫 <${link}|E2E failed>` : `*${name}* 🚫 E2E failed`;
   }
+  if (item.error || jobFailed) return `*${name}* ✗`;
   if (item.e2ePassed === true || backendDeploying) return `*${name}* 🚀`;
   if (item.e2eRunId) return `*${name}* <${ghRun(item.e2eRunId)}|🧪 testing>`;
   return `*${name}* ⏳`;
@@ -191,10 +192,12 @@ function renderDeploy(job: Job): unknown[] {
 
   const b = job.spec.deployBackend;
   const frags: string[] = [];
-  if (b) frags.push(deployFragment('Porter', b, job.status === 'backend_running'));
+  // On a failed job, components that never produced a URL show ✗ (a backend
+  // item carries no per-item error, only the job-level one).
+  if (b) frags.push(deployFragment('Porter', b, job.status === 'backend_running', job.status === 'failed'));
   let anyBlocked = false;
   for (const f of job.spec.deployFrontends ?? []) {
-    frags.push(deployFragment(REPO_DISPLAY[f.repo ?? ''] ?? f.repo ?? 'frontend', f, false));
+    frags.push(deployFragment(REPO_DISPLAY[f.repo ?? ''] ?? f.repo ?? 'frontend', f, false, job.status === 'failed'));
     if (f.error || f.e2ePassed === false) anyBlocked = true;
   }
   // Single line: status + requester + components. Rollback lives in the thread.
@@ -329,7 +332,9 @@ export function renderJobDetailBlocks(job: Job): unknown[] | null {
     const b = job.spec.deployBackend;
     if (b) {
       const head = b.url ? `<${b.url}|Porter>` : '*Porter*';
-      const state = b.url ? ' ✅ live' : ' _(not deployed)_';
+      const state = b.url ? ' ✅ live'
+        : job.status === 'failed' ? ' ✗ _not deployed_'
+        : ' _(deploying…)_';
       blocks.push(section(`${head} · ${tagLink('porter', b.tag)}${state}`));
     }
     for (const f of job.spec.deployFrontends ?? []) blocks.push(section(frontendLine(f)));

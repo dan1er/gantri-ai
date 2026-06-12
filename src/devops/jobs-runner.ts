@@ -45,8 +45,15 @@ function statusNote(job: Job): string | null {
         ? `✅ Deployed to production\n↩️ Previous deploy: \`${prev}\` — if the *Rollback backend* button fails, roll back manually with \`/deploy ${prev}\` (or dispatch prod-deploy with that tag).`
         : '✅ Deployed to production';
     }
-    case 'failed':
-      return job.kind === 'deploy' ? '✗ Some frontends did not deploy — see message above' : `✗ Failed${job.error ? `: ${job.error}` : ''}`;
+    case 'failed': {
+      if (job.kind !== 'deploy') return `✗ Failed${job.error ? `: ${job.error}` : ''}`;
+      // Only blame frontends when a frontend actually failed — a backend-only
+      // deploy failure reports its own error.
+      const feFailed = (job.spec.deployFrontends ?? []).some((f) => f.error || f.e2ePassed === false);
+      return feFailed
+        ? '✗ Some frontends did not deploy — see message above'
+        : `✗ Deploy failed${job.error ? ` — ${job.error}` : ''}`;
+    }
     case 'torn_down': return '🧹 Torn down';
     default: return null;
   }

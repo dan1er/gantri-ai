@@ -21,6 +21,17 @@ describe('advanceCronJob', () => {
     expect(patch.status).toBe('backend_running');
   });
 
+  it('preview run dispatches with the preview_slug input', async () => {
+    const gh = { dispatch: vi.fn().mockResolvedValue(undefined) } as any;
+    const previewCron: Job = {
+      ...cronJob, spec: { cronRun: { environment: 'preview', cronjob: 'post-created-order-actions', previewSlug: 'as-2306' } },
+    };
+    await advanceCronJob(previewCron, { gh });
+    expect(gh.dispatch).toHaveBeenCalledWith('porter', 'run-cron.yml', 'master', {
+      environment: 'preview', cronjob: 'post-created-order-actions', preview_slug: 'as-2306', job_id: 'c1',
+    });
+  });
+
   it('resolves the run id then reports success/failure', async () => {
     const running: Job = { ...cronJob, status: 'backend_running' };
     const gh = {
@@ -52,6 +63,32 @@ describe('cron modal', () => {
       },
     };
     expect(parseCronSubmission(v as any)).toEqual({ environment: 'production', cronjob: 'send-gift-cards' });
+  });
+
+  it('preview env adds a preview-target picker and offers all three environments', () => {
+    const text = JSON.stringify(buildCronModal('preview'));
+    expect(text).toContain('cron_preview_input'); // the preview-target picker block
+    expect(text).toContain('cron_block_preview');
+    expect(text).toContain('"value":"preview"');
+    expect(text).toContain('"value":"staging"');
+    expect(text).toContain('"value":"production"');
+    // staging modal has no preview picker
+    expect(JSON.stringify(buildCronModal('staging'))).not.toContain('cron_preview_input');
+  });
+
+  it('parseCronSubmission carries the preview slug', () => {
+    const v = {
+      state: {
+        values: {
+          env_block: { cron_env_input: { selected_option: { value: 'preview' } } },
+          preview_block: { cron_preview_input: { selected_option: { value: 'as-2306' } } },
+          cron_block_preview: { cron_name_input: { selected_option: { value: 'post-created-order-actions' } } },
+        },
+      },
+    };
+    expect(parseCronSubmission(v as any)).toEqual({
+      environment: 'preview', cronjob: 'post-created-order-actions', previewSlug: 'as-2306',
+    });
   });
 });
 
@@ -96,5 +133,15 @@ describe('renderJobBlocks (cron)', () => {
     const text = JSON.stringify(renderJobBlocks(job));
     expect(text).toContain('*Send gift cards* (`send-gift-cards`)');
     expect(text).toContain('Emails gift cards on their scheduled send date');
+  });
+
+  it('shows the preview badge with the target slug', () => {
+    const job: Job = {
+      ...cronJob, status: 'backend_running',
+      spec: { cronRun: { environment: 'preview', cronjob: 'post-created-order-actions', previewSlug: 'as-2306' } },
+    };
+    const text = JSON.stringify(renderJobBlocks(job));
+    expect(text).toContain('preview');
+    expect(text).toContain('as-2306');
   });
 });

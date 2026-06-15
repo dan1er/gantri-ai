@@ -15,7 +15,13 @@ export interface CronCommandDeps {
   gh: GithubDispatcher;
 }
 
-type CronEnv = 'staging' | 'production';
+type CronEnv = 'staging' | 'production' | 'preview';
+
+const ENV_LABEL: Record<CronEnv, string> = {
+  staging: '🟢 staging',
+  production: '🔴 production',
+  preview: '🔬 preview',
+};
 
 /**
  * The CronJob catalog comes straight from porter's k8s manifests — the same
@@ -74,32 +80,46 @@ export async function loadCronjobs(gh: GithubDispatcher, env: CronEnv): Promise<
 
 export function buildCronModal(env: CronEnv = 'staging') {
   const opt = (text: string, value: string) => ({ text: { type: 'plain_text' as const, text }, value });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Slack block union
+  const blocks: any[] = [
+    {
+      // dispatch_action: switching environment re-renders the modal so the
+      // cron list matches (prod has extra crons), preview gains a target picker,
+      // and the picked env lands in private_metadata — the only reliable source
+      // during typeahead requests.
+      type: 'input', block_id: 'env_block', dispatch_action: true,
+      label: { type: 'plain_text', text: 'Environment' },
+      element: {
+        type: 'static_select', action_id: 'cron_env_input',
+        initial_option: opt(ENV_LABEL[env], env),
+        options: [opt(ENV_LABEL.staging, 'staging'), opt(ENV_LABEL.production, 'production'), opt(ENV_LABEL.preview, 'preview')],
+      },
+    },
+  ];
+  // Preview runs need a target preview environment (which porter-preview-<slug>).
+  if (env === 'preview') {
+    blocks.push({
+      type: 'input', block_id: 'preview_block',
+      label: { type: 'plain_text', text: 'Preview environment' },
+      element: {
+        type: 'external_select', action_id: 'cron_preview_input', min_query_length: 0,
+        placeholder: { type: 'plain_text', text: 'Pick a live preview…' },
+      },
+    });
+  }
+  blocks.push({
+    type: 'input', block_id: `cron_block_${env}`,
+    label: { type: 'plain_text', text: 'Cron job' },
+    element: {
+      type: 'external_select', action_id: 'cron_name_input', min_query_length: 0,
+      placeholder: { type: 'plain_text', text: `Pick a ${env} cron job…` },
+    },
+  });
   return {
     type: 'modal' as const, callback_id: 'cron_run_submit',
     title: { type: 'plain_text' as const, text: 'Run a porter cron' },
     submit: { type: 'plain_text' as const, text: 'Run' },
-    blocks: [
-      {
-        // dispatch_action: switching environment re-renders the modal so the
-        // cron list matches (prod has extra crons) and the picked env lands in
-        // private_metadata — the only reliable source during typeahead requests.
-        type: 'input', block_id: 'env_block', dispatch_action: true,
-        label: { type: 'plain_text', text: 'Environment' },
-        element: {
-          type: 'static_select', action_id: 'cron_env_input',
-          initial_option: opt(env === 'production' ? '🔴 production' : '🟢 staging', env),
-          options: [opt('🟢 staging', 'staging'), opt('🔴 production', 'production')],
-        },
-      },
-      {
-        type: 'input', block_id: `cron_block_${env}`,
-        label: { type: 'plain_text', text: 'Cron job' },
-        element: {
-          type: 'external_select', action_id: 'cron_name_input', min_query_length: 0,
-          placeholder: { type: 'plain_text', text: `Pick a ${env} cron job…` },
-        },
-      },
-    ],
+    blocks,
   };
 }
 
@@ -114,7 +134,8 @@ export function parseCronSubmission(v: ViewState): NonNullable<JobSpec['cronRun'
     (v.state.values.env_block?.cron_env_input?.selected_option?.value as CronEnv) ?? 'staging';
   const cronBlockId = Object.keys(v.state.values).find((k) => k.startsWith('cron_block')) ?? 'cron_block';
   const cronjob = v.state.values[cronBlockId]?.cron_name_input?.selected_option?.value ?? '';
-  return { environment: env, cronjob };
+  const previewSlug = v.state.values.preview_block?.cron_preview_input?.selected_option?.value;
+  return { environment: env, cronjob, ...(previewSlug ? { previewSlug } : {}) };
 }
 
 export function registerCronCommand(app: App, deps: CronCommandDeps): void {
@@ -183,12 +204,37 @@ export function registerCronCommand(app: App, deps: CronCommandDeps): void {
     });
   });
 
+  // Live previews for the preview-target picker — source of truth is the
+  // bot's own ready preview jobs; the namespace is porter-preview-<slug>.
+  app.options('cron_preview_input', async ({ ack }: any) => {
+    const slugs: { slug: string; ref?: string }[] = [];
+    try {
+      const seen = new Set<string>();
+      for (const p of await deps.repo.listReadyPreviews(25)) {
+        const slug = p.spec.backend?.slug;
+        if (!slug || seen.has(slug)) continue; // a slug can have several ready jobs
+        seen.add(slug);
+        slugs.push({ slug, ref: p.spec.backend?.ref });
+      }
+    } catch (err) {
+      logger.warn({ err: String((err as Error)?.message ?? err) }, 'preview list load failed');
+    }
+    await ack({
+      options: slugs.slice(0, 100).map((s) => ({
+        text: { type: 'plain_text' as const, text: s.slug.slice(0, 75) },
+        ...(s.ref ? { description: { type: 'plain_text' as const, text: s.ref.slice(0, 75) } } : {}),
+        value: s.slug.slice(0, 75),
+      })),
+    });
+  });
+
   app.view('cron_run_submit', async ({ ack, body, view }) => {
     await ack();
     const channel = channelFromView(view as any, deps.opsChannelId);
     const cronRun = parseCronSubmission(view as any);
     try {
       if (!cronRun.cronjob) throw new Error('pick a cron job');
+      if (cronRun.environment === 'preview' && !cronRun.previewSlug) throw new Error('pick a preview environment');
       if (cronRun.environment === 'production') {
         // Production touches real data — explicit confirm step, deploy-style.
         await deps.slack.chat.postEphemeral({

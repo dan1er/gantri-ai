@@ -19,6 +19,8 @@ export async function advanceCronJob(job: Job, deps: ProvisionerDeps): Promise<J
     await deps.gh.dispatch(PORTER, CRON_WF, 'master', {
       environment: run.environment,
       cronjob: run.cronjob,
+      // preview runs target porter-preview-<slug>; staging/prod ignore it.
+      ...(run.previewSlug ? { preview_slug: run.previewSlug } : {}),
       job_id: job.id,
     });
     return { status: 'backend_running' };

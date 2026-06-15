@@ -71,8 +71,9 @@ export interface JobSpec {
   };
   // On-demand porter CronJob run (kind = 'cron', the /cron Slack command).
   cronRun?: {
-    environment: 'staging' | 'production';
+    environment: 'staging' | 'production' | 'preview';
     cronjob: string; // name WITHOUT the env prefix (run-cron.yml adds it)
+    previewSlug?: string; // required when environment='preview' — the porter-preview-<slug> target
     display?: string; // human label from the gantri.com/display-name annotation
     description?: string; // one-liner from the gantri.com/description annotation
   };

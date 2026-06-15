@@ -122,7 +122,10 @@ function renderCron(job: Job): unknown[] {
         ? 'Cron run failed'
         : 'Cron run';
   const section = (text: string) => ({ type: 'section', text: { type: 'mrkdwn', text } });
-  const envBadge = r?.environment === 'production' ? '🔴 *production*' : '🟢 staging';
+  const envBadge =
+    r?.environment === 'production' ? '🔴 *production*'
+      : r?.environment === 'preview' ? `🔬 preview \`${r.previewSlug ?? '?'}\``
+        : '🟢 staging';
   // Lead with the human label when porter annotates one; the raw k8s name
   // stays visible so logs/kubectl cross-referencing is one copy-paste away.
   const cronLabel = r?.display

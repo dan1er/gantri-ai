@@ -46,12 +46,34 @@ export class VercelClient {
     return { Authorization: `Bearer ${this.deps.token}`, 'Content-Type': 'application/json' };
   }
 
+  /**
+   * Turn a failed Vercel response into an actionable Error. The common silent
+   * killer is a personal token whose SAML/SSO session with the team has lapsed:
+   * Vercel returns 403 `forbidden` with `saml:true` and "re-authenticate to this
+   * scope" — identical for EVERY project, so a bare "403" reads like the one
+   * project that happened to fail first. Say what's actually wrong instead.
+   */
+  private async vercelError(res: Response, context: string): Promise<Error> {
+    let body: { error?: { message?: string; scope?: string; saml?: boolean } } = {};
+    try { body = (await res.json()) as typeof body; } catch { /* non-JSON */ }
+    const e = body.error;
+    if (res.status === 403 && (e?.saml || /re-authenticate to this scope/i.test(e?.message ?? ''))) {
+      const scope = e?.scope ?? this.deps.teamId;
+      return new Error(
+        `Vercel ${context} failed: the bot's token lost SSO access to the "${scope}" team ` +
+        `(this affects ALL projects, not just this one). Regenerate VERCEL_TOKEN with team ` +
+        `access and run \`fly secrets set VERCEL_TOKEN=… -a gantri-ai-bot\`.`,
+      );
+    }
+    return new Error(`Vercel ${context} failed: HTTP ${res.status}${e?.message ? ` — ${e.message}` : ''}`);
+  }
+
   private async project(repo: FrontendRepo): Promise<{ id: string; repoId: number; name: string }> {
     const name = PROJECT_BY_REPO[repo];
     const res = await this.fetch(`https://api.vercel.com/v9/projects/${name}?teamId=${this.deps.teamId}`, {
       headers: this.headers(),
     });
-    if (!res.ok) throw new Error(`vercel project ${name} lookup failed: ${res.status}`);
+    if (!res.ok) throw await this.vercelError(res, `project ${name} lookup`);
     const body = (await res.json()) as { id: string; link?: { repoId?: number } };
     return { id: body.id, repoId: body.link?.repoId ?? 0, name };
   }
@@ -85,14 +107,14 @@ export class VercelClient {
         gitBranch: ref, // the REAL branch — Vercel 400s on a branch the repo doesn't have
       }),
     });
-    if (!envRes.ok) throw new Error(`vercel env set failed: ${envRes.status}`);
+    if (!envRes.ok) throw await this.vercelError(envRes, `env set for ${name}`);
 
     const depRes = await this.fetch(`https://api.vercel.com/v13/deployments?teamId=${this.deps.teamId}`, {
       method: 'POST',
       headers: this.headers(),
       body: JSON.stringify({ name, project: id, gitSource: { type: 'github', ref, repoId } }),
     });
-    if (!depRes.ok) throw new Error(`vercel redeploy failed: ${depRes.status}`);
+    if (!depRes.ok) throw await this.vercelError(depRes, `redeploy of ${name}`);
     const dep = (await depRes.json()) as { inspectorUrl?: string; url?: string };
     // The Vercel dashboard page for the deployment (build logs / status).
     const deploymentUrl = dep.inspectorUrl ?? (dep.url ? `https://${dep.url}` : undefined);
@@ -130,7 +152,7 @@ export class VercelClient {
       headers: this.headers(),
       body: JSON.stringify({ name, project: id, target: 'production', gitSource: { type: 'github', ref, repoId } }),
     });
-    if (!res.ok) throw new Error(`vercel prod deploy failed: ${res.status}`);
+    if (!res.ok) throw await this.vercelError(res, `prod deploy of ${name}`);
     const dep = (await res.json()) as { id?: string; uid?: string; inspectorUrl?: string };
     return { projectId: id, deploymentId: dep.id ?? dep.uid ?? '', inspectorUrl: dep.inspectorUrl };
   }
@@ -139,7 +161,7 @@ export class VercelClient {
     const res = await this.fetch(`https://api.vercel.com/v13/deployments/${deploymentId}?teamId=${this.deps.teamId}`, {
       headers: this.headers(),
     });
-    if (!res.ok) throw new Error(`vercel deployment get failed: ${res.status}`);
+    if (!res.ok) throw await this.vercelError(res, 'deployment status');
     const body = (await res.json()) as { readyState?: string; status?: string };
     const s = body.readyState ?? body.status ?? '';
     if (s === 'READY') return 'ready';
@@ -161,6 +183,6 @@ export class VercelClient {
       const body = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
       if (/already the current production deployment/i.test(body.error?.message ?? '')) return;
     }
-    throw new Error(`vercel promote failed: ${res.status}`);
+    throw await this.vercelError(res, 'promote to production');
   }
 }

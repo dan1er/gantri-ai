@@ -101,6 +101,22 @@ describe('findSkipped', () => {
     expect(out[0]).toContain('https://github.com/gantri/porter/releases/tag/deploy-x-5209');
     expect(out[0]).toContain('https://github.com/gantri/porter/pull/5209');
   });
+
+  it('caps the skipped list so the confirm never blows past Slack block limits', async () => {
+    // The first frontend deploy via the bot has no high-water mark, so every
+    // historical tag counts as skipped. Unbounded, this overflowed the 3000-char
+    // section limit and the confirm silently failed to render.
+    const many = Array.from({ length: 12 }, (_v, i) =>
+      t(2000 + i, `2026-06-${String(10 + i).padStart(2, '0')}T10:00:00Z`));
+    const d = {
+      repo: { listDeployJobs: vi.fn().mockResolvedValue([]) }, // nothing deployed via the bot
+      gh: { listDeployTags: vi.fn().mockResolvedValue(many), resolveRef: vi.fn().mockRejectedValue(new Error('no ref')) },
+    } as any;
+    const out = await findSkipped(d, { deployFrontends: [{ repo: 'mantle', tag: 'deploy-x-2011', sha: 's', pr: 2011 }] });
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatch(/…and \d+ more/);          // truncated
+    expect((out[0].match(/ • /g) ?? []).length).toBe(7); // 6 shown + the "…and N more" line
+  });
 });
 
 describe('previousBackendDeployTag', () => {

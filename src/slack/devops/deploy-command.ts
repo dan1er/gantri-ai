@@ -5,6 +5,7 @@ import type { GithubDispatcher } from '../../devops/github.js';
 import type { FrontendRepo, DeployItem, Job } from '../../devops/types.js';
 import { renderJobBlocks } from '../../devops/messages.js';
 import { decideCommandChannel, channelFromView } from './channel-access.js';
+import { logger } from '../../logger.js';
 
 export interface DeployCommandDeps {
   repo: DevopsJobsRepo;
@@ -204,10 +205,15 @@ async function confirmBlocks(gh: GithubDispatcher, target: string, spec: { deplo
     { type: 'section', text: { type: 'mrkdwn', text: `:warning: *Deploy to PRODUCTION?*\n${lines.join('\n')}` } },
   ];
   if (skipped.length) {
-    blocks.push({
-      type: 'section',
-      text: { type: 'mrkdwn', text: `:rotating_light: *This also ships earlier un-deployed PRs* (they're bundled into your tag):\n${skipped.join('\n')}\n_Their changes go to production with this deploy — confirm that's intended._` },
-    });
+    // Defensive truncation: a section's text field maxes at 3000 chars in
+    // Slack. findSkipped already caps per repo, but fullstack stacks several —
+    // keep the whole block safely under the limit so the confirm always renders.
+    const header = `:rotating_light: *This also ships earlier un-deployed PRs* (they're bundled into your tag):\n`;
+    const footer = `\n_Their changes go to production with this deploy — confirm that's intended._`;
+    const budget = 2900 - header.length - footer.length;
+    let body = skipped.join('\n');
+    if (body.length > budget) body = `${body.slice(0, budget)}\n_…list truncated_`;
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `${header}${body}${footer}` } });
   }
   blocks.push({
     type: 'actions',
@@ -248,10 +254,18 @@ export async function findSkipped(deps: Pick<DeployCommandDeps, 'repo' | 'gh'>, 
       t.committedAt && t.committedAt < picked.committedAt && t.committedAt > cutoff &&
       t.tag !== pickedTag && !used.has(t.tag));
     if (skippedTags.length) {
+      // Cap the rendered list: the FIRST frontend deploy via the bot has no
+      // high-water mark, so EVERY historical tag counts as skipped — left
+      // unbounded the confirm's section text blows past Slack's 3000-char block
+      // limit and the whole confirm silently fails to render.
+      const MAX = 6;
+      const shown = skippedTags.slice(0, MAX);
       const parts = await Promise.all(
-        skippedTags.map(async (t) => `${tagLink(repo, t.tag)}${await tagContext(deps.gh, repo, t.pr)}`),
+        shown.map(async (t) => `${tagLink(repo, t.tag)}${await tagContext(deps.gh, repo, t.pr)}`),
       );
-      out.push(`*${name}*:\n${parts.map((p) => `    • ${p}`).join('\n')}`);
+      const more = skippedTags.length - shown.length;
+      const list = parts.map((p) => `    • ${p}`).join('\n') + (more > 0 ? `\n    • _…and ${more} more_` : '');
+      out.push(`*${name}*:\n${list}`);
     }
   };
   if (spec.deployBackend) await check('porter', 'Porter', spec.deployBackend.tag);
@@ -268,7 +282,24 @@ async function postConfirm(
   const blocks = await confirmBlocks(deps.gh, target, spec, skipped);
   await deps.slack.chat
     .postEphemeral({ channel, user: userId, text: 'Confirm deploy', blocks: blocks as any })
-    .catch(() => {});
+    .catch(async (err) => {
+      // Never fail the confirm silently — surface it and offer a bare-bones
+      // confirm so the user can still proceed.
+      logger.warn({ err: String((err as Error)?.message ?? err), target }, 'deploy confirm ephemeral failed');
+      await deps.slack.chat
+        .postEphemeral({
+          channel, user: userId,
+          text: `:warning: Confirm deploy of *${target}* to PRODUCTION? (the detailed preview failed to render)`,
+          blocks: [{
+            type: 'actions',
+            elements: [
+              { type: 'button', text: { type: 'plain_text', text: 'Deploy' }, style: 'primary', action_id: 'deploy_confirm', value: JSON.stringify({ target, spec }) },
+              { type: 'button', text: { type: 'plain_text', text: 'Cancel' }, action_id: 'deploy_cancel', value: 'x' },
+            ],
+          }] as any,
+        })
+        .catch((e) => logger.warn({ err: String((e as Error)?.message ?? e) }, 'deploy confirm fallback also failed'));
+    });
 }
 
 export function registerDeployCommand(app: App, deps: DeployCommandDeps): void {

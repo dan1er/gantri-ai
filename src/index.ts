@@ -47,6 +47,8 @@ import type { App as SlackApp } from '@slack/bolt';
 import { PipedriveConnector } from './connectors/pipedrive/connector.js';
 import { PipedriveApiClient } from './connectors/pipedrive/client.js';
 import { PipedriveWritesRepo } from './storage/repositories/pipedrive-writes.js';
+import { SendgridConnector } from './connectors/sendgrid/connector.js';
+import { SendgridApiClient } from './connectors/sendgrid/client.js';
 import { buildSearchConsoleConnector } from './connectors/gsc/connector.js';
 import { Orchestrator, getActiveActor, getActiveThread, runWithContext } from './orchestrator/orchestrator.js';
 import { buildSlackApp } from './slack/app.js';
@@ -84,6 +86,7 @@ async function main() {
     klaviyoApiKey,
     gscOauthClientId, gscOauthClientSecret, gscOauthRefreshToken,
     pipedriveApiToken,
+    sendgridApiKey,
   ] = await Promise.all([
     readVaultSecret(supabase, 'NORTHBEAM_EMAIL'),
     readVaultSecret(supabase, 'NORTHBEAM_PASSWORD'),
@@ -105,6 +108,7 @@ async function main() {
     readVaultSecret(supabase, 'GSC_OAUTH_CLIENT_SECRET').catch(() => null),
     readVaultSecret(supabase, 'GSC_OAUTH_REFRESH_TOKEN').catch(() => null),
     readVaultSecret(supabase, 'PIPEDRIVE_API_TOKEN').catch(() => null),
+    readVaultSecret(supabase, 'SENDGRID_API_KEY').catch(() => null),
   ]);
 
   const registry = new ConnectorRegistry();
@@ -365,6 +369,13 @@ async function main() {
     logger.info('pipedrive connector registered');
   } else {
     logger.warn('pipedrive not configured (PIPEDRIVE_API_TOKEN missing) — skipping registration');
+  }
+
+  if (sendgridApiKey) {
+    registry.register(new SendgridConnector({ client: new SendgridApiClient({ apiKey: sendgridApiKey }) }));
+    logger.info('sendgrid connector registered');
+  } else {
+    logger.warn('sendgrid not configured (SENDGRID_API_KEY missing) — skipping registration');
   }
 
   const claude = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });

@@ -91,3 +91,26 @@ describe('SendgridApiClient.getMessage', () => {
     expect(String(fetchImpl.mock.calls[0][0])).toContain('/v3/messages/a%2Fb');
   });
 });
+
+describe('SendgridApiClient.getTemplate', () => {
+  it('hits /v3/templates/{id} and returns { id, name, generation }, casting extras away', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      id: 'd-0df73b1cdf244d658bbd82ff7bb1252f',
+      name: 'Made Hub Invite',
+      generation: 'dynamic',
+      versions: [{ id: 'v1' }], // extra field the API returns
+    }), { status: 200 }));
+    const client = new SendgridApiClient({ apiKey: 'k', fetchImpl });
+    const out = await client.getTemplate('d-0df73b1cdf244d658bbd82ff7bb1252f');
+    expect(out).toEqual({ id: 'd-0df73b1cdf244d658bbd82ff7bb1252f', name: 'Made Hub Invite', generation: 'dynamic' });
+    expect(String(fetchImpl.mock.calls[0][0])).toContain('/v3/templates/d-0df73b1cdf244d658bbd82ff7bb1252f');
+    const [, opts] = fetchImpl.mock.calls[0];
+    expect(opts.headers.Authorization).toBe('Bearer k');
+  });
+
+  it('throws SendgridApiError on a non-200 (e.g. missing Template Engine scope)', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify({ errors: [{ message: 'access forbidden' }] }), { status: 403 }));
+    const client = new SendgridApiClient({ apiKey: 'k', fetchImpl });
+    await expect(client.getTemplate('d-x')).rejects.toMatchObject({ status: 403 });
+  });
+});

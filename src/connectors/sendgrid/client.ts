@@ -64,6 +64,14 @@ export interface SendgridMessageDetail extends SendgridMessage {
   categories?: string[];
 }
 
+/** GET /v3/templates/{id} — the dynamic-template metadata we surface. The API
+ *  returns many more fields (versions, etc.); we cast those away. */
+export interface SendgridTemplate {
+  id: string;
+  name: string;
+  generation: string;
+}
+
 /** The API's hard cap on results per /v3/messages call. */
 const MAX_LIMIT = 1000;
 
@@ -101,6 +109,16 @@ export class SendgridApiClient {
   /** GET /v3/messages/{msg_id} — full per-message detail with event timeline. */
   async getMessage(msgId: string): Promise<SendgridMessageDetail> {
     return this.request<SendgridMessageDetail>(`/v3/messages/${encodeURIComponent(msgId)}`);
+  }
+
+  /**
+   * GET /v3/templates/{id} — the template's metadata (id, name, generation).
+   * Requires the Template Engine read scope on the API key. Extra fields the
+   * API returns are cast away.
+   */
+  async getTemplate(templateId: string): Promise<SendgridTemplate> {
+    const t = await this.request<SendgridTemplate>(`/v3/templates/${encodeURIComponent(templateId)}`);
+    return { id: t.id, name: t.name, generation: t.generation };
   }
 
   // ---- internals ----

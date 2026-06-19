@@ -6,7 +6,8 @@ import { SendgridApiError } from '../../../../src/connectors/sendgrid/client.js'
 function makeStub(over: Partial<Record<keyof SendgridApiClient, unknown>> = {}): SendgridApiClient {
   return {
     listMessages: vi.fn().mockResolvedValue([]),
-    getMessage: vi.fn(),
+    getMessage: vi.fn().mockResolvedValue({ events: [] }),
+    getTemplate: vi.fn().mockResolvedValue({ id: 'd-x', name: 'Some Template', generation: 'dynamic' }),
     ...over,
   } as unknown as SendgridApiClient;
 }
@@ -43,17 +44,90 @@ describe('SendgridConnector — skeleton', () => {
 describe('sendgrid.email_activity', () => {
   it('builds a to_email query, defaults limit to 100, and maps rows to flat shape', async () => {
     const listMessages = vi.fn().mockResolvedValue([sampleRow]);
-    const conn = new SendgridConnector({ client: makeStub({ listMessages }) });
+    // getMessage returns no template_id, so the row's template stays null.
+    const getMessage = vi.fn().mockResolvedValue({ ...sampleRow, events: [] });
+    const conn = new SendgridConnector({ client: makeStub({ listMessages, getMessage }) });
     const tool = conn.tools.find((t) => t.name === 'sendgrid.email_activity')!;
     const r = await tool.execute({ toEmail: 'a@b.com', limit: 100 }) as any;
 
     expect(listMessages).toHaveBeenCalledWith({ query: 'to_email="a@b.com"', limit: 100 });
-    expect(r).toMatchObject({ toEmail: 'a@b.com', count: 1 });
+    expect(r).toMatchObject({ toEmail: 'a@b.com', count: 1, templateEnrichmentTruncated: false });
     expect(r.rows[0]).toEqual({
       msgId: 'm1', subject: 'Your order shipped', status: 'delivered',
       fromEmail: 'noreply@gantri.com', lastEventTime: '2026-06-10T12:00:00Z',
-      opensCount: 3, clicksCount: 1,
+      opensCount: 3, clicksCount: 1, template: null,
     });
+  });
+
+  it('enriches each row with template { id, name, url } via getMessage + getTemplate', async () => {
+    const listMessages = vi.fn().mockResolvedValue([sampleRow]);
+    const getMessage = vi.fn().mockResolvedValue({ ...sampleRow, events: [], template_id: 'd-abc' });
+    const getTemplate = vi.fn().mockResolvedValue({ id: 'd-abc', name: 'Made Hub Invite', generation: 'dynamic' });
+    const conn = new SendgridConnector({ client: makeStub({ listMessages, getMessage, getTemplate }) });
+    const tool = conn.tools.find((t) => t.name === 'sendgrid.email_activity')!;
+    const r = await tool.execute({ toEmail: 'a@b.com', limit: 100 }) as any;
+
+    expect(getMessage).toHaveBeenCalledWith('m1');
+    expect(r.rows[0].template).toEqual({
+      id: 'd-abc', name: 'Made Hub Invite', url: 'https://mc.sendgrid.com/dynamic-templates/d-abc',
+    });
+  });
+
+  it('resolves a repeated template id only once (per-call name cache)', async () => {
+    const rows = [
+      { ...sampleRow, msg_id: 'm1' },
+      { ...sampleRow, msg_id: 'm2' },
+    ];
+    const listMessages = vi.fn().mockResolvedValue(rows);
+    const getMessage = vi.fn().mockImplementation(async (id: string) => ({ ...sampleRow, msg_id: id, events: [], template_id: 'd-same' }));
+    const getTemplate = vi.fn().mockResolvedValue({ id: 'd-same', name: 'Shared', generation: 'dynamic' });
+    const conn = new SendgridConnector({ client: makeStub({ listMessages, getMessage, getTemplate }) });
+    const tool = conn.tools.find((t) => t.name === 'sendgrid.email_activity')!;
+    const r = await tool.execute({ toEmail: 'a@b.com', limit: 100 }) as any;
+
+    expect(getMessage).toHaveBeenCalledTimes(2);
+    expect(getTemplate).toHaveBeenCalledTimes(1); // cached on the second row
+    expect(r.rows[0].template.name).toBe('Shared');
+    expect(r.rows[1].template.name).toBe('Shared');
+  });
+
+  it('degrades a row to template null (id+url, name null) when getTemplate fails', async () => {
+    const listMessages = vi.fn().mockResolvedValue([sampleRow]);
+    const getMessage = vi.fn().mockResolvedValue({ ...sampleRow, events: [], template_id: 'd-x' });
+    const getTemplate = vi.fn().mockRejectedValue(new SendgridApiError('GET /v3/templates/d-x -> 403', 403, {}));
+    const conn = new SendgridConnector({ client: makeStub({ listMessages, getMessage, getTemplate }) });
+    const tool = conn.tools.find((t) => t.name === 'sendgrid.email_activity')!;
+    const r = await tool.execute({ toEmail: 'a@b.com', limit: 100 }) as any;
+
+    expect(r.rows[0].template).toEqual({
+      id: 'd-x', name: null, url: 'https://mc.sendgrid.com/dynamic-templates/d-x',
+    });
+  });
+
+  it('does not fail the whole tool when a single getMessage throws', async () => {
+    const listMessages = vi.fn().mockResolvedValue([sampleRow]);
+    const getMessage = vi.fn().mockRejectedValue(new Error('boom'));
+    const conn = new SendgridConnector({ client: makeStub({ listMessages, getMessage }) });
+    const tool = conn.tools.find((t) => t.name === 'sendgrid.email_activity')!;
+    const r = await tool.execute({ toEmail: 'a@b.com', limit: 100 }) as any;
+    expect(r.count).toBe(1);
+    expect(r.rows[0].template).toBeNull();
+  });
+
+  it('caps enrichment at 50 rows and sets templateEnrichmentTruncated', async () => {
+    const many = Array.from({ length: 60 }, (_, i) => ({ ...sampleRow, msg_id: `m${i}` }));
+    const listMessages = vi.fn().mockResolvedValue(many);
+    const getMessage = vi.fn().mockImplementation(async (id: string) => ({ ...sampleRow, msg_id: id, events: [], template_id: 'd-z' }));
+    const getTemplate = vi.fn().mockResolvedValue({ id: 'd-z', name: 'Z', generation: 'dynamic' });
+    const conn = new SendgridConnector({ client: makeStub({ listMessages, getMessage, getTemplate }) });
+    const tool = conn.tools.find((t) => t.name === 'sendgrid.email_activity')!;
+    const r = await tool.execute({ toEmail: 'a@b.com', limit: 1000 }) as any;
+
+    expect(r.count).toBe(60);
+    expect(r.templateEnrichmentTruncated).toBe(true);
+    expect(getMessage).toHaveBeenCalledTimes(50); // only the first 50 enriched
+    expect(r.rows[0].template.name).toBe('Z');
+    expect(r.rows[59].template).toBeNull(); // overflow row left null
   });
 
   it('appends a last_event_time BETWEEN clause when dateRange is given', async () => {
@@ -90,7 +164,7 @@ describe('sendgrid.email_activity', () => {
 });
 
 describe('sendgrid.message_detail', () => {
-  it('maps the detail response (events → {name, at}, template, categories)', async () => {
+  it('maps the detail response (events → {name, at}, template object, categories)', async () => {
     const getMessage = vi.fn().mockResolvedValue({
       ...sampleRow,
       events: [
@@ -99,20 +173,35 @@ describe('sendgrid.message_detail', () => {
       ],
       template_id: 'd-xyz', categories: ['shipping', 'order'],
     });
-    const conn = new SendgridConnector({ client: makeStub({ getMessage }) });
+    const getTemplate = vi.fn().mockResolvedValue({ id: 'd-xyz', name: 'Order Shipped', generation: 'dynamic' });
+    const conn = new SendgridConnector({ client: makeStub({ getMessage, getTemplate }) });
     const tool = conn.tools.find((t) => t.name === 'sendgrid.message_detail')!;
     const r = await tool.execute({ msgId: 'm1' }) as any;
 
     expect(getMessage).toHaveBeenCalledWith('m1');
     expect(r).toMatchObject({
       msgId: 'm1', subject: 'Your order shipped', toEmail: 'a@b.com',
-      fromEmail: 'noreply@gantri.com', status: 'delivered', template: 'd-xyz',
+      fromEmail: 'noreply@gantri.com', status: 'delivered',
       categories: ['shipping', 'order'],
+    });
+    expect(r.template).toEqual({
+      id: 'd-xyz', name: 'Order Shipped', url: 'https://mc.sendgrid.com/dynamic-templates/d-xyz',
     });
     expect(r.events).toEqual([
       { name: 'processed', at: '2026-06-10T11:59:00Z' },
       { name: 'open', at: '2026-06-10T13:00:00Z' },
     ]);
+  });
+
+  it('returns template id+url with name null when getTemplate fails', async () => {
+    const getMessage = vi.fn().mockResolvedValue({ ...sampleRow, events: [], template_id: 'd-xyz' });
+    const getTemplate = vi.fn().mockRejectedValue(new SendgridApiError('GET /v3/templates/d-xyz -> 404', 404, {}));
+    const conn = new SendgridConnector({ client: makeStub({ getMessage, getTemplate }) });
+    const tool = conn.tools.find((t) => t.name === 'sendgrid.message_detail')!;
+    const r = await tool.execute({ msgId: 'm1' }) as any;
+    expect(r.template).toEqual({
+      id: 'd-xyz', name: null, url: 'https://mc.sendgrid.com/dynamic-templates/d-xyz',
+    });
   });
 
   it('defaults template to null and categories to [] when absent', async () => {

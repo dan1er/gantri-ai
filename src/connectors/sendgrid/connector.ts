@@ -31,14 +31,59 @@ export interface SendgridConnectorDeps {
   client: SendgridApiClient;
 }
 
+/** Max rows per email_activity call we'll enrich with template metadata. Each
+ *  needs its own getMessage call (the list endpoint omits template_id), so we
+ *  cap the fan-out and mark the rest truncated. */
+const TEMPLATE_ENRICHMENT_CAP = 50;
+/** How many per-row getMessage calls run at once during enrichment. */
+const ENRICHMENT_CONCURRENCY = 6;
+
 export class SendgridConnector implements Connector {
   readonly name = 'sendgrid';
   readonly tools: readonly ToolDef[];
   private readonly client: SendgridApiClient;
+  /** templateId → in-flight/resolved name lookup, scoped to this connector
+   *  instance. Caching the PROMISE (not just the value) means concurrent rows
+   *  sharing a template id collapse into one getTemplate call. Names that fail
+   *  to resolve settle as null so we don't re-hit a 404/scope error. */
+  private readonly templateNameCache = new Map<string, Promise<string | null>>();
 
   constructor(deps: SendgridConnectorDeps) {
     this.client = deps.client;
     this.tools = this.buildTools();
+  }
+
+  /**
+   * SendGrid editor URL for a template. Gantri uses DYNAMIC templates (ids
+   * start with `d-`), so that branch is the live path; the legacy branch is a
+   * best-effort fallback for any pre-dynamic id.
+   */
+  private templateLink(templateId: string): string {
+    return templateId.startsWith('d-')
+      ? `https://mc.sendgrid.com/dynamic-templates/${templateId}`
+      : `https://mc.sendgrid.com/design-library/legacy-templates/${templateId}`;
+  }
+
+  /**
+   * Resolve a template id into `{ id, name, url }`, memoizing the name lookup.
+   * Degrades gracefully: on any getTemplate failure (missing scope, 404, …) the
+   * name is null but the id + editor link are still returned. Never throws.
+   */
+  private async resolveTemplate(templateId: string): Promise<{ id: string; name: string | null; url: string }> {
+    const url = this.templateLink(templateId);
+    let lookup = this.templateNameCache.get(templateId);
+    if (!lookup) {
+      lookup = this.client
+        .getTemplate(templateId)
+        .then((tpl) => tpl.name ?? null)
+        .catch((err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          logger.warn({ templateId, err: msg }, 'sendgrid template name lookup failed; returning id + link only');
+          return null;
+        });
+      this.templateNameCache.set(templateId, lookup);
+    }
+    return { id: templateId, name: await lookup, url };
   }
 
   async healthCheck(): Promise<{ ok: boolean; detail?: string }> {
@@ -69,7 +114,7 @@ export class SendgridConnector implements Connector {
       description: [
         'List the TRANSACTIONAL emails a specific recipient received, straight from SendGrid\'s Email Activity API. These are Porter-sent system emails (order confirmation, shipping notification, delivery, password reset, account emails) — NOT marketing campaigns (use Klaviyo for those).',
         'Use when asked "what emails did <customer/address> receive", "did this customer get the shipping/order/delivery email", "check delivery/open status for <address>", "why didn\'t X get their confirmation".',
-        'Returns per-message status (delivered/bounced/processed/deferred/…) and open/click counts. Feed a returned `msgId` into `sendgrid.message_detail` for the full event timeline.',
+        'Returns per-message status (delivered/bounced/processed/deferred/…), open/click counts, and a `template` object `{ id, name, url }` (the SendGrid template behind the email, with a clickable editor link; null if the message has no template). Template enrichment is capped at the first 50 rows — `templateEnrichmentTruncated: true` flags when there were more. Feed a returned `msgId` into `sendgrid.message_detail` for the full event timeline.',
         'CAVEAT: SendGrid retains only ~30 days of activity — older emails are not queryable. Requires the paid "Email Activity History" add-on; without it the call returns a 403 error.',
       ].join(' '),
       schema: EmailActivityArgs as z.ZodType<EmailActivityArgs>,
@@ -84,7 +129,7 @@ export class SendgridConnector implements Connector {
     const messageDetailTool: ToolDef<MessageDetailArgs> = {
       name: 'sendgrid.message_detail',
       description: [
-        'Full detail for ONE SendGrid transactional email: subject, recipient, sender, status, the per-event timeline (processed → delivered → open → click → …), template id, and categories.',
+        'Full detail for ONE SendGrid transactional email: subject, recipient, sender, status, the per-event timeline (processed → delivered → open → click → …), a `template` object `{ id, name, url }` (the SendGrid template behind the email, with a clickable editor link; null if none), and categories.',
         'Use after `sendgrid.email_activity` when the user wants to know exactly what happened to a specific email ("did they open it", "when was it delivered", "show the full timeline for that message").',
         'CAVEAT: same ~30-day retention and "Email Activity History" add-on requirement as `sendgrid.email_activity`.',
       ].join(' '),
@@ -114,18 +159,44 @@ export class SendgridConnector implements Connector {
 
     try {
       const messages = await this.client.listMessages({ query, limit: args.limit });
+      const rows = messages.map((m) => ({
+        msgId: m.msg_id,
+        subject: m.subject,
+        status: m.status,
+        fromEmail: m.from_email,
+        lastEventTime: m.last_event_time,
+        opensCount: m.opens_count,
+        clicksCount: m.clicks_count,
+        template: null as { id: string; name: string | null; url: string } | null,
+      }));
+
+      // The list endpoint omits template_id, so enrich each row with its own
+      // getMessage call. Cap the fan-out and run it in bounded-concurrency
+      // batches so a big result set can't trigger a flood of API calls.
+      const enrichCount = Math.min(rows.length, TEMPLATE_ENRICHMENT_CAP);
+      const templateEnrichmentTruncated = rows.length > TEMPLATE_ENRICHMENT_CAP;
+      for (let i = 0; i < enrichCount; i += ENRICHMENT_CONCURRENCY) {
+        const batch = rows.slice(i, Math.min(i + ENRICHMENT_CONCURRENCY, enrichCount));
+        await Promise.all(
+          batch.map(async (row) => {
+            try {
+              const detail = await this.client.getMessage(row.msgId);
+              row.template = detail.template_id ? await this.resolveTemplate(detail.template_id) : null;
+            } catch (err) {
+              // A single row failing to enrich must not fail the whole tool.
+              const msg = err instanceof Error ? err.message : String(err);
+              logger.warn({ msgId: row.msgId, err: msg }, 'sendgrid template enrichment failed for row');
+              row.template = null;
+            }
+          }),
+        );
+      }
+
       return {
         toEmail: args.toEmail,
         count: messages.length,
-        rows: messages.map((m) => ({
-          msgId: m.msg_id,
-          subject: m.subject,
-          status: m.status,
-          fromEmail: m.from_email,
-          lastEventTime: m.last_event_time,
-          opensCount: m.opens_count,
-          clicksCount: m.clicks_count,
-        })),
+        templateEnrichmentTruncated,
+        rows,
       };
     } catch (err) {
       return sendgridErrorResult(err);
@@ -135,6 +206,7 @@ export class SendgridConnector implements Connector {
   private async runMessageDetail(args: { msgId: string }): Promise<unknown> {
     try {
       const d: SendgridMessageDetail = await this.client.getMessage(args.msgId);
+      const template = d.template_id ? await this.resolveTemplate(d.template_id) : null;
       return {
         msgId: d.msg_id,
         subject: d.subject,
@@ -142,7 +214,7 @@ export class SendgridConnector implements Connector {
         fromEmail: d.from_email,
         status: d.status,
         events: (d.events ?? []).map((e) => ({ name: e.event_name, at: e.processed })),
-        template: d.template_id ?? null,
+        template,
         categories: d.categories ?? [],
       };
     } catch (err) {

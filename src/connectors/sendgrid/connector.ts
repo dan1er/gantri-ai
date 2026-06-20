@@ -54,23 +54,15 @@ export class SendgridConnector implements Connector {
   }
 
   /**
-   * SendGrid editor URL for a template. Gantri uses DYNAMIC templates (ids
-   * start with `d-`), so that branch is the live path; the legacy branch is a
-   * best-effort fallback for any pre-dynamic id.
-   */
-  private templateLink(templateId: string): string {
-    return templateId.startsWith('d-')
-      ? `https://mc.sendgrid.com/dynamic-templates/${templateId}`
-      : `https://mc.sendgrid.com/design-library/legacy-templates/${templateId}`;
-  }
-
-  /**
-   * Resolve a template id into `{ id, name, url }`, memoizing the name lookup.
+   * Resolve a template id into `{ id, name }`, memoizing the name lookup.
    * Degrades gracefully: on any getTemplate failure (missing scope, 404, …) the
-   * name is null but the id + editor link are still returned. Never throws.
+   * name is null but the id is still returned. Never throws.
+   *
+   * No editor URL is included: SendGrid's `mc.sendgrid.com/dynamic-templates/<id>`
+   * deep link does not reliably open the template, so we surface the template
+   * NAME (human-meaningful, searchable in the SendGrid UI) instead of a link.
    */
-  private async resolveTemplate(templateId: string): Promise<{ id: string; name: string | null; url: string }> {
-    const url = this.templateLink(templateId);
+  private async resolveTemplate(templateId: string): Promise<{ id: string; name: string | null }> {
     let lookup = this.templateNameCache.get(templateId);
     if (!lookup) {
       lookup = this.client
@@ -78,12 +70,12 @@ export class SendgridConnector implements Connector {
         .then((tpl) => tpl.name ?? null)
         .catch((err) => {
           const msg = err instanceof Error ? err.message : String(err);
-          logger.warn({ templateId, err: msg }, 'sendgrid template name lookup failed; returning id + link only');
+          logger.warn({ templateId, err: msg }, 'sendgrid template name lookup failed; returning id only');
           return null;
         });
       this.templateNameCache.set(templateId, lookup);
     }
-    return { id: templateId, name: await lookup, url };
+    return { id: templateId, name: await lookup };
   }
 
   async healthCheck(): Promise<{ ok: boolean; detail?: string }> {
@@ -114,7 +106,7 @@ export class SendgridConnector implements Connector {
       description: [
         'List the TRANSACTIONAL emails a specific recipient received, straight from SendGrid\'s Email Activity API. These are Porter-sent system emails (order confirmation, shipping notification, delivery, password reset, account emails) — NOT marketing campaigns (use Klaviyo for those).',
         'Use when asked "what emails did <customer/address> receive", "did this customer get the shipping/order/delivery email", "check delivery/open status for <address>", "why didn\'t X get their confirmation".',
-        'Returns per-message status (delivered/bounced/processed/deferred/…), open/click counts, and a `template` object `{ id, name, url }` (the SendGrid template behind the email, with a clickable editor link; null if the message has no template). Template enrichment is capped at the first 50 rows — `templateEnrichmentTruncated: true` flags when there were more. Feed a returned `msgId` into `sendgrid.message_detail` for the full event timeline.',
+        'Returns per-message status (delivered/bounced/processed/deferred/…), open/click counts, and a `template` object `{ id, name }` (the SendGrid template behind the email; name is null if it could not be resolved, template is null if the message has no template). Template enrichment is capped at the first 50 rows — `templateEnrichmentTruncated: true` flags when there were more. Feed a returned `msgId` into `sendgrid.message_detail` for the full event timeline.',
         'CAVEAT: SendGrid retains only ~30 days of activity — older emails are not queryable. Requires the paid "Email Activity History" add-on; without it the call returns a 403 error.',
       ].join(' '),
       schema: EmailActivityArgs as z.ZodType<EmailActivityArgs>,
@@ -129,7 +121,7 @@ export class SendgridConnector implements Connector {
     const messageDetailTool: ToolDef<MessageDetailArgs> = {
       name: 'sendgrid.message_detail',
       description: [
-        'Full detail for ONE SendGrid transactional email: subject, recipient, sender, status, the per-event timeline (processed → delivered → open → click → …), a `template` object `{ id, name, url }` (the SendGrid template behind the email, with a clickable editor link; null if none), and categories.',
+        'Full detail for ONE SendGrid transactional email: subject, recipient, sender, status, the per-event timeline (processed → delivered → open → click → …), a `template` object `{ id, name }` (the SendGrid template behind the email; null if none), and categories.',
         'Use after `sendgrid.email_activity` when the user wants to know exactly what happened to a specific email ("did they open it", "when was it delivered", "show the full timeline for that message").',
         'CAVEAT: same ~30-day retention and "Email Activity History" add-on requirement as `sendgrid.email_activity`.',
       ].join(' '),
@@ -167,7 +159,7 @@ export class SendgridConnector implements Connector {
         lastEventTime: m.last_event_time,
         opensCount: m.opens_count,
         clicksCount: m.clicks_count,
-        template: null as { id: string; name: string | null; url: string } | null,
+        template: null as { id: string; name: string | null } | null,
       }));
 
       // The list endpoint omits template_id, so enrich each row with its own

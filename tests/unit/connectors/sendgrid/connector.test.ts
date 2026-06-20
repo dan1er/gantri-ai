@@ -68,9 +68,7 @@ describe('sendgrid.email_activity', () => {
     const r = await tool.execute({ toEmail: 'a@b.com', limit: 100 }) as any;
 
     expect(getMessage).toHaveBeenCalledWith('m1');
-    expect(r.rows[0].template).toEqual({
-      id: 'd-abc', name: 'Made Hub Invite', url: 'https://mc.sendgrid.com/dynamic-templates/d-abc',
-    });
+    expect(r.rows[0].template).toEqual({ id: 'd-abc', name: 'Made Hub Invite' });
   });
 
   it('resolves a repeated template id only once (per-call name cache)', async () => {
@@ -99,9 +97,7 @@ describe('sendgrid.email_activity', () => {
     const tool = conn.tools.find((t) => t.name === 'sendgrid.email_activity')!;
     const r = await tool.execute({ toEmail: 'a@b.com', limit: 100 }) as any;
 
-    expect(r.rows[0].template).toEqual({
-      id: 'd-x', name: null, url: 'https://mc.sendgrid.com/dynamic-templates/d-x',
-    });
+    expect(r.rows[0].template).toEqual({ id: 'd-x', name: null });
   });
 
   it('does not fail the whole tool when a single getMessage throws', async () => {
@@ -184,24 +180,20 @@ describe('sendgrid.message_detail', () => {
       fromEmail: 'noreply@gantri.com', status: 'delivered',
       categories: ['shipping', 'order'],
     });
-    expect(r.template).toEqual({
-      id: 'd-xyz', name: 'Order Shipped', url: 'https://mc.sendgrid.com/dynamic-templates/d-xyz',
-    });
+    expect(r.template).toEqual({ id: 'd-xyz', name: 'Order Shipped' });
     expect(r.events).toEqual([
       { name: 'processed', at: '2026-06-10T11:59:00Z' },
       { name: 'open', at: '2026-06-10T13:00:00Z' },
     ]);
   });
 
-  it('returns template id+url with name null when getTemplate fails', async () => {
+  it('returns template id with name null when getTemplate fails', async () => {
     const getMessage = vi.fn().mockResolvedValue({ ...sampleRow, events: [], template_id: 'd-xyz' });
     const getTemplate = vi.fn().mockRejectedValue(new SendgridApiError('GET /v3/templates/d-xyz -> 404', 404, {}));
     const conn = new SendgridConnector({ client: makeStub({ getMessage, getTemplate }) });
     const tool = conn.tools.find((t) => t.name === 'sendgrid.message_detail')!;
     const r = await tool.execute({ msgId: 'm1' }) as any;
-    expect(r.template).toEqual({
-      id: 'd-xyz', name: null, url: 'https://mc.sendgrid.com/dynamic-templates/d-xyz',
-    });
+    expect(r.template).toEqual({ id: 'd-xyz', name: null });
   });
 
   it('defaults template to null and categories to [] when absent', async () => {

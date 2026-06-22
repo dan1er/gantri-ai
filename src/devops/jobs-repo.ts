@@ -6,7 +6,7 @@ interface Row {
   id: string; kind: JobKind; target: JobTarget; status: JobStatus;
   spec: JobSpec; requested_by: string; channel_id: string;
   message_ts: string | null; run_id: number | null; error: string | null;
-  created_at: string; updated_at: string;
+  created_at: string; updated_at: string; idle_pinged_at: string | null;
 }
 
 function toJob(r: Row): Job {
@@ -15,6 +15,7 @@ function toJob(r: Row): Job {
     spec: r.spec ?? {}, requestedBy: r.requested_by, channelId: r.channel_id,
     messageTs: r.message_ts, runId: r.run_id, error: r.error,
     createdAt: r.created_at, updatedAt: r.updated_at,
+    idlePingedAt: r.idle_pinged_at ?? null,
   };
 }
 
@@ -29,9 +30,12 @@ export interface CreateJobInput {
 export interface UpdateJobInput {
   status?: JobStatus;
   spec?: JobSpec;
-  messageTs?: string | null;
+  // No `| null`: nulling the canonical message ts would strand the job (the
+  // runner skips updates when messageTs is falsy and could never recover).
+  messageTs?: string;
   runId?: number | null;
   error?: string | null;
+  idlePingedAt?: string | null;
 }
 
 export class DevopsJobsRepo {
@@ -62,14 +66,67 @@ export class DevopsJobsRepo {
     return (data as Row[]).map(toJob);
   }
 
+  /**
+   * Ready previews — live environments, NOT returned by listActive ('ready' is
+   * a terminal status there). The runner polls these separately for the hourly
+   * idle reminder; they only leave this list when torn down.
+   */
+  async listReadyPreviews(limit = 25): Promise<Job[]> {
+    const { data, error } = await this.client
+      .from('devops_jobs')
+      .select('*')
+      .eq('kind', 'preview')
+      .eq('status', 'ready')
+      .order('created_at', { ascending: true })
+      .limit(limit);
+    if (error) throw new Error(`devops_jobs ready previews list failed: ${error.message}`);
+    return (data as Row[]).map(toJob);
+  }
+
   async update(id: string, patch: UpdateJobInput): Promise<void> {
     const row: Record<string, unknown> = { updated_at: new Date().toISOString() };
     if (patch.status !== undefined) row.status = patch.status;
     if (patch.spec !== undefined) row.spec = patch.spec;
-    if (patch.messageTs !== undefined) row.message_ts = patch.messageTs;
+    if (patch.messageTs) row.message_ts = patch.messageTs; // truthy: never null out the canonical ts
     if (patch.runId !== undefined) row.run_id = patch.runId;
     if (patch.error !== undefined) row.error = patch.error;
+    if (patch.idlePingedAt !== undefined) row.idle_pinged_at = patch.idlePingedAt;
     const { error } = await this.client.from('devops_jobs').update(row).eq('id', id);
     if (error) throw new Error(`devops_jobs update failed: ${error.message}`);
+  }
+
+  async get(id: string): Promise<Job | null> {
+    const { data, error } = await this.client
+      .from('devops_jobs')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw new Error(`devops_jobs get failed: ${error.message}`);
+    return data ? toJob(data as Row) : null;
+  }
+
+  /** Jobs still usable for reuse — anything not failed or torn down. */
+  async listReusable(limit = 50): Promise<Job[]> {
+    const { data, error } = await this.client
+      .from('devops_jobs')
+      .select('*')
+      .not('status', 'in', '(failed,torn_down)')
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    if (error) throw new Error(`devops_jobs list reusable failed: ${error.message}`);
+    return (data as Row[]).map(toJob);
+  }
+
+  /** Deploy jobs that aren't failed — their tags are deployed or in flight. */
+  async listDeployJobs(limit = 100): Promise<Job[]> {
+    const { data, error } = await this.client
+      .from('devops_jobs')
+      .select('*')
+      .eq('kind', 'deploy')
+      .neq('status', 'failed')
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    if (error) throw new Error(`devops_jobs deploy list failed: ${error.message}`);
+    return (data as Row[]).map(toJob);
   }
 }

@@ -56,7 +56,15 @@ import { DevopsJobsRepo } from './devops/jobs-repo.js';
 import { GithubDispatcher } from './devops/github.js';
 import { advancePreviewJob } from './devops/provisioner.js';
 import { JobsRunner } from './devops/jobs-runner.js';
+import { VercelClient } from './devops/vercel.js';
+import { QaseClient } from './devops/qase.js';
 import { registerPreviewCommand } from './slack/devops/preview-command.js';
+import { advanceDeployJob } from './devops/deploy-provisioner.js';
+import { registerDeployCommand } from './slack/devops/deploy-command.js';
+import { advanceE2eJob } from './devops/e2e-provisioner.js';
+import { registerE2eCommand } from './slack/devops/e2e-command.js';
+import { advanceCronJob } from './devops/cron-provisioner.js';
+import { registerCronCommand } from './slack/devops/cron-command.js';
 import { ReportSubscriptionsRepo } from './reports/reports-repo.js';
 import { ScheduledReportsConnector } from './reports/reports-connector.js';
 import { compilePlan } from './reports/plan-compiler.js';
@@ -442,11 +450,17 @@ async function main() {
     claude,
   };
 
-  // GITHUB_TOKEN may come from Vault if not in env:
+  // GITHUB_TOKEN / VERCEL_TOKEN may come from Vault if not in env:
   const githubToken = env.GITHUB_TOKEN ?? (await readVaultSecret(supabase, 'GITHUB_TOKEN').catch(() => null));
+  const vercelToken = env.VERCEL_TOKEN ?? (await readVaultSecret(supabase, 'VERCEL_TOKEN').catch(() => null));
   const devopsEnabled = !!(env.OPS_CHANNEL_ID && githubToken);
   const jobsRepo = new DevopsJobsRepo(supabase);
   const gh = devopsEnabled ? new GithubDispatcher({ token: githubToken!, owner: env.GITHUB_OWNER }) : null;
+  const vercel = vercelToken && env.VERCEL_TEAM_ID
+    ? new VercelClient({ token: vercelToken, teamId: env.VERCEL_TEAM_ID })
+    : null;
+  const qaseToken = env.QASE_API_TOKEN ?? (await readVaultSecret(supabase, 'QASE_API_TOKEN').catch(() => null));
+  const qase = qaseToken ? new QaseClient(qaseToken) : null;
 
   const { app, receiver } = buildSlackApp({
     orchestrator,
@@ -460,7 +474,11 @@ async function main() {
     klaviyoClient: klaviyoClientRef ?? { listLists: async () => [] },
     registerExtra: (a) => {
       if (devopsEnabled) {
-        registerPreviewCommand(a, { repo: jobsRepo, slack: a.client, opsChannelId: env.OPS_CHANNEL_ID! });
+        const dmUserIds = (env.DEVOPS_DM_USER_IDS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+        registerPreviewCommand(a, { repo: jobsRepo, slack: a.client, opsChannelId: env.OPS_CHANNEL_ID!, dmUserIds, gh: gh!, vercel: vercel ?? undefined });
+        registerDeployCommand(a, { repo: jobsRepo, slack: a.client, opsChannelId: env.OPS_CHANNEL_ID!, dmUserIds, gh: gh! });
+        registerE2eCommand(a, { repo: jobsRepo, slack: a.client, opsChannelId: env.OPS_CHANNEL_ID!, dmUserIds, gh: gh! });
+        registerCronCommand(a, { repo: jobsRepo, slack: a.client, opsChannelId: env.OPS_CHANNEL_ID!, dmUserIds, gh: gh! });
       }
     },
   });
@@ -645,16 +663,16 @@ async function main() {
   reportsRunner.start();
 
   if (devopsEnabled && gh) {
-    const vercel = {
-      async previewUrlForBranch(repo: string, ref: string): Promise<string> {
-        const project = repo === 'mantle' ? 'marketplace' : repo === 'core' ? 'factoryos' : 'made';
-        const branch = ref.replace(/^.*\//, '').replace(/[^a-z0-9-]/gi, '-').toLowerCase();
-        return `https://${project}-git-${branch}-gantri.vercel.app`;
-      },
-    };
-    const jobsRunner = new JobsRunner({ repo: jobsRepo, slack: app.client, gh, vercel, advance: advancePreviewJob });
+    const jobsRunner = new JobsRunner({
+      repo: jobsRepo, slack: app.client, gh, vercel: vercel ?? undefined, qase: qase ?? undefined,
+      advance: (job, d) =>
+        job.kind === 'deploy' ? advanceDeployJob(job, d)
+        : job.kind === 'e2e' ? advanceE2eJob(job, d)
+        : job.kind === 'cron' ? advanceCronJob(job, d)
+        : advancePreviewJob(job, d),
+    });
     jobsRunner.start();
-    logger.info('devops jobs runner started');
+    logger.info({ vercelWiring: !!vercel }, 'devops jobs runner started');
   } else {
     logger.warn('devops disabled — set OPS_CHANNEL_ID + GITHUB_TOKEN to enable /preview');
   }

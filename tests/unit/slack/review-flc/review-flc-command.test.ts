@@ -119,6 +119,33 @@ describe('pure helpers', () => {
     expect(json).toContain('review_flc_post');
   });
 
+  it('keeps every checkbox option text + description under Slack’s 150-char limit', () => {
+    // Long real-world findings must not blow Slack's per-option limit (otherwise
+    // the whole message is rejected with invalid_blocks and the review fails).
+    const long = 'x'.repeat(400);
+    const blocks = renderFindingsBlocks([F({ id: 'F1', message: long, section: long })], '111.222', 'http://x');
+    const optionTexts: string[] = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const walk = (node: any): void => {
+      if (Array.isArray(node)) {
+        node.forEach(walk);
+        return;
+      }
+      if (node && typeof node === 'object') {
+        if (node.type === 'checkboxes' && Array.isArray(node.options)) {
+          for (const opt of node.options) {
+            if (opt?.text?.text) optionTexts.push(opt.text.text);
+            if (opt?.description?.text) optionTexts.push(opt.description.text);
+          }
+        }
+        for (const v of Object.values(node)) walk(v);
+      }
+    };
+    walk(blocks);
+    expect(optionTexts.length).toBeGreaterThan(0);
+    for (const t of optionTexts) expect(t.length).toBeLessThanOrEqual(150);
+  });
+
   it('renderFindingsBlocks shows a clean-bill message when there are no findings', () => {
     const blocks = renderFindingsBlocks([], '1.1', 'http://x');
     expect(JSON.stringify(blocks)).not.toContain('review_flc_post');

@@ -234,7 +234,10 @@ export function renderFindingsBlocks(findings: Finding[], ts: string, url: strin
                 type: 'mrkdwn',
                 text: truncate(`*${f.area}*${f.section ? ` — ${f.section}` : ''}`, 150),
               },
-              description: { type: 'plain_text', text: truncate(f.message, 1900) },
+              // Slack caps a checkbox option's description at 150 chars — overruns
+              // reject the whole message with invalid_blocks. The full message is
+              // preserved in the store and used verbatim when posting the comment.
+              description: { type: 'plain_text', text: truncate(f.message, 150) },
               value: f.id,
             })),
           },

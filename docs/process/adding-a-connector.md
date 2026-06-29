@@ -259,6 +259,7 @@ Other complete reference connectors:
 - **Skipping `tool-output-shapes.ts`.** A whitelisted tool without an output sample causes the live-reports compiler to refuse to load. CI will catch this; saving the discovery for the deploy is more painful.
 - **Not migrating existing tools to `DateRangeArg`** when extending a connector. The invariant test fails — fix it in the same PR.
 - **Sending Slack messages without explicit user authorization.** Send-message is a visible-to-others action. Always confirm.
+- **Loading runtime assets (`.md`/JSON prompts, templates) without shipping them to `dist/`.** `tsc` only emits `.js` — non-TS files stay in `src/`. If a module reads a prompt/template from disk at runtime, add a build copy step (`package.json` `postbuild` → `dist/...`) AND copy it in the `Dockerfile` (which runs `npx tsc` directly, not `npm run build`, so the `postbuild` hook does NOT fire there). Resolve the path relative to the compiled module (`fileURLToPath(import.meta.url)`), not relative to `dist/index.js`, so it works in both `tsx` dev (reads `src/`) and `node dist` prod (reads `dist/`). Reference: `src/prompts/flc-review-standard.md` loaded by `src/flc/flc-review-service.ts` for `/review-flc`.
 
 ---
 

@@ -8,6 +8,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "postbuild": "node scripts/copy-prompts.mjs",
     "build:web": "cd web && npm install --no-audit --no-fund && npm run build",
     "build:all": "npm run build && npm run build:web",
     "start": "node dist/index.js",
@@ -20,6 +21,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.0",
+    "@notionhq/client": "^5.22.0",
     "@slack/bolt": "^3.19.0",
     "@supabase/supabase-js": "^2.45.0",
     "cron-parser": "^4.9.0",

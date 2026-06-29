@@ -65,6 +65,9 @@ import { advanceE2eJob } from './devops/e2e-provisioner.js';
 import { registerE2eCommand } from './slack/devops/e2e-command.js';
 import { advanceCronJob } from './devops/cron-provisioner.js';
 import { registerCronCommand } from './slack/devops/cron-command.js';
+import { NotionApiClient } from './connectors/notion/client.js';
+import { reviewFlc, loadReviewStandard } from './flc/flc-review-service.js';
+import { registerReviewFlcCommand } from './slack/review-flc/review-flc-command.js';
 import { ReportSubscriptionsRepo } from './reports/reports-repo.js';
 import { ScheduledReportsConnector } from './reports/reports-connector.js';
 import { compilePlan } from './reports/plan-compiler.js';
@@ -95,6 +98,7 @@ async function main() {
     gscOauthClientId, gscOauthClientSecret, gscOauthRefreshToken,
     pipedriveApiToken,
     sendgridApiKey,
+    notionApiTokenVault,
   ] = await Promise.all([
     readVaultSecret(supabase, 'NORTHBEAM_EMAIL'),
     readVaultSecret(supabase, 'NORTHBEAM_PASSWORD'),
@@ -117,6 +121,7 @@ async function main() {
     readVaultSecret(supabase, 'GSC_OAUTH_REFRESH_TOKEN').catch(() => null),
     readVaultSecret(supabase, 'PIPEDRIVE_API_TOKEN').catch(() => null),
     readVaultSecret(supabase, 'SENDGRID_API_KEY').catch(() => null),
+    readVaultSecret(supabase, 'NOTION_API_TOKEN').catch(() => null),
   ]);
 
   const registry = new ConnectorRegistry();
@@ -462,6 +467,21 @@ async function main() {
   const qaseToken = env.QASE_API_TOKEN ?? (await readVaultSecret(supabase, 'QASE_API_TOKEN').catch(() => null));
   const qase = qaseToken ? new QaseClient(qaseToken) : null;
 
+  // /review-flc — review an FLC's Notion page against the canonical Gantri
+  // standard and post selected findings as comments. Constructed only when a
+  // Notion token is configured (env override or vault), mirroring the optional
+  // connector pattern above. The review standard markdown is loaded once here.
+  const notionApiToken = env.NOTION_API_TOKEN ?? notionApiTokenVault;
+  let notionClient: NotionApiClient | undefined;
+  let reviewStandard: string | undefined;
+  if (notionApiToken) {
+    notionClient = new NotionApiClient({ token: notionApiToken });
+    reviewStandard = loadReviewStandard();
+    logger.info('notion connector configured — /review-flc enabled');
+  } else {
+    logger.warn('notion not configured (NOTION_API_TOKEN missing) — skipping /review-flc registration');
+  }
+
   const { app, receiver } = buildSlackApp({
     orchestrator,
     usersRepo,
@@ -479,6 +499,26 @@ async function main() {
         registerDeployCommand(a, { repo: jobsRepo, slack: a.client, opsChannelId: env.OPS_CHANNEL_ID!, dmUserIds, gh: gh! });
         registerE2eCommand(a, { repo: jobsRepo, slack: a.client, opsChannelId: env.OPS_CHANNEL_ID!, dmUserIds, gh: gh! });
         registerCronCommand(a, { repo: jobsRepo, slack: a.client, opsChannelId: env.OPS_CHANNEL_ID!, dmUserIds, gh: gh! });
+      }
+      // /review-flc is usable in any conversation (no ops-channel gating), so
+      // it registers independently of the devops block — only the Notion token
+      // gates it.
+      if (notionClient && reviewStandard) {
+        registerReviewFlcCommand(a, {
+          notion: notionClient,
+          slack: a.client,
+          review: (input) =>
+            reviewFlc(
+              {
+                claude,
+                model: 'claude-sonnet-4-6',
+                fallbackModels: ['claude-haiku-4-5-20251001'],
+                reviewStandard: reviewStandard!,
+              },
+              input,
+            ),
+        });
+        logger.info('/review-flc command registered');
       }
     },
   });

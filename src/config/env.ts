@@ -23,6 +23,10 @@ const envSchema = z.object({
   VERCEL_TOKEN: z.string().optional(),
   VERCEL_TEAM_ID: z.string().optional(),
   QASE_API_TOKEN: z.string().optional(),
+  // Notion internal-integration token for /review-flc (read pages + post
+  // comments). Read from the Supabase vault in index.ts; optional so the bot
+  // still boots without it (the command is simply not registered).
+  NOTION_API_TOKEN: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

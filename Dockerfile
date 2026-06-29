@@ -10,7 +10,10 @@ RUN npm ci --omit=dev
 # Copy source & build (backend)
 COPY tsconfig.json ./
 COPY src ./src
-RUN npm install --no-save typescript@5 && npx tsc
+# tsc emits .js only — copy the runtime prompt markdown into dist/prompts so the
+# /review-flc review standard ships in the image (loaded relative to dist/flc/).
+RUN npm install --no-save typescript@5 && npx tsc \
+  && mkdir -p dist/prompts && cp src/prompts/*.md dist/prompts/
 
 # Build web SPA (Vite + React + Tailwind + Tremor) — outputs web/dist
 COPY web ./web

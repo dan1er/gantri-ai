@@ -222,6 +222,17 @@ export function renderFindingsBlocks(findings: Finding[], ts: string, url: strin
     // Slack caps a checkboxes element at 10 options — chunk into multiple blocks.
     for (let i = 0; i < group.length; i += 10) {
       const chunk = group.slice(i, i + 10);
+      const options = chunk.map((f) => ({
+        text: {
+          type: 'mrkdwn',
+          text: truncate(`*${f.area}*${f.section ? ` — ${f.section}` : ''}`, 150),
+        },
+        // Slack caps a checkbox option's description at 150 chars — overruns
+        // reject the whole message with invalid_blocks. The full message is
+        // preserved in the store and used verbatim when posting the comment.
+        description: { type: 'plain_text', text: truncate(f.message, 150) },
+        value: f.id,
+      }));
       blocks.push({
         type: 'actions',
         block_id: `findings_${groupIdx}_${i}`,
@@ -229,17 +240,10 @@ export function renderFindingsBlocks(findings: Finding[], ts: string, url: strin
           {
             type: 'checkboxes',
             action_id: `finding_select_${groupIdx}_${i}`,
-            options: chunk.map((f) => ({
-              text: {
-                type: 'mrkdwn',
-                text: truncate(`*${f.area}*${f.section ? ` — ${f.section}` : ''}`, 150),
-              },
-              // Slack caps a checkbox option's description at 150 chars — overruns
-              // reject the whole message with invalid_blocks. The full message is
-              // preserved in the store and used verbatim when posting the comment.
-              description: { type: 'plain_text', text: truncate(f.message, 150) },
-              value: f.id,
-            })),
+            options,
+            // Pre-select every finding by default — posting is opt-out: the
+            // operator unchecks what they don't want, then posts the rest.
+            initial_options: options,
           },
         ],
       });

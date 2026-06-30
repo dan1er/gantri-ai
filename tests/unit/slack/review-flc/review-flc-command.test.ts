@@ -119,6 +119,32 @@ describe('pure helpers', () => {
     expect(json).toContain('review_flc_post');
   });
 
+  it('pre-selects every finding checkbox by default (opt-out posting)', () => {
+    const blocks = renderFindingsBlocks(
+      [F({ id: 'F1' }), F({ id: 'F2', severity: 'Suggestion' }), F({ id: 'F3', severity: 'Should Fix' })],
+      '111.222',
+      'http://x',
+    );
+    let checkboxCount = 0;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const walk = (node: any): void => {
+      if (Array.isArray(node)) {
+        node.forEach(walk);
+        return;
+      }
+      if (node && typeof node === 'object') {
+        if (node.type === 'checkboxes') {
+          checkboxCount += 1;
+          expect(Array.isArray(node.initial_options)).toBe(true);
+          expect(node.initial_options).toHaveLength(node.options.length);
+        }
+        for (const v of Object.values(node)) walk(v);
+      }
+    };
+    walk(blocks);
+    expect(checkboxCount).toBeGreaterThan(0);
+  });
+
   it('keeps every checkbox option text + description under Slack’s 150-char limit', () => {
     // Long real-world findings must not blow Slack's per-option limit (otherwise
     // the whole message is rejected with invalid_blocks and the review fails).

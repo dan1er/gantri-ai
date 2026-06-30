@@ -39,6 +39,7 @@ function makeDeps() {
       postMessage: vi.fn().mockResolvedValue({ ts: '111.222' }),
       update: vi.fn().mockResolvedValue({}),
       postEphemeral: vi.fn().mockResolvedValue({}),
+      delete: vi.fn().mockResolvedValue({}),
     },
   };
   const review = vi.fn();
@@ -117,6 +118,7 @@ describe('pure helpers', () => {
     expect(json).toContain('F2');
     expect(json).toContain('checkboxes');
     expect(json).toContain('review_flc_post');
+    expect(json).toContain('review_flc_discard');
   });
 
   it('pre-selects every finding checkbox by default (opt-out posting)', () => {
@@ -366,5 +368,37 @@ describe('command handlers', () => {
       },
     });
     expect(slack.chat.postEphemeral).toHaveBeenCalled();
+  });
+
+  it('discards the review: deletes the message and forgets the stored state', async () => {
+    const { app, handlers } = makeApp();
+    const { deps, notion, slack, review } = makeDeps();
+    notion.getPageMarkdown.mockResolvedValue({ markdown: '# FLC body', blocks: [] });
+    review.mockResolvedValue([F({ id: 'F1' })]);
+    registerReviewFlcCommand(app, deps);
+
+    // Run a review so the store has an entry keyed by ts.
+    await handlers['view:review_flc_submit']({
+      ack: vi.fn(),
+      body: { user: { id: 'U1' } },
+      view: {
+        private_metadata: JSON.stringify({ channel: 'C42' }),
+        state: {
+          values: {
+            url_block: { url_input: { value: 'https://notion.so/x' } },
+            areas_block: { areas_input: { selected_options: [{ value: 'Functional' }] } },
+          },
+        },
+      },
+    });
+
+    const ack = vi.fn();
+    await handlers['action:review_flc_discard']({
+      ack,
+      body: { user: { id: 'U1' }, channel: { id: 'C42' }, container: { message_ts: '111.222' } },
+    });
+
+    expect(ack).toHaveBeenCalled();
+    expect(slack.chat.delete).toHaveBeenCalledWith({ channel: 'C42', ts: '111.222' });
   });
 });

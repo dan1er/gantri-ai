@@ -60,6 +60,10 @@ class ReviewStore {
   get(ts: string): ReviewState | undefined {
     return this.map.get(ts);
   }
+
+  delete(ts: string): void {
+    this.map.delete(ts);
+  }
 }
 
 const AREA_OPTIONS = FINDING_AREAS.map((a) => ({
@@ -275,6 +279,13 @@ export function renderFindingsBlocks(findings: Finding[], ts: string, url: strin
         style: 'primary',
         value: ts,
       },
+      {
+        type: 'button',
+        action_id: 'review_flc_discard',
+        text: { type: 'plain_text', text: 'Discard' },
+        style: 'danger',
+        value: ts,
+      },
     ],
   });
 
@@ -440,6 +451,27 @@ export function registerReviewFlcCommand(app: App, deps: ReviewFlcDeps): void {
       .catch((err: unknown) =>
         logger.warn({ err: String((err as Error)?.message ?? err) }, '[REVIEW-FLC] result update failed'),
       );
+  });
+
+  // "Discard" -> delete the result message and drop the stored review.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  app.action('review_flc_discard', async ({ ack, body }: any) => {
+    await ack();
+    const ts: string | undefined = body.container?.message_ts ?? body.message?.ts;
+    const channel: string | undefined = body.channel?.id ?? body.container?.channel_id;
+    if (ts) store.delete(ts);
+    logger.info({ action: 'discard', by: body.user?.id }, '[REVIEW-FLC] action:discard');
+    if (!channel || !ts) return;
+    await deps.slack.chat.delete({ channel, ts }).catch(async (err: unknown) => {
+      logger.warn(
+        { err: String((err as Error)?.message ?? err) },
+        '[REVIEW-FLC] discard delete failed',
+      );
+      // If the message can't be deleted, at least clear it.
+      await deps.slack.chat
+        .update({ channel, ts, text: ':wastebasket: Review discarded.', blocks: undefined })
+        .catch(() => {});
+    });
   });
 }
 

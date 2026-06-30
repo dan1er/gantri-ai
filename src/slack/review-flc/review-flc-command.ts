@@ -15,20 +15,28 @@ import { logger } from '../../logger.js';
  * the only write action is posting comments the user explicitly selects.
  */
 
+export interface ReviewState {
+  pageId: string;
+  url: string;
+  findings: Finding[];
+  channel: string;
+}
+
+/** Persistence for review state, keyed by the Slack result-message ts. */
+export interface ReviewStateStore {
+  save(ts: string, state: ReviewState): Promise<void>;
+  get(ts: string): Promise<ReviewState | null>;
+  delete(ts: string): Promise<void>;
+}
+
 export interface ReviewFlcDeps {
   notion: NotionApiClient;
   /** Runs the LLM review. Injected so tests can stub it. */
   review: (input: ReviewInput) => Promise<Finding[]>;
   /** Slack WebClient (= app.client) used to post + edit the result message. */
   slack: WebClient;
-}
-
-interface ReviewState {
-  pageId: string;
-  url: string;
-  findings: Finding[];
-  blocks: PageBlock[];
-  channel: string;
+  /** Persists review state so the result-message buttons survive restarts. */
+  store: ReviewStateStore;
 }
 
 const SEVERITY_EMOJI: Record<string, string> = {
@@ -37,34 +45,10 @@ const SEVERITY_EMOJI: Record<string, string> = {
   Suggestion: '🔵',
 };
 
-// v1 has no DB — keep the latest reviews in memory, keyed by the result
-// message ts, with a small cap so a long-lived process can't leak.
-const MAX_REVIEWS = 100;
-
 // Slack rejects a message with more than 50 blocks. Each finding is one section;
 // cap how many we render so the intro, severity headers, optional overflow note,
 // and the Post button always fit under the ceiling.
 const MAX_FINDING_SECTIONS = 42;
-
-class ReviewStore {
-  private readonly map = new Map<string, ReviewState>();
-
-  set(ts: string, state: ReviewState): void {
-    if (this.map.size >= MAX_REVIEWS) {
-      const oldest = this.map.keys().next().value;
-      if (oldest !== undefined) this.map.delete(oldest);
-    }
-    this.map.set(ts, state);
-  }
-
-  get(ts: string): ReviewState | undefined {
-    return this.map.get(ts);
-  }
-
-  delete(ts: string): void {
-    this.map.delete(ts);
-  }
-}
 
 const AREA_OPTIONS = FINDING_AREAS.map((a) => ({
   text: { type: 'plain_text' as const, text: a },
@@ -214,7 +198,7 @@ export function renderFindingsBlocks(findings: Finding[], ts: string, url: strin
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `:mag: *FLC review* — ${findings.length} finding${findings.length === 1 ? '' : 's'} (${counts}). All pre-selected — untick any you don't want, then *Post selected as comments* on <${url}|the FLC>.`,
+        text: `:mag: *FLC review* — ${findings.length} finding${findings.length === 1 ? '' : 's'} (${counts}). Tick the ones to act on, then *Post selected as comments* (or *Copy fix prompt*) for <${url}|the FLC>.`,
       },
     },
     { type: 'divider' },
@@ -239,7 +223,6 @@ export function renderFindingsBlocks(findings: Finding[], ts: string, url: strin
         continue;
       }
       const heading = `*${f.area}*${f.section ? ` — _${f.section}_` : ''}`;
-      const option = { text: { type: 'plain_text', text: 'Post' }, value: f.id };
       blocks.push({
         type: 'section',
         block_id: `finding_${f.id}`,
@@ -247,9 +230,8 @@ export function renderFindingsBlocks(findings: Finding[], ts: string, url: strin
         accessory: {
           type: 'checkboxes',
           action_id: `finding_select_${f.id}`,
-          options: [option],
-          // Pre-selected — posting is opt-out: untick what you don't want.
-          initial_options: [option],
+          // Unchecked by default — the operator ticks the ones to act on.
+          options: [{ text: { type: 'plain_text', text: 'Post' }, value: f.id }],
         },
       });
       shown += 1;
@@ -281,6 +263,12 @@ export function renderFindingsBlocks(findings: Finding[], ts: string, url: strin
       },
       {
         type: 'button',
+        action_id: 'review_flc_copyprompt',
+        text: { type: 'plain_text', text: 'Copy fix prompt' },
+        value: ts,
+      },
+      {
+        type: 'button',
         action_id: 'review_flc_discard',
         text: { type: 'plain_text', text: 'Discard' },
         style: 'danger',
@@ -290,6 +278,65 @@ export function renderFindingsBlocks(findings: Finding[], ts: string, url: strin
   });
 
   return blocks;
+}
+
+/** Build a paste-ready prompt that tells an AI to fix the selected findings. */
+export function buildFixPrompt(url: string, findings: Finding[]): string {
+  const lines = findings.map(
+    (f, i) =>
+      `${i + 1}. [${f.severity}] ${f.area}${f.section ? ` — ${f.section}` : ''}: ${f.message}`,
+  );
+  return [
+    `Apply the following FLC review findings to the FLC at ${url}.`,
+    `Follow Gantri's FLC authoring standard: the Functional Spec describes current-state behavior in plain language — no code references, no diff-from-old-behavior framing; implementation details belong only in the Technical Spec. Make the minimal edit that resolves each finding without changing unrelated content.`,
+    '',
+    'Findings to fix:',
+    ...lines,
+  ].join('\n');
+}
+
+/** Split text on line boundaries into chunks that fit a Slack code block. */
+function chunkForCodeBlocks(text: string, max: number): string[] {
+  const out: string[] = [];
+  let cur = '';
+  for (const line of text.split('\n')) {
+    const candidate = cur ? `${cur}\n${line}` : line;
+    if (candidate.length <= max) {
+      cur = candidate;
+      continue;
+    }
+    if (cur) out.push(cur);
+    if (line.length > max) {
+      // A single line longer than the limit — hard-slice it.
+      let rest = line;
+      while (rest.length > max) {
+        out.push(rest.slice(0, max));
+        rest = rest.slice(max);
+      }
+      cur = rest;
+    } else {
+      cur = line;
+    }
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+/** Render the fix prompt as copy-ready code block(s) for an ephemeral message. */
+export function renderCopyPromptBlocks(prompt: string, count: number): unknown[] {
+  const intro = {
+    type: 'section',
+    text: {
+      type: 'mrkdwn',
+      text: `:clipboard: Fix prompt for ${count} finding${count === 1 ? '' : 's'} — hover the code block and hit *Copy*, then paste it into your AI.`,
+    },
+  };
+  const chunks = chunkForCodeBlocks(prompt, 2900);
+  const codeBlocks = chunks.map((c) => ({
+    type: 'section',
+    text: { type: 'mrkdwn', text: `\`\`\`\n${c}\n\`\`\`` },
+  }));
+  return [intro, ...codeBlocks];
 }
 
 interface PostOutcome {
@@ -338,8 +385,6 @@ function describeReviewFailure(err: unknown): string {
 }
 
 export function registerReviewFlcCommand(app: App, deps: ReviewFlcDeps): void {
-  const store = new ReviewStore();
-
   // Slash command -> open the review modal. No channel/role gating (v1).
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   app.command('/review-flc', async ({ ack, body, client }: any) => {
@@ -385,7 +430,7 @@ export function registerReviewFlcCommand(app: App, deps: ReviewFlcDeps): void {
       // keep the fallback (the user's id opens a DM-style target)
     }
 
-    await runReview(deps, store, {
+    await runReview(deps, {
       pageId,
       url,
       areas,
@@ -400,7 +445,7 @@ export function registerReviewFlcCommand(app: App, deps: ReviewFlcDeps): void {
     await ack();
     const ts: string | undefined = body.container?.message_ts ?? body.message?.ts;
     const channel: string | undefined = body.channel?.id ?? body.container?.channel_id;
-    const state = ts ? store.get(ts) : undefined;
+    const state = ts ? await deps.store.get(ts) : null;
 
     if (!state || !ts || !channel) {
       await postEphemeral(deps, channel, body.user?.id, 'That review has expired — run `/review-flc` again.');
@@ -414,9 +459,20 @@ export function registerReviewFlcCommand(app: App, deps: ReviewFlcDeps): void {
       return;
     }
 
+    // Page blocks aren't stored with the review — re-fetch now to anchor comments.
+    let pageBlocks: PageBlock[] = [];
+    try {
+      pageBlocks = (await deps.notion.getPageMarkdown(state.pageId)).blocks;
+    } catch (err) {
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err) },
+        '[REVIEW-FLC] re-fetch blocks failed — anchoring at page level',
+      );
+    }
+
     const outcomes: PostOutcome[] = [];
     for (const finding of selected) {
-      const block = findAnchorBlock(finding.anchor, state.blocks);
+      const block = findAnchorBlock(finding.anchor, pageBlocks);
       try {
         if (block) {
           await deps.notion.createBlockComment(block.blockId, finding.message);
@@ -459,7 +515,7 @@ export function registerReviewFlcCommand(app: App, deps: ReviewFlcDeps): void {
     await ack();
     const ts: string | undefined = body.container?.message_ts ?? body.message?.ts;
     const channel: string | undefined = body.channel?.id ?? body.container?.channel_id;
-    if (ts) store.delete(ts);
+    if (ts) await deps.store.delete(ts);
     logger.info({ action: 'discard', by: body.user?.id }, '[REVIEW-FLC] action:discard');
     if (!channel || !ts) return;
     await deps.slack.chat.delete({ channel, ts }).catch(async (err: unknown) => {
@@ -473,11 +529,53 @@ export function registerReviewFlcCommand(app: App, deps: ReviewFlcDeps): void {
         .catch(() => {});
     });
   });
+
+  // Toggling a finding checkbox fires a block_actions event — ack it (no-op) so
+  // Slack doesn't show a timeout when the operator un/checks a finding.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  app.action(/^finding_select_/, async ({ ack }: any) => {
+    await ack();
+  });
+
+  // "Copy fix prompt" -> build a paste-ready prompt for the selected findings and
+  // show it (ephemeral) in a code block the operator can copy into their AI.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  app.action('review_flc_copyprompt', async ({ ack, body }: any) => {
+    await ack();
+    const ts: string | undefined = body.container?.message_ts ?? body.message?.ts;
+    const channel: string | undefined = body.channel?.id ?? body.container?.channel_id;
+    const user: string | undefined = body.user?.id;
+    const state = ts ? await deps.store.get(ts) : null;
+    if (!state || !channel || !user) {
+      await postEphemeral(deps, channel, user, 'That review has expired — run `/review-flc` again.');
+      return;
+    }
+    const selectedIds = collectSelectedIds(body.state?.values);
+    const selected = state.findings.filter((f) => selectedIds.has(f.id));
+    if (selected.length === 0) {
+      await postEphemeral(deps, channel, user, 'Tick at least one finding to copy a fix prompt.');
+      return;
+    }
+    const prompt = buildFixPrompt(state.url, selected);
+    logger.info(
+      { action: 'copy_prompt', count: selected.length, by: user },
+      '[REVIEW-FLC] action:copy_prompt',
+    );
+    await deps.slack.chat
+      .postEphemeral({
+        channel,
+        user,
+        text: 'Fix prompt',
+        blocks: renderCopyPromptBlocks(prompt, selected.length) as never,
+      })
+      .catch((err: unknown) =>
+        logger.warn({ err: String((err as Error)?.message ?? err) }, '[REVIEW-FLC] copy prompt failed'),
+      );
+  });
 }
 
 async function runReview(
   deps: ReviewFlcDeps,
-  store: ReviewStore,
   args: { pageId: string; url: string; areas: string[]; channel: string; userId: string },
 ): Promise<void> {
   logger.info(
@@ -492,15 +590,14 @@ async function runReview(
   const ts = posted.ts as string | undefined;
 
   try {
-    const { markdown, blocks } = await deps.notion.getPageMarkdown(args.pageId);
+    const { markdown } = await deps.notion.getPageMarkdown(args.pageId);
     const findings = await deps.review({ pageMarkdown: markdown, areas: args.areas });
 
     if (ts) {
-      store.set(ts, {
+      await deps.store.save(ts, {
         pageId: args.pageId,
         url: args.url,
         findings,
-        blocks,
         channel: args.channel,
       });
       await deps.slack.chat.update({

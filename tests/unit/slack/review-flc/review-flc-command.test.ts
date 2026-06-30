@@ -7,6 +7,8 @@ import {
   renderFindingsBlocks,
   findAnchorBlock,
   collectSelectedIds,
+  buildFixPrompt,
+  renderCopyPromptBlocks,
 } from '../../../../src/slack/review-flc/review-flc-command.js';
 import type { Finding } from '../../../../src/flc/flc-review-service.js';
 
@@ -44,7 +46,19 @@ function makeDeps() {
   };
   const review = vi.fn();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return { deps: { notion, slack, review } as any, notion, slack, review };
+  const map = new Map<string, any>();
+  const store = {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    save: vi.fn(async (ts: string, s: any) => {
+      map.set(ts, s);
+    }),
+    get: vi.fn(async (ts: string) => map.get(ts) ?? null),
+    delete: vi.fn(async (ts: string) => {
+      map.delete(ts);
+    }),
+  };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return { deps: { notion, slack, review, store } as any, notion, slack, review, store };
 }
 
 const F = (over: Partial<Finding>): Finding => ({
@@ -118,10 +132,11 @@ describe('pure helpers', () => {
     expect(json).toContain('F2');
     expect(json).toContain('checkboxes');
     expect(json).toContain('review_flc_post');
+    expect(json).toContain('review_flc_copyprompt');
     expect(json).toContain('review_flc_discard');
   });
 
-  it('pre-selects every finding checkbox by default (opt-out posting)', () => {
+  it('does not pre-select finding checkboxes (opt-in selection)', () => {
     const blocks = renderFindingsBlocks(
       [F({ id: 'F1' }), F({ id: 'F2', severity: 'Suggestion' }), F({ id: 'F3', severity: 'Should Fix' })],
       '111.222',
@@ -137,14 +152,28 @@ describe('pure helpers', () => {
       if (node && typeof node === 'object') {
         if (node.type === 'checkboxes') {
           checkboxCount += 1;
-          expect(Array.isArray(node.initial_options)).toBe(true);
-          expect(node.initial_options).toHaveLength(node.options.length);
+          expect(node.initial_options).toBeUndefined();
         }
         for (const v of Object.values(node)) walk(v);
       }
     };
     walk(blocks);
     expect(checkboxCount).toBeGreaterThan(0);
+  });
+
+  it('buildFixPrompt includes the FLC url and each selected finding', () => {
+    const prompt = buildFixPrompt('http://flc', [
+      F({ id: 'F1', message: 'fix the overview', severity: 'Must Fix', area: 'Functional', section: 'Overview' }),
+    ]);
+    expect(prompt).toContain('http://flc');
+    expect(prompt).toContain('fix the overview');
+    expect(prompt).toContain('Must Fix');
+  });
+
+  it('renderCopyPromptBlocks wraps the prompt in a copyable code block', () => {
+    const json = JSON.stringify(renderCopyPromptBlocks('PROMPT BODY', 2));
+    expect(json).toContain('```');
+    expect(json).toContain('PROMPT BODY');
   });
 
   it('shows each finding’s full message in its own section (not truncated to a checkbox)', () => {
@@ -400,5 +429,55 @@ describe('command handlers', () => {
 
     expect(ack).toHaveBeenCalled();
     expect(slack.chat.delete).toHaveBeenCalledWith({ channel: 'C42', ts: '111.222' });
+  });
+
+  it('copy fix prompt posts an ephemeral with the prompt for the selected findings', async () => {
+    const { app, handlers } = makeApp();
+    const { deps, notion, slack, review } = makeDeps();
+    notion.getPageMarkdown.mockResolvedValue({ markdown: '# FLC', blocks: [] });
+    review.mockResolvedValue([F({ id: 'F1', message: 'fix the overview' })]);
+    registerReviewFlcCommand(app, deps);
+
+    await handlers['view:review_flc_submit']({
+      ack: vi.fn(),
+      body: { user: { id: 'U1' } },
+      view: {
+        private_metadata: JSON.stringify({ channel: 'C42' }),
+        state: {
+          values: {
+            url_block: { url_input: { value: 'https://notion.so/x' } },
+            areas_block: { areas_input: { selected_options: [{ value: 'Functional' }] } },
+          },
+        },
+      },
+    });
+
+    const ack = vi.fn();
+    await handlers['action:review_flc_copyprompt']({
+      ack,
+      body: {
+        user: { id: 'U1' },
+        channel: { id: 'C42' },
+        container: { message_ts: '111.222' },
+        state: {
+          values: { f: { finding_select_F1: { type: 'checkboxes', selected_options: [{ value: 'F1' }] } } },
+        },
+      },
+    });
+
+    expect(ack).toHaveBeenCalled();
+    const eph = slack.chat.postEphemeral.mock.calls.at(-1)![0];
+    expect(JSON.stringify(eph.blocks)).toContain('fix the overview');
+  });
+
+  it('acks finding-checkbox toggles so Slack does not time out', async () => {
+    const { app, handlers } = makeApp();
+    const { deps } = makeDeps();
+    registerReviewFlcCommand(app, deps);
+    const handler = handlers['action:/^finding_select_/'];
+    expect(handler).toBeDefined();
+    const ack = vi.fn();
+    await handler({ ack });
+    expect(ack).toHaveBeenCalled();
   });
 });

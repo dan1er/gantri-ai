@@ -68,6 +68,8 @@ import { registerCronCommand } from './slack/devops/cron-command.js';
 import { NotionApiClient } from './connectors/notion/client.js';
 import { reviewFlc, loadReviewStandard } from './flc/flc-review-service.js';
 import { registerReviewFlcCommand } from './slack/review-flc/review-flc-command.js';
+import type { ReviewStateStore } from './slack/review-flc/review-flc-command.js';
+import { FlcReviewsRepo } from './storage/repositories/flc-reviews.js';
 import { ReportSubscriptionsRepo } from './reports/reports-repo.js';
 import { ScheduledReportsConnector } from './reports/reports-connector.js';
 import { compilePlan } from './reports/plan-compiler.js';
@@ -474,9 +476,21 @@ async function main() {
   const notionApiToken = env.NOTION_API_TOKEN ?? notionApiTokenVault;
   let notionClient: NotionApiClient | undefined;
   let reviewStandard: string | undefined;
+  let flcReviewStore: ReviewStateStore | undefined;
   if (notionApiToken) {
     notionClient = new NotionApiClient({ token: notionApiToken });
     reviewStandard = loadReviewStandard();
+    // Persist review state in Postgres so the result-message buttons keep working
+    // across bot restarts / redeploys (the previous in-memory store lost it).
+    const flcReviewsRepo = new FlcReviewsRepo(supabase);
+    flcReviewStore = {
+      save: (ts, s) => flcReviewsRepo.save({ messageTs: ts, ...s }),
+      get: (ts) =>
+        flcReviewsRepo
+          .get(ts)
+          .then((r) => (r ? { pageId: r.pageId, url: r.url, findings: r.findings, channel: r.channel } : null)),
+      delete: (ts) => flcReviewsRepo.delete(ts),
+    };
     logger.info('notion connector configured — /review-flc enabled');
   } else {
     logger.warn('notion not configured (NOTION_API_TOKEN missing) — skipping /review-flc registration');
@@ -507,6 +521,7 @@ async function main() {
         registerReviewFlcCommand(a, {
           notion: notionClient,
           slack: a.client,
+          store: flcReviewStore!,
           review: (input) =>
             reviewFlc(
               {

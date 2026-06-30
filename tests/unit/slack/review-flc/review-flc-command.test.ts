@@ -145,6 +145,13 @@ describe('pure helpers', () => {
     expect(checkboxCount).toBeGreaterThan(0);
   });
 
+  it('shows each finding’s full message in its own section (not truncated to a checkbox)', () => {
+    const message =
+      'This is a deliberately long finding explanation that exceeds any checkbox option limit. '.repeat(3).trim();
+    const blocks = renderFindingsBlocks([F({ id: 'F1', message })], '111.222', 'http://x');
+    expect(JSON.stringify(blocks)).toContain(message);
+  });
+
   it('keeps every checkbox option text + description under Slack’s 150-char limit', () => {
     // Long real-world findings must not blow Slack's per-option limit (otherwise
     // the whole message is rejected with invalid_blocks and the review fails).

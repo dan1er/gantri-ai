@@ -41,6 +41,11 @@ const SEVERITY_EMOJI: Record<string, string> = {
 // message ts, with a small cap so a long-lived process can't leak.
 const MAX_REVIEWS = 100;
 
+// Slack rejects a message with more than 50 blocks. Each finding is one section;
+// cap how many we render so the intro, severity headers, optional overflow note,
+// and the Post button always fit under the ceiling.
+const MAX_FINDING_SECTIONS = 42;
+
 class ReviewStore {
   private readonly map = new Map<string, ReviewState>();
 
@@ -205,13 +210,18 @@ export function renderFindingsBlocks(findings: Finding[], ts: string, url: strin
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `:mag: *FLC review* — ${findings.length} finding${findings.length === 1 ? '' : 's'} (${counts}). Tick the ones to post as comments on <${url}|the FLC>.`,
+        text: `:mag: *FLC review* — ${findings.length} finding${findings.length === 1 ? '' : 's'} (${counts}). All pre-selected — untick any you don't want, then *Post selected as comments* on <${url}|the FLC>.`,
       },
     },
     { type: 'divider' },
   ];
 
-  let groupIdx = 0;
+  // Each finding is its own section so the FULL text is visible (3000-char cap),
+  // with a checkboxes accessory for selection (a checkbox option's own text is
+  // limited to ~75 chars, so the message can't live there). Slack caps a message
+  // at 50 blocks — budget the finding sections so headers + button always fit.
+  let shown = 0;
+  let omitted = 0;
   for (const sev of FINDING_SEVERITIES) {
     const group = grouped.get(sev)!;
     if (group.length === 0) continue;
@@ -219,36 +229,39 @@ export function renderFindingsBlocks(findings: Finding[], ts: string, url: strin
       type: 'section',
       text: { type: 'mrkdwn', text: `${SEVERITY_EMOJI[sev]} *${sev}* (${group.length})` },
     });
-    // Slack caps a checkboxes element at 10 options — chunk into multiple blocks.
-    for (let i = 0; i < group.length; i += 10) {
-      const chunk = group.slice(i, i + 10);
-      const options = chunk.map((f) => ({
-        text: {
-          type: 'mrkdwn',
-          text: truncate(`*${f.area}*${f.section ? ` — ${f.section}` : ''}`, 150),
-        },
-        // Slack caps a checkbox option's description at 150 chars — overruns
-        // reject the whole message with invalid_blocks. The full message is
-        // preserved in the store and used verbatim when posting the comment.
-        description: { type: 'plain_text', text: truncate(f.message, 150) },
-        value: f.id,
-      }));
+    for (const f of group) {
+      if (shown >= MAX_FINDING_SECTIONS) {
+        omitted += 1;
+        continue;
+      }
+      const heading = `*${f.area}*${f.section ? ` — _${f.section}_` : ''}`;
+      const option = { text: { type: 'plain_text', text: 'Post' }, value: f.id };
       blocks.push({
-        type: 'actions',
-        block_id: `findings_${groupIdx}_${i}`,
-        elements: [
-          {
-            type: 'checkboxes',
-            action_id: `finding_select_${groupIdx}_${i}`,
-            options,
-            // Pre-select every finding by default — posting is opt-out: the
-            // operator unchecks what they don't want, then posts the rest.
-            initial_options: options,
-          },
-        ],
+        type: 'section',
+        block_id: `finding_${f.id}`,
+        text: { type: 'mrkdwn', text: truncate(`${heading}\n${f.message}`, 2900) },
+        accessory: {
+          type: 'checkboxes',
+          action_id: `finding_select_${f.id}`,
+          options: [option],
+          // Pre-selected — posting is opt-out: untick what you don't want.
+          initial_options: [option],
+        },
       });
+      shown += 1;
     }
-    groupIdx += 1;
+  }
+
+  if (omitted > 0) {
+    blocks.push({
+      type: 'context',
+      elements: [
+        {
+          type: 'mrkdwn',
+          text: `_+${omitted} more finding${omitted === 1 ? '' : 's'} not shown (Slack message limit) — re-run with fewer areas to see ${omitted === 1 ? 'it' : 'them'}._`,
+        },
+      ],
+    });
   }
 
   blocks.push({

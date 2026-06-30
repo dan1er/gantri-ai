@@ -285,7 +285,7 @@ export class ReportsConnector implements Connector {
   }
 }
 
-function normalizeFilename(filename: string, format: AttachFileArgs['format']): string {
+export function normalizeFilename(filename: string, format: AttachFileArgs['format']): string {
   const expectedExt = FORMAT_TO_EXT[format];
   const dot = filename.lastIndexOf('.');
   const base = dot > 0 ? filename.slice(0, dot) : filename;

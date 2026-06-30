@@ -194,4 +194,66 @@ describe('Orchestrator', () => {
     expect(note).toMatch(/leads\.csv/);
     expect(note).toMatch(/list directory unavailable/i);
   });
+
+  it('collects an attachment from any tool (not just reports.attach_file) and feeds back only a trimmed confirmation', async () => {
+    const bigContent = 'Product ID,Name\n' + '1,A\n'.repeat(2000);
+    const attachment = {
+      format: 'csv',
+      filename: 'gantri-product-catalog.csv',
+      title: 'Gantri product catalog export',
+      content: bigContent,
+      normalizedFilename: 'gantri-product-catalog.csv',
+    };
+    const tool: ToolDef = {
+      name: 'products.export_catalog',
+      description: 'export catalog',
+      schema: z.object({}).passthrough(),
+      jsonSchema: { type: 'object' },
+      execute: vi.fn(async () => ({ attachment, productsExported: 2, rowsExported: 5 })),
+    };
+    const conn: Connector = { name: 'products', tools: [tool], async healthCheck() { return { ok: true }; } };
+    const registry = new ConnectorRegistry();
+    registry.register(conn);
+
+    const responses = [
+      {
+        content: [{ type: 'tool_use', id: 'tu1', name: 'products_export_catalog', input: {} }],
+        stop_reason: 'tool_use',
+        usage: { input_tokens: 10, output_tokens: 5 },
+        model: 'claude-sonnet-4-6',
+      },
+      {
+        content: [{ type: 'text', text: 'Exported 2 products (5 SKUs).' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 5, output_tokens: 5 },
+        model: 'claude-sonnet-4-6',
+      },
+    ];
+    let i = 0;
+    const create = vi.fn(async () => responses[i++]);
+    const orch = new Orchestrator({
+      registry,
+      claude: { messages: { create } } as any,
+      model: 'claude-sonnet-4-6',
+      maxIterations: 3,
+    });
+
+    const out = await orch.run({ question: 'export the product catalog', threadHistory: [] });
+
+    // The attachment is collected for upload…
+    expect(out.attachments).toHaveLength(1);
+    expect(out.attachments[0].normalizedFilename).toBe('gantri-product-catalog.csv');
+
+    // …and only a trimmed confirmation (not the blob) is fed back to Claude.
+    const secondCallMessages = create.mock.calls[1][0].messages;
+    const toolResultMsg = secondCallMessages[secondCallMessages.length - 1];
+    const trimmed = toolResultMsg.content[0].content as string;
+    expect(trimmed).not.toContain(bigContent);
+    const parsed = JSON.parse(trimmed);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.productsExported).toBe(2);
+    expect(parsed.attached[0]).toMatchObject({ filename: 'gantri-product-catalog.csv', format: 'csv', bytes: bigContent.length });
+    // The raw content must not leak through under an `attachment` key either.
+    expect(parsed.attachment).toBeUndefined();
+  });
 });

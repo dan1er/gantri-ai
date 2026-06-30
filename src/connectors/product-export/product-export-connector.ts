@@ -50,11 +50,49 @@ export const WHOLESALE_DEFAULTS = {
 } as const;
 
 const PRODUCT_URL_BASE = 'https://www.gantri.com/products';
+/** Public Cloudinary base for product photos (verified against the live PDP). */
+const IMAGE_URL_BASE = 'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products';
 /** Hard ceiling on the generated CSV — matches the `reports.attach_file`
  *  content cap (reports-connector.ts). At ~121 active products this is moot,
  *  but a `status:'all'` pull on a much larger catalog could approach it. */
 const MAX_CSV_BYTES = 1_900_000;
 const MAX_ROWS = 5000;
+
+// Categories that ship with integrated/installed power (no plug-in cord-set).
+// Ported from mantle (src/constants/{wireless,hardwired}-categories.ts) — used
+// to derive Certification the same way the PDP does.
+const WIRELESS_CATEGORIES = new Set([
+  'Wireless Floor Lantern',
+  'Wireless Mini Light',
+  'Wireless Table Light',
+  'Wireless Task Light',
+]);
+const HARDWIRED_CATEGORIES = new Set(['Flush Mount', 'Pendant Light', 'Wall Sconce']);
+
+/**
+ * Decodes the `specs.bulb` SKU-format code (e.g. "E26, T8, 94mm") into the
+ * human bulb description shown on the PDP. Ported verbatim from mantle's
+ * `BULB_NAME_MAPPINGS` (src/modules/shop/product/sections/details/details.constants.ts).
+ * KEEP IN SYNC with mantle — when a new bulb code ships there, mirror it here.
+ */
+const BULB_NAME_MAPPINGS: Record<string, string[]> = {
+  '2x E12, T6, 65mm': ['2x E12 LED Dimmable Bulb (included)', '2700K Color Temperature', '600 Lumens, 6.4W'],
+  'E12, T13, 42mm': ['E12 LED Dimmable Bulb (included)', '2700K Color Temperature', '802 Lumens, 7W'],
+  'E12, T6, 65mm': ['E12 LED Dimmable Bulb (included)', '2700K Color Temperature', '600 Lumens, 6.4W'],
+  'E12, T8, 94mm': ['E12 LED Dimmable Bulb (included)', '2700K Color Temperature', '850 Lumens, 8.5W'],
+  'E26, A15': ['E26 LED Dimmable Bulb (included)', '2700K Color Temperature'],
+  'E26, A19': ['E26 LED Dimmable Bulb (included)', '2700K Color Temperature'],
+  'E26, A19, 109mm, 10W': ['E26 LED Dimmable Bulb (included)', '2700K Color Temperature', '800 Lumens, 10W'],
+  'E26, A19, 112mm, 13W': ['E26 LED Dimmable Bulb (included)', '2700K Color Temperature', '1100 Lumens, 13W'],
+  'E26, A21': ['E26 LED Dimmable Bulb (included)', '2700K Color Temperature'],
+  'E26, BR20': ['E26 LED Dimmable Bulb (included)', '2700K Color Temperature', '525 Lumens, 7W'],
+  'E26, BR30': ['E26 LED Dimmable Bulb (included)', '2700K Color Temperature', '650 Lumens, 8W'],
+  'E26, G25': ['E26 LED Dimmable Bulb (included)', '2700K Color Temperature', '800 Lumens, 10W'],
+  'E26, T8, 112mm': ['E26 LED Dimmable Bulb (included)', '2700K Color Temperature', '950 Lumens, 9.5W'],
+  'E26, T8, 94mm': ['E26 LED Dimmable Bulb (included)', '2700K Color Temperature', '850 Lumens, 8.5W'],
+  'LED PANEL, 110mm': ['Integrated LED Panel, Dimmable', '2700K-5000K Color Temperature', '1500 Lumens, 15W', '', 'Bulb not replaceable for integrated LED.'],
+  'LED PANEL, 130mm': ['Integrated LED Panel, Dimmable', '2700K Color Temperature', '1500 Lumens, 15W', '', 'Bulb not replaceable for integrated LED.'],
+};
 
 // ---------------------------------------------------------------------------
 // Args
@@ -143,7 +181,26 @@ export interface CatalogProduct {
   downloads: DownloadsShape | null;
   /** Per-SKU price overrides (cents), keyed by sku. Base price stays specs.price. */
   skuPrices: Record<string, number> | null;
+  /** Per-SKU asset filenames (photos), keyed by sku. Used to build image URLs. */
+  skuAssets: Record<string, SkuAssetShape> | null;
   colors: ColorShape[];
+}
+
+interface SkuAssetShape {
+  selectedWhiteBackgroundPhoto?: string | null;
+  whiteBackgroundPhotos?: string[] | null;
+}
+
+/** Structured bulb specs decoded from `specs.bulb` (mirrors the PDP). */
+export interface BulbInfo {
+  type: string;
+  base: string;
+  quantity: string;
+  wattage: string;
+  lumens: string;
+  colorTemp: string;
+  dimmable: string;
+  included: string;
 }
 
 /** One expanded export row (product × sku). */
@@ -151,6 +208,7 @@ interface RowContext {
   product: CatalogProduct;
   sku: string;
   colorName: string;
+  bulb: BulbInfo;
 }
 
 // ---------------------------------------------------------------------------
@@ -178,11 +236,20 @@ const BASE_COLUMNS: ColumnDef[] = [
   { header: 'Summary', value: (c) => c.product.summary ?? '' },
   { header: 'Description', value: (c) => c.product.description ?? '' },
   { header: 'Material', value: (c) => c.product.specs?.material ?? '' },
-  { header: 'Recommended Bulb', value: (c) => c.product.specs?.bulb ?? '' },
+  { header: 'Bulb Code', value: (c) => c.product.specs?.bulb ?? '' },
+  { header: 'Bulb Type', value: (c) => c.bulb.type },
+  { header: 'Bulb Base', value: (c) => c.bulb.base },
+  { header: 'Bulb Quantity', value: (c) => c.bulb.quantity },
+  { header: 'Wattage', value: (c) => c.bulb.wattage },
+  { header: 'Lumens', value: (c) => c.bulb.lumens },
+  { header: 'Color Temperature', value: (c) => c.bulb.colorTemp },
+  { header: 'Dimmable', value: (c) => c.bulb.dimmable },
+  { header: 'Bulb Included', value: (c) => c.bulb.included },
   {
     header: 'Compatible Bulbs',
     value: (c) => (c.product.specs?.compatibleWith ?? []).filter(Boolean).join('; '),
   },
+  { header: 'Certification', value: (c) => certification(c.product.category) },
   { header: 'Dimensions (in, H x W x D)', value: (c) => dimsHWD(c.product.specs?.dimensions) },
   { header: 'Footprint (in, W x D)', value: (c) => footprintWD(c.product.specs?.footPrint) },
   { header: 'Backplate (in, W x H)', value: (c) => backplateWH(c.product.specs?.backplate) },
@@ -192,6 +259,7 @@ const BASE_COLUMNS: ColumnDef[] = [
   { header: 'Warranty', value: () => WHOLESALE_DEFAULTS.warranty },
   { header: 'Country of Origin', value: () => WHOLESALE_DEFAULTS.countryOfOrigin },
   { header: 'Product URL', value: (c) => productUrl(c.product.id, c.sku) },
+  { header: 'Image URL', value: (c) => primaryImageUrl(c.product, c.sku) },
   { header: 'Cut Sheet', value: (c) => (c.product.downloads?.cutSheet?.isConfigured ? 'Available' : '') },
   { header: 'Install Instructions', value: (c) => (hasItems(c.product.downloads?.instructions) ? 'Available' : '') },
 ];
@@ -341,7 +409,7 @@ export function buildCatalogSql(args: Args): string {
 SELECT
   id, name, category, "subCategory", "designerName", status, type,
   summary, description, "leadTime", "leadTimeOption",
-  colors, size, specs, downloads, "skuPrices"
+  colors, size, specs, downloads, "skuPrices", "skuAssets"
 FROM "Products"
 ${where}
 ORDER BY category NULLS LAST, name
@@ -374,6 +442,7 @@ export function parseProductRow(fields: string[], row: unknown[]): CatalogProduc
     specs: ensureObject(at('specs')) as SpecsShape | null,
     downloads: ensureObject(at('downloads')) as DownloadsShape | null,
     skuPrices: ensureObject(at('skuPrices')) as Record<string, number> | null,
+    skuAssets: ensureObject(at('skuAssets')) as Record<string, SkuAssetShape> | null,
     colors: parsePgJsonArray(at('colors')) as ColorShape[],
   };
 }
@@ -382,20 +451,21 @@ export function parseProductRow(fields: string[], row: unknown[]): CatalogProduc
 export function expandRows(products: CatalogProduct[], granularity: 'sku' | 'product'): RowContext[] {
   const out: RowContext[] = [];
   for (const product of products) {
+    const bulb = decodeBulb(product.specs?.bulb);
     if (granularity === 'product') {
-      out.push({ product, sku: '', colorName: '' });
+      out.push({ product, sku: '', colorName: '', bulb });
       continue;
     }
     const colors = product.colors.filter((c) => c && (c.defaultSku || c.code));
     if (colors.length === 0) {
       // No color variants (gift cards, some accessories) — still emit the
       // product as a single row rather than dropping it.
-      out.push({ product, sku: '', colorName: '' });
+      out.push({ product, sku: '', colorName: '', bulb });
       continue;
     }
     for (const color of colors) {
       const sku = color.defaultSku ?? deriveSku(product, color);
-      out.push({ product, sku, colorName: color.name ?? color.code ?? '' });
+      out.push({ product, sku, colorName: color.name ?? color.code ?? '', bulb });
     }
   }
   return out;
@@ -472,6 +542,70 @@ function backplateWH(b: SpecsShape['backplate']): string {
 
 function hasItems(v: unknown): boolean {
   return Array.isArray(v) && v.length > 0;
+}
+
+/**
+ * Decode the `specs.bulb` code into structured bulb specs, mirroring the PDP's
+ * `BULB_NAME_MAPPINGS` lookup. Returns blanks for fields not derivable from the
+ * code (CRI is never encoded → always blank). For codes not in the mapping we
+ * still read base + quantity straight from the code string.
+ */
+export function decodeBulb(code: string | null | undefined): BulbInfo {
+  const empty: BulbInfo = { type: '', base: '', quantity: '', wattage: '', lumens: '', colorTemp: '', dimmable: '', included: '' };
+  if (!code) return empty;
+
+  const baseMatch = code.match(/\bE\d+\b/i);
+  const base = baseMatch ? baseMatch[0].toUpperCase() : /led panel/i.test(code) ? 'Integrated LED' : '';
+  const qtyMatch = code.match(/^(\d+)\s*x\b/i);
+  const quantity = qtyMatch ? qtyMatch[1] : '1';
+
+  const lines = BULB_NAME_MAPPINGS[code];
+  if (!lines || lines.length === 0) {
+    // Unmapped code: surface only what we can read from the string itself.
+    return { ...empty, type: code, base, quantity, dimmable: /led/i.test(code) ? 'Yes' : '' };
+  }
+
+  const joined = lines.join(' ');
+  const ct = joined.match(/(\d+K(?:-\d+K)?)/);
+  const lw = joined.match(/([\d,]+)\s*Lumens,\s*([\d.]+)\s*W/i);
+  return {
+    type: lines[0] ?? '',
+    base,
+    quantity,
+    wattage: lw ? `${lw[2]}W` : '',
+    lumens: lw ? lw[1].replace(/,/g, '') : '',
+    colorTemp: ct ? ct[1] : '',
+    dimmable: /dimmable/i.test(joined) ? 'Yes' : '',
+    included: /\(included\)/i.test(joined) ? 'Yes' : '',
+  };
+}
+
+/**
+ * Certification mark by category, mirroring the PDP. Plug-in lights (Table /
+ * Floor / Wall / Clamp) ship the SGS-certified cord-set; wireless and hardwired
+ * fixtures carry the standard UL mark.
+ */
+export function certification(category: string | null): string {
+  if (!category) return '';
+  return WIRELESS_CATEGORIES.has(category) || HARDWIRED_CATEGORIES.has(category)
+    ? 'UL Listed for US and Canada'
+    : 'SGS for UL and CSA';
+}
+
+/**
+ * Primary product image URL for a SKU, built from the existing `skuAssets`
+ * photo filenames. Pattern verified against the live PDP. Returns blank when
+ * the SKU has no white-background photo.
+ */
+export function primaryImageUrl(product: CatalogProduct, sku: string): string {
+  if (!sku) return '';
+  const asset = product.skuAssets?.[sku];
+  if (!asset) return '';
+  const fileName =
+    asset.selectedWhiteBackgroundPhoto ||
+    (Array.isArray(asset.whiteBackgroundPhotos) ? asset.whiteBackgroundPhotos[0] : null);
+  if (!fileName) return '';
+  return `${IMAGE_URL_BASE}/${product.id}/${sku}/product-photos/${fileName}`;
 }
 
 export function productUrl(id: number, sku: string): string {

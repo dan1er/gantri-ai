@@ -45,7 +45,7 @@ async function run(label, args) {
   console.log(`headers: ${Object.keys(rows[0] ?? {}).join(' | ')}`);
   console.log('first 3 rows:');
   for (const r of rows.slice(0, 3)) {
-    console.log(`  ${r['Product Name']} [${r.SKU}] $${r['List Price (USD)']} | ${r.Category} | bulb=${r['Recommended Bulb']} | dims=${r['Dimensions (in, H x W x D)']} | url=${r['Product URL']}`);
+    console.log(`  ${r['Product Name']} [${r.SKU}] $${r['List Price (USD)']} | ${r.Category} | ${r.Wattage}/${r.Lumens}lm/${r['Color Temperature']} dimm=${r.Dimmable} | cert=${r.Certification} | img=${r['Image URL'] ? 'Y' : '-'}`);
   }
   return { res, rows };
 }
@@ -81,6 +81,19 @@ try {
   const sampleUrl = rows[0]['Product URL'].split('?')[0];
   const urlRes = await fetch(sampleUrl, { method: 'HEAD', redirect: 'manual' });
   check('product URL resolves (2xx/3xx)', urlRes.status >= 200 && urlRes.status < 400, `${sampleUrl} → ${urlRes.status}`);
+
+  // Bulb specs derived from specs.bulb — at least some rows should have lumens/wattage.
+  const withBulb = rows.filter((r) => r.Lumens || r.Wattage);
+  check('bulb specs derived for some rows (lumens/wattage)', withBulb.length > 0, `${withBulb.length}/${rows.length} rows`);
+  check('certification populated for all rows', rows.every((r) => r.Certification), `e.g. "${rows[0].Certification}"`);
+
+  // Image URLs built from skuAssets — sample one and confirm it resolves (200).
+  const withImg = rows.find((r) => r['Image URL']);
+  check('at least one Image URL built from skuAssets', !!withImg, withImg ? `${withImg.SKU}` : 'none');
+  if (withImg) {
+    const imgRes = await fetch(withImg['Image URL'], { method: 'HEAD' });
+    check('sample Image URL resolves (200)', imgRes.status === 200, `${imgRes.status} ${withImg['Image URL'].slice(0, 90)}…`);
+  }
 
   // CSV round-trips with multiline material intact (no row corruption).
   check('row count matches rowsExported', rows.length === res.rowsExported, `${rows.length} vs ${res.rowsExported}`);

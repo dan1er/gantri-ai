@@ -12,6 +12,9 @@ import {
   listPrice,
   productUrl,
   escapeSql,
+  decodeBulb,
+  certification,
+  primaryImageUrl,
   WHOLESALE_DEFAULTS,
   type CatalogProduct,
 } from '../../../../src/connectors/product-export/product-export-connector.js';
@@ -30,7 +33,7 @@ function pgColorsLiteral(colors: Record<string, unknown>[]): string {
 const FIELDS = [
   'id', 'name', 'category', 'subCategory', 'designerName', 'status', 'type',
   'summary', 'description', 'leadTime', 'leadTimeOption',
-  'colors', 'size', 'specs', 'downloads', 'skuPrices',
+  'colors', 'size', 'specs', 'downloads', 'skuPrices', 'skuAssets',
 ];
 
 function lagoRow(): unknown[] {
@@ -66,6 +69,10 @@ function lagoRow(): unknown[] {
     },
     { cutSheet: { isConfigured: true }, instructions: [], models2D: [], models3D: [] },
     { '10018-cm-carbon': 26800 },
+    {
+      '10018-cm-snow': { selectedWhiteBackgroundPhoto: '10018-cm-snow--product-photos-abc.jpg' },
+      '10018-cm-carbon': { whiteBackgroundPhotos: ['10018-cm-carbon--product-photos-def.jpg'] },
+    },
   ];
 }
 
@@ -74,7 +81,7 @@ function giftCardRow(): unknown[] {
     99, 'Gift Card', null, null, null, 'Active', 'Gift Card',
     null, null, null, null,
     '{}', // no colors
-    null, null, null, null,
+    null, null, null, null, null,
   ];
 }
 
@@ -112,7 +119,7 @@ describe('products.export_catalog', () => {
     expect(headers).not.toContain('Manufacturer Price (USD)');
     expect(headers).not.toContain('Royalty (%)');
     expect(headers).toEqual(
-      expect.arrayContaining(['SKU', 'List Price (USD)', 'Product URL', 'Return Policy', 'Recommended Bulb']),
+      expect.arrayContaining(['SKU', 'List Price (USD)', 'Product URL', 'Return Policy', 'Bulb Type', 'Certification', 'Image URL']),
     );
 
     const snow = rows.find((r) => r.SKU === '10018-cm-snow')!;
@@ -128,7 +135,6 @@ describe('products.export_catalog', () => {
     expect(snow['Product Name']).toBe('Lago Compact');
     expect(snow.Color).toBe('Snow');
     expect(snow.Designer).toBe('Temporal Studio');
-    expect(snow['Recommended Bulb']).toBe('E26, T8, 94mm');
     expect(snow['Compatible Bulbs']).toBe('Philips Hue White and Color, E26, A19, 1100lm; E26, T8, 94mm');
     expect(snow['Dimensions (in, H x W x D)']).toBe('10 x 4.5 x 4.5');
     expect(snow['Cord Length (in)']).toBe('90');
@@ -137,6 +143,26 @@ describe('products.export_catalog', () => {
     expect(snow['Country of Origin']).toBe('USA');
     expect(snow['Product URL']).toBe('https://www.gantri.com/products/10018?sku=10018-cm-snow');
     expect(snow['Cut Sheet']).toBe('Available');
+
+    // Bulb specs decoded from specs.bulb ("E26, T8, 94mm") via BULB_NAME_MAPPINGS.
+    expect(snow['Bulb Code']).toBe('E26, T8, 94mm');
+    expect(snow['Bulb Type']).toBe('E26 LED Dimmable Bulb (included)');
+    expect(snow['Bulb Base']).toBe('E26');
+    expect(snow['Bulb Quantity']).toBe('1');
+    expect(snow.Wattage).toBe('8.5W');
+    expect(snow.Lumens).toBe('850');
+    expect(snow['Color Temperature']).toBe('2700K');
+    expect(snow.Dimmable).toBe('Yes');
+    expect(snow['Bulb Included']).toBe('Yes');
+    // Certification derived from category (Table Light = plug-in).
+    expect(snow.Certification).toBe('SGS for UL and CSA');
+    // Image URL built from existing skuAssets photo (no manual Google Drive link).
+    expect(snow['Image URL']).toBe(
+      'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10018/10018-cm-snow/product-photos/10018-cm-snow--product-photos-abc.jpg',
+    );
+    expect(carbon['Image URL']).toBe(
+      'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10018/10018-cm-carbon/product-photos/10018-cm-carbon--product-photos-def.jpg',
+    );
     // Material with embedded comma + newline survives the CSV round-trip.
     expect(snow.Material).toBe('Translucent diffuser,\nOpaque body');
     // Backplate is all-zero → blank, not "0 x 0".
@@ -282,6 +308,58 @@ describe('parsing + formatting helpers', () => {
 
   it('escapeSql doubles single quotes', () => {
     expect(escapeSql("O'Hare")).toBe("O''Hare");
+  });
+
+  it('decodeBulb extracts structured specs from a mapped code', () => {
+    const b = decodeBulb('E26, T8, 94mm');
+    expect(b).toMatchObject({
+      type: 'E26 LED Dimmable Bulb (included)',
+      base: 'E26',
+      quantity: '1',
+      wattage: '8.5W',
+      lumens: '850',
+      colorTemp: '2700K',
+      dimmable: 'Yes',
+      included: 'Yes',
+    });
+  });
+
+  it('decodeBulb reads quantity prefix and dual color-temp range', () => {
+    expect(decodeBulb('2x E12, T6, 65mm')).toMatchObject({ quantity: '2', base: 'E12', lumens: '600', wattage: '6.4W' });
+    expect(decodeBulb('LED PANEL, 110mm')).toMatchObject({ base: 'Integrated LED', colorTemp: '2700K-5000K', lumens: '1500', wattage: '15W' });
+  });
+
+  it('decodeBulb falls back gracefully for unmapped/empty codes', () => {
+    expect(decodeBulb(null)).toMatchObject({ type: '', base: '', wattage: '', lumens: '' });
+    const u = decodeBulb('E26, ZZ99'); // not in map
+    expect(u.base).toBe('E26');
+    expect(u.type).toBe('E26, ZZ99');
+    expect(u.lumens).toBe(''); // unknown — blank, not guessed
+  });
+
+  it('certification derives from category like the PDP', () => {
+    expect(certification('Table Light')).toBe('SGS for UL and CSA'); // plug-in
+    expect(certification('Floor Light')).toBe('SGS for UL and CSA');
+    expect(certification('Pendant Light')).toBe('UL Listed for US and Canada'); // hardwired
+    expect(certification('Wireless Table Light')).toBe('UL Listed for US and Canada');
+    expect(certification(null)).toBe('');
+  });
+
+  it('primaryImageUrl builds a Cloudinary URL from skuAssets, blank when absent', () => {
+    const p = {
+      id: 10018,
+      skuAssets: {
+        '10018-cm-snow': { selectedWhiteBackgroundPhoto: 'x.jpg' },
+        '10018-cm-fog': { whiteBackgroundPhotos: ['y.jpg'] },
+        '10018-cm-bare': {},
+      },
+    } as unknown as CatalogProduct;
+    expect(primaryImageUrl(p, '10018-cm-snow')).toBe(
+      'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10018/10018-cm-snow/product-photos/x.jpg',
+    );
+    expect(primaryImageUrl(p, '10018-cm-fog')).toContain('/10018-cm-fog/product-photos/y.jpg');
+    expect(primaryImageUrl(p, '10018-cm-bare')).toBe('');
+    expect(primaryImageUrl(p, '')).toBe('');
   });
 
   it('expandRows derives a sku when defaultSku is missing', () => {

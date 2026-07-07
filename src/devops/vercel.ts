@@ -26,6 +26,20 @@ function sanitizeBranch(ref: string): string {
   return ref.replace(/[^a-z0-9-]/gi, '-').toLowerCase();
 }
 
+// A DNS label (the part before `.vercel.app`) maxes out at 63 characters.
+const MAX_DNS_LABEL = 63;
+
+// Vercel's automatic git-branch alias is `{project}-git-{branch}-{scope}.vercel.app`.
+// When the label would exceed 63 chars, Vercel does NOT serve that hostname —
+// it truncates the branch and appends a hash instead — so a hand-built string
+// like `factoryos-git-preview-…-crash-gantri` (64 chars) resolves to nothing.
+// Only return the pretty alias when it actually fits; callers fall back to the
+// deployment's own always-resolvable URL otherwise.
+function branchAlias(project: string, branch: string): string | undefined {
+  const label = `${project}-git-${branch}-gantri`;
+  return label.length <= MAX_DNS_LABEL ? `https://${label}.vercel.app` : undefined;
+}
+
 export interface VercelClientDeps {
   token: string;
   teamId: string;
@@ -79,8 +93,28 @@ export class VercelClient {
   }
 
   /** Frontend-only: the branch's existing preview (built against staging). No wiring. */
-  previewUrlForBranch(repo: FrontendRepo, ref: string): Promise<string> {
-    return Promise.resolve(`https://${PROJECT_BY_REPO[repo]}-git-${sanitizeBranch(ref)}-gantri.vercel.app`);
+  async previewUrlForBranch(repo: FrontendRepo, ref: string): Promise<string> {
+    const project = PROJECT_BY_REPO[repo];
+    const branch = sanitizeBranch(ref);
+    const alias = branchAlias(project, branch);
+    if (alias) return alias;
+    // The pretty alias overflows 63 chars for this branch, so it won't resolve.
+    // Ask Vercel for the branch's latest preview deployment and use its real URL.
+    const { id } = await this.project(repo);
+    const real = await this.latestBranchDeploymentUrl(id, ref);
+    return real ?? `https://${project}-git-${branch}-gantri.vercel.app`;
+  }
+
+  /** The most recent preview deployment's own (always-resolvable) URL for a branch. */
+  private async latestBranchDeploymentUrl(projectId: string, ref: string): Promise<string | undefined> {
+    const res = await this.fetch(
+      `https://api.vercel.com/v6/deployments?projectId=${projectId}&teamId=${this.deps.teamId}&target=preview&limit=20`,
+      { headers: this.headers() },
+    );
+    if (!res.ok) return undefined;
+    const body = (await res.json()) as { deployments?: { url?: string; meta?: { githubCommitRef?: string } }[] };
+    const match = (body.deployments ?? []).find((d) => d.meta?.githubCommitRef === ref);
+    return match?.url ? `https://${match.url}` : undefined;
   }
 
   /**
@@ -119,7 +153,14 @@ export class VercelClient {
     // The Vercel dashboard page for the deployment (build logs / status).
     const deploymentUrl = dep.inspectorUrl ?? (dep.url ? `https://${dep.url}` : undefined);
 
-    return { url: `https://${name}-git-${branch}-gantri.vercel.app`, deploymentUrl };
+    // Prefer the stable branch alias, but only when it's a valid DNS label;
+    // long branches overflow 63 chars and Vercel serves a truncated+hashed
+    // alias, so fall back to this deployment's own always-resolvable URL.
+    const url =
+      branchAlias(name, branch) ??
+      (dep.url ? `https://${dep.url}` : `https://${name}-git-${branch}-gantri.vercel.app`);
+
+    return { url, deploymentUrl };
   }
 
   // Remove the branch-scoped API-URL env var on teardown so the branch stops

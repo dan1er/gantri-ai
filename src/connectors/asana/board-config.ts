@@ -28,6 +28,18 @@ export const BOARD_NAME = 'Software Board';
 export const TYPE_FIELD_GID = '1211288498996171';
 export const TYPE_FEATURE_OPTION_GID = '1211288498996175';
 
+/** Asana's "new feature" template task. It is a Type=Feature artifact that lives
+ *  on the board and records phantom QA section moves whenever the template is
+ *  edited, which would otherwise pollute the QA-stats denominator. Excluded from
+ *  the analysis entirely by exact (trimmed) name match. */
+export const FEATURE_TEMPLATE_TASK_NAME = 'Feature template';
+
+/** True when a task is the Asana "Feature template" artifact (exact trimmed name
+ *  match) and must be excluded from the analysis. */
+export function isFeatureTemplateTask(task: { name?: string }): boolean {
+  return (task.name ?? '').trim() === FEATURE_TEMPLATE_TASK_NAME;
+}
+
 /** Software Board section names → gids. The parser keys off names (story text),
  *  but the gids document the exact sections this logic was built against. */
 export const SECTION_GIDS = {

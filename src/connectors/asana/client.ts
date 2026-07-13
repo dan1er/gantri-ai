@@ -58,6 +58,8 @@ export interface AsanaTask {
   modified_at?: string;
   permalink_url?: string;
   custom_fields?: AsanaCustomFieldValue[];
+  /** Only populated for subtasks (opt_fields includes created_by.name). */
+  created_by?: AsanaStoryUser | null;
 }
 export interface AsanaStoryUser {
   gid?: string;
@@ -163,6 +165,12 @@ export class AsanaApiClient {
   /** All stories (activity + comments) on a task (offset-paginated). */
   async getTaskStories(taskGid: string, optFields: string): Promise<AsanaStory[]> {
     return this.paginate<AsanaStory>(`/tasks/${taskGid}/stories`, { opt_fields: optFields });
+  }
+
+  /** All subtasks of a task (offset-paginated). QA logs defects here by
+   *  convention, so these feed bounce evidence for the classifier. */
+  async getTaskSubtasks(taskGid: string, optFields: string): Promise<AsanaTask[]> {
+    return this.paginate<AsanaTask>(`/tasks/${taskGid}/subtasks`, { opt_fields: optFields });
   }
 
   /** The authenticated user — used for health checks and smoke reachability. */

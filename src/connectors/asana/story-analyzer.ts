@@ -20,10 +20,17 @@ import type { AsanaStory, AsanaTask } from './client.js';
  */
 
 const HOUR_MS = 60 * 60 * 1000;
-const EVIDENCE_WINDOW_TIGHT_MS = 2 * HOUR_MS; // any comment within ±2h
-const EVIDENCE_WINDOW_SAME_AUTHOR_MS = 36 * HOUR_MS; // same author within ±36h
-const MAX_EVIDENCE_PER_BOUNCE = 6;
+const EVIDENCE_WINDOW_TIGHT_MS = 12 * HOUR_MS; // any comment within ±12h
+const EVIDENCE_WINDOW_SAME_AUTHOR_MS = 72 * HOUR_MS; // same author (the bouncer) within ±72h
+const MAX_EVIDENCE_PER_BOUNCE = 8;
 const EVIDENCE_CHAR_CAP = 600;
+
+// Subtask evidence: QA logs each defect as a sub-task on the feature, so a
+// sub-task created around a bounce is strong evidence of a real functional
+// finding. Fetched per bounced feature by the connector and attached here.
+const SUBTASK_EVIDENCE_WINDOW_MS = 72 * HOUR_MS; // sub-task created within ±72h of the bounce
+const MAX_SUBTASK_EVIDENCE_PER_BOUNCE = 5;
+const SUBTASK_TITLE_CHAR_CAP = 200;
 
 /** A single backward move that kicked a feature out of a QA stage (or reopened
  *  a completed one). `from`/`to` are Software Board section names. */
@@ -204,8 +211,8 @@ export function analyzeFeature(
   };
 }
 
-/** Comments that explain a bounce: same author within ±36h, OR any author
- *  within ±2h. Truncated to 600 chars, capped at 6 per bounce. */
+/** Comments that explain a bounce: the bouncer within ±72h, OR any author
+ *  within ±12h. Truncated to 600 chars, capped at 8 per bounce. */
 function gatherEvidence(bounceBy: string, bounceAtMs: number, comments: CommentEvent[]): string[] {
   const hits: Array<{ atMs: number; text: string }> = [];
   for (const c of comments) {
@@ -216,6 +223,49 @@ function gatherEvidence(bounceBy: string, bounceAtMs: number, comments: CommentE
   }
   hits.sort((a, b) => a.atMs - b.atMs);
   return hits.slice(0, MAX_EVIDENCE_PER_BOUNCE).map((h) => truncate(h.text, EVIDENCE_CHAR_CAP));
+}
+
+/** Minimal subtask shape the evidence attachment needs (an AsanaTask fetched
+ *  with opt_fields=name,created_at,created_by.name). */
+export interface SubtaskLike {
+  name?: string;
+  created_at?: string;
+  created_by?: { name?: string } | null;
+}
+
+/**
+ * Attach sub-task evidence to each bounce, in place. Gantri QA logs each defect
+ * as a sub-task on the feature, so a sub-task created near a bounce is strong
+ * evidence of a real functional finding. For every bounce we append one line per
+ * sub-task created within ±72h of the bounce timestamp, formatted
+ * `subtask created by <name>: "<title>"` (title truncated to 200 chars), oldest
+ * first, capped at 5 sub-tasks per bounce.
+ *
+ * @param bounces   the feature's in-window bounces (mutated: evidence appended)
+ * @param subtasks  all of the feature's sub-tasks (any order)
+ */
+export function attachSubtaskEvidence(bounces: Bounce[], subtasks: SubtaskLike[]): void {
+  if (bounces.length === 0 || subtasks.length === 0) return;
+  const parsed = subtasks
+    .map((s) => ({
+      atMs: s.created_at ? Date.parse(s.created_at) : NaN,
+      title: (s.name ?? '').trim(),
+      by: s.created_by?.name ?? '(unknown)',
+    }))
+    .filter((s) => !Number.isNaN(s.atMs) && s.title.length > 0);
+  if (parsed.length === 0) return;
+
+  for (const b of bounces) {
+    const bounceAtMs = Date.parse(b.at);
+    if (Number.isNaN(bounceAtMs)) continue;
+    const near = parsed
+      .filter((s) => Math.abs(s.atMs - bounceAtMs) <= SUBTASK_EVIDENCE_WINDOW_MS)
+      .sort((a, c) => a.atMs - c.atMs)
+      .slice(0, MAX_SUBTASK_EVIDENCE_PER_BOUNCE);
+    for (const s of near) {
+      b.evidenceComments.push(`subtask created by ${s.by}: "${truncate(s.title, SUBTASK_TITLE_CHAR_CAP)}"`);
+    }
+  }
 }
 
 /**

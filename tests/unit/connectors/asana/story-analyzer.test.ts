@@ -1,9 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import {
   analyzeFeature,
+  attachSubtaskEvidence,
   isFeatureTask,
   parseSectionMove,
   pacificWindowToUtcMs,
+  type Bounce,
+  type SubtaskLike,
 } from '../../../../src/connectors/asana/story-analyzer.js';
 import { TYPE_FEATURE_OPTION_GID, TYPE_FIELD_GID } from '../../../../src/connectors/asana/board-config.js';
 import type { AsanaStory, AsanaTask } from '../../../../src/connectors/asana/client.js';
@@ -197,23 +200,119 @@ describe('analyzeFeature — multi-bounce + evidence', () => {
     expect(a.finders.sort()).toEqual(['Joshua Nie', 'Matthew Fite']);
   });
 
-  it('attaches same-author comment within 36h as evidence, drops far unrelated comment', () => {
+  it('attaches the bouncer comment within ±72h, drops an unrelated far comment', () => {
     const stories = [
       move('Matthew Fite', 'QA Review', 'Rework', '2026-06-10T12:00:00Z'),
-      comment('Matthew Fite', 'crash on submit', '2026-06-10T13:00:00Z'), // +1h, same author
-      comment('Joshua Nie', 'unrelated note', '2026-06-11T02:00:00Z'), // +14h, other author, >2h
+      comment('Matthew Fite', 'crash on submit', '2026-06-12T12:00:00Z'), // +48h, same author (was >36h, now kept)
+      comment('Joshua Nie', 'unrelated note', '2026-06-13T12:00:00Z'), // +72h, other author (>12h, dropped)
     ];
     const a = analyzeFeature(featureTask(), stories, START, END);
     expect(a.bounces[0].evidenceComments).toEqual(['crash on submit']);
   });
 
-  it('attaches any author comment within ±2h as evidence', () => {
+  it('attaches any-author comment within ±12h (widened from ±2h)', () => {
     const stories = [
       move('Matthew Fite', 'QA Review', 'Rework', '2026-06-10T12:00:00Z'),
-      comment('Francisco Bautista', 'this looks like expected behavior', '2026-06-10T13:30:00Z'), // +1.5h, other author
+      comment('Francisco Bautista', 'this looks like expected behavior', '2026-06-10T22:00:00Z'), // +10h, other author
     ];
     const a = analyzeFeature(featureTask(), stories, START, END);
     expect(a.bounces[0].evidenceComments).toEqual(['this looks like expected behavior']);
+  });
+
+  it('drops an other-author comment just past ±12h', () => {
+    const stories = [
+      move('Matthew Fite', 'QA Review', 'Rework', '2026-06-10T12:00:00Z'),
+      comment('Francisco Bautista', 'too far out', '2026-06-11T01:00:00Z'), // +13h, other author
+    ];
+    const a = analyzeFeature(featureTask(), stories, START, END);
+    expect(a.bounces[0].evidenceComments).toEqual([]);
+  });
+
+  it('caps evidence comments at 8 per bounce', () => {
+    const stories: AsanaStory[] = [move('Matthew Fite', 'QA Review', 'Rework', '2026-06-10T12:00:00Z')];
+    // 10 same-author comments all within ±72h — only the first 8 (oldest) survive.
+    for (let i = 0; i < 10; i++) {
+      stories.push(comment('Matthew Fite', `note ${i}`, `2026-06-10T${String(13 + i).padStart(2, '0')}:00:00Z`));
+    }
+    const a = analyzeFeature(featureTask(), stories, START, END);
+    expect(a.bounces[0].evidenceComments).toHaveLength(8);
+    expect(a.bounces[0].evidenceComments[0]).toBe('note 0');
+    expect(a.bounces[0].evidenceComments[7]).toBe('note 7');
+  });
+});
+
+describe('attachSubtaskEvidence', () => {
+  function bounce(at: string): Bounce {
+    return { by: 'Matthew Fite', from: 'QA Review', to: 'Rework', at, evidenceComments: [] };
+  }
+  function subtask(name: string, at: string, by = 'Matthew Fite'): SubtaskLike {
+    return { name, created_at: at, created_by: { name: by } };
+  }
+
+  it('appends a formatted line for a subtask created within ±72h of the bounce', () => {
+    const b = bounce('2026-06-10T12:00:00Z');
+    attachSubtaskEvidence([b], [subtask('Logo overlaps the title', '2026-06-11T12:00:00Z')]); // +24h
+    expect(b.evidenceComments).toEqual(['subtask created by Matthew Fite: "Logo overlaps the title"']);
+  });
+
+  it('includes a subtask at the ±72h boundary and excludes one just past it', () => {
+    const atBoundary = bounce('2026-06-10T12:00:00Z');
+    attachSubtaskEvidence([atBoundary], [subtask('right at the edge', '2026-06-13T12:00:00Z')]); // +72h exactly
+    expect(atBoundary.evidenceComments).toHaveLength(1);
+
+    const pastBoundary = bounce('2026-06-10T12:00:00Z');
+    attachSubtaskEvidence([pastBoundary], [subtask('too late', '2026-06-13T12:00:01Z')]); // +72h +1s
+    expect(pastBoundary.evidenceComments).toEqual([]);
+  });
+
+  it('caps at 5 subtasks per bounce, oldest first', () => {
+    const b = bounce('2026-06-10T12:00:00Z');
+    const subs = Array.from({ length: 8 }, (_, i) =>
+      subtask(`issue ${i}`, `2026-06-10T${String(13 + i).padStart(2, '0')}:00:00Z`),
+    );
+    attachSubtaskEvidence([b], subs);
+    expect(b.evidenceComments).toHaveLength(5);
+    expect(b.evidenceComments[0]).toBe('subtask created by Matthew Fite: "issue 0"');
+    expect(b.evidenceComments[4]).toBe('subtask created by Matthew Fite: "issue 4"');
+  });
+
+  it('truncates the subtask title to 200 chars', () => {
+    const b = bounce('2026-06-10T12:00:00Z');
+    const longTitle = 'x'.repeat(250);
+    attachSubtaskEvidence([b], [subtask(longTitle, '2026-06-10T13:00:00Z')]);
+    const line = b.evidenceComments[0];
+    // `subtask created by Matthew Fite: "` prefix + 200 chars + `…"` suffix.
+    expect(line).toContain('x'.repeat(200) + '…"');
+    expect(line).not.toContain('x'.repeat(201));
+  });
+
+  it('falls back to (unknown) when the subtask has no creator', () => {
+    const b = bounce('2026-06-10T12:00:00Z');
+    attachSubtaskEvidence([b], [{ name: 'orphan issue', created_at: '2026-06-10T13:00:00Z', created_by: null }]);
+    expect(b.evidenceComments).toEqual(['subtask created by (unknown): "orphan issue"']);
+  });
+
+  it('ignores nameless or dateless subtasks and is a no-op with no bounces/subtasks', () => {
+    const b = bounce('2026-06-10T12:00:00Z');
+    attachSubtaskEvidence([b], [
+      { name: '', created_at: '2026-06-10T13:00:00Z' },
+      { name: 'no date', created_at: undefined },
+    ]);
+    expect(b.evidenceComments).toEqual([]);
+
+    const b2 = bounce('2026-06-10T12:00:00Z');
+    attachSubtaskEvidence([b2], []);
+    expect(b2.evidenceComments).toEqual([]);
+    attachSubtaskEvidence([], [subtask('anything', '2026-06-10T13:00:00Z')]); // no throw
+  });
+
+  it('attaches independently per bounce based on each bounce timestamp', () => {
+    const early = bounce('2026-06-01T12:00:00Z');
+    const late = bounce('2026-06-20T12:00:00Z');
+    const sub = subtask('near the late bounce', '2026-06-20T13:00:00Z');
+    attachSubtaskEvidence([early, late], [sub]);
+    expect(early.evidenceComments).toEqual([]);
+    expect(late.evidenceComments).toEqual(['subtask created by Matthew Fite: "near the late bounce"']);
   });
 });
 

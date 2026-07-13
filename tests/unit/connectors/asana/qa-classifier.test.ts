@@ -15,12 +15,12 @@ const FEATURES: BouncedFeatureInput[] = [
   {
     gid: 'g1',
     taskName: 'Broken PDP render',
-    bounces: [{ by: 'Matthew Fite', from: 'QA Review', to: 'Rework', at: '2026-06-10T12:00:00Z', evidenceComments: ['image 404s'] }],
+    bounces: [{ by: 'Matthew Fite', from: 'QA Review', to: 'Rework', at: '2026-06-10T12:00:00Z', isQaBouncer: true, evidenceComments: ['image 404s'] }],
   },
   {
     gid: 'g2',
     taskName: 'Unclear criteria',
-    bounces: [{ by: 'Joshua Nie', from: 'QA Review', to: 'Code Review', at: '2026-06-11T12:00:00Z', evidenceComments: ['acceptance criteria unclear'] }],
+    bounces: [{ by: 'Joshua Nie', from: 'QA Review', to: 'Code Review', at: '2026-06-11T12:00:00Z', isQaBouncer: true, evidenceComments: ['acceptance criteria unclear'] }],
   },
 ];
 
@@ -49,6 +49,17 @@ describe('classifyBouncedFeatures', () => {
     const res = await classifyBouncedFeatures([FEATURES[0]], { claude });
     expect(res.degraded).toBe(false);
     expect(res.classifications.get('g1')).toEqual({ isRealBug: true, reason: 'crash' });
+  });
+
+  it('includes the isQaBouncer flag for each bounce in the prompt', async () => {
+    const claude = claudeReturning('[{"gid":"g1","isRealBug":true,"reason":"x"},{"gid":"g2","isRealBug":false,"reason":"y"}]');
+    await classifyBouncedFeatures(FEATURES, { claude });
+    const prompt: string = claude.messages.create.mock.calls[0][0].messages[0].content;
+    expect(prompt).toContain('isQaBouncer');
+    // Both fixtures are QA bounces → the flag is serialized true in the payload.
+    expect(prompt).toContain('"isQaBouncer":true');
+    // The recalibrated rubric drives the default off this flag.
+    expect(prompt).toContain('isQaBouncer=true');
   });
 
   it('marks degraded when the LLM call throws', async () => {
@@ -80,7 +91,7 @@ describe('classifyBouncedFeatures', () => {
     return Array.from({ length: n }, (_, i) => ({
       gid: `g${i}`,
       taskName: `Feature ${i}`,
-      bounces: [{ by: 'Matthew Fite', from: 'QA Review', to: 'Rework', at: '2026-06-10T12:00:00Z', evidenceComments: [] }],
+      bounces: [{ by: 'Matthew Fite', from: 'QA Review', to: 'Rework', at: '2026-06-10T12:00:00Z', isQaBouncer: true, evidenceComments: [] }],
     }));
   }
 

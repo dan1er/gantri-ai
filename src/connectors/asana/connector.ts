@@ -8,11 +8,13 @@ import { AsanaApiClient } from './client.js';
 import {
   BOARD_NAME,
   SOFTWARE_BOARD_PROJECT_GID,
+  isFeatureTemplateTask,
   isQaReviewer,
   shortNameFor,
 } from './board-config.js';
 import {
   analyzeFeature,
+  attachSubtaskEvidence,
   isFeatureTask,
   pacificWindowToUtcMs,
 } from './story-analyzer.js';
@@ -36,8 +38,9 @@ import {
 const OPT_FIELDS_TASK =
   'name,completed,created_at,modified_at,permalink_url,custom_fields.gid,custom_fields.enum_value.gid';
 const OPT_FIELDS_STORY = 'created_at,created_by.name,resource_subtype,text';
+const OPT_FIELDS_SUBTASK = 'name,created_at,created_by.name';
 
-/** How many task-story fetches to run in parallel. */
+/** How many task-story / subtask fetches to run in parallel. */
 const STORY_FETCH_CONCURRENCY = 5;
 
 export interface AsanaConnectorDeps {
@@ -111,9 +114,10 @@ export class AsanaConnector implements Connector {
     const includeFeatures = args.includeFeatures ?? true;
     const { startMs, endMs } = pacificWindowToUtcMs(startDate, endDate);
 
-    // 1. All project tasks → keep Features only.
+    // 1. All project tasks → keep Features only, excluding the "Feature template"
+    // artifact (it records phantom QA moves whenever the template is edited).
     const tasks = await this.client.getProjectTasks(SOFTWARE_BOARD_PROJECT_GID, OPT_FIELDS_TASK);
-    const features = tasks.filter(isFeatureTask);
+    const features = tasks.filter((t) => isFeatureTask(t) && !isFeatureTemplateTask(t));
 
     // 2. Prune features that cannot have a story inside the window.
     const candidates = features.filter((t) => {
@@ -138,15 +142,32 @@ export class AsanaConnector implements Connector {
     const inScope = analyses.filter((a) => a.hasQaActivityInWindow);
     const bounced = inScope.filter((a) => a.bounces.length > 0);
 
-    // 4. ONE batched LLM classification of bounced features.
+    // 4. Sub-task evidence — ONLY for bounced features (one extra API call each,
+    // ~40 on the full board). QA logs each defect as a sub-task, so a sub-task
+    // created around a bounce is strong evidence of a real functional finding.
+    await mapWithConcurrency(bounced, STORY_FETCH_CONCURRENCY, async (a) => {
+      const subtasks = await this.client.getTaskSubtasks(a.gid, OPT_FIELDS_SUBTASK);
+      attachSubtaskEvidence(a.bounces, subtasks);
+    });
+
+    // 5. ONE batched LLM classification of bounced features. Each bounce carries
+    // `isQaBouncer` so the classifier can default a reason-less QA bounce to a
+    // real bug.
     const classifierInput: BouncedFeatureInput[] = bounced.map((a) => ({
       gid: a.gid,
       taskName: a.name,
-      bounces: a.bounces,
+      bounces: a.bounces.map((b) => ({
+        by: b.by,
+        from: b.from,
+        to: b.to,
+        at: b.at,
+        isQaBouncer: isQaReviewer(b.by),
+        evidenceComments: b.evidenceComments,
+      })),
     }));
     const { classifications, degraded } = await classifyBouncedFeatures(classifierInput, { claude: this.claude });
 
-    // 5. Per-feature outcome.
+    // 6. Per-feature outcome.
     const outcomeByGid = new Map<string, Outcome>();
     const features_: Array<{
       gid: string;
@@ -189,7 +210,7 @@ export class AsanaConnector implements Connector {
       });
     }
 
-    // 6. Totals.
+    // 7. Totals.
     const featuresWithQaActivity = inScope.length;
     const featuresBouncedAny = bounced.length;
     let featuresRealBugByQa = 0;
@@ -205,7 +226,7 @@ export class AsanaConnector implements Connector {
       if (!hasQaFinder) featuresBouncedByNonQaOnly += 1;
     }
 
-    // 7. Finder attribution (per bounced feature, union of finders).
+    // 8. Finder attribution (per bounced feature, union of finders).
     interface FinderAgg {
       name: string;
       shortName: string;
@@ -239,7 +260,7 @@ export class AsanaConnector implements Connector {
         x.name.localeCompare(y.name),
     );
 
-    // 8. Order the per-feature list by severity, then bounce count, then name.
+    // 9. Order the per-feature list by severity, then bounce count, then name.
     features_.sort(
       (x, y) =>
         OUTCOME_RANK[x.outcome] - OUTCOME_RANK[y.outcome] ||

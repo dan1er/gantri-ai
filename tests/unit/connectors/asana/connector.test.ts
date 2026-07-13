@@ -52,13 +52,26 @@ function buildScenario() {
     t6: [],
   };
 
+  // Only t1 (a QA bounce) has a defect sub-task logged near the bounce.
+  const subtasksByGid: Record<string, AsanaTask[]> = {
+    t1: [
+      {
+        gid: 't1-sub1',
+        name: 'Header image 404s on load',
+        created_at: '2026-06-10T12:30:00Z',
+        created_by: { name: 'Matthew Fite' },
+      } as AsanaTask,
+    ],
+  };
+
   const client = {
     getProjectTasks: vi.fn(async () => tasks),
     getTaskStories: vi.fn(async (gid: string) => storiesByGid[gid] ?? []),
+    getTaskSubtasks: vi.fn(async (gid: string) => subtasksByGid[gid] ?? []),
     getCurrentUser: vi.fn(async () => ({ gid: 'u', name: 'Bot' })),
   } as unknown as AsanaApiClient;
 
-  return { client, tasks, storiesByGid };
+  return { client, tasks, storiesByGid, subtasksByGid };
 }
 
 function claudeReturning(rows: Array<{ gid: string; isRealBug: boolean; reason: string }>) {
@@ -165,5 +178,58 @@ describe('asana.feature_qa_stats — schema', () => {
     const out = await conn.tools[0].execute({ dateRange: 'last_30_days' }) as any;
     expect(out.period.startDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     expect(out.board).toBe('Software Board');
+  });
+});
+
+describe('asana.feature_qa_stats — subtask evidence', () => {
+  it('fetches subtasks ONLY for bounced features and feeds them into the classifier prompt', async () => {
+    const { client } = buildScenario();
+    // Capture the classifier prompt so we can assert the subtask line reaches it.
+    const create = vi.fn(async (args: any) => {
+      const content: string = args.messages[0].content;
+      const gids = [...content.matchAll(/"gid":"(t\d)"/g)].map((m) => m[1]);
+      return { content: [{ type: 'text', text: JSON.stringify(gids.map((gid) => ({ gid, isRealBug: true, reason: 'r' }))) }] };
+    });
+    const conn = new AsanaConnector({ client, claude: { messages: { create } } });
+    await conn.tools[0].execute(RANGE);
+
+    // Subtasks fetched for the 3 bounced features only (t1,t2,t3) — not the clean
+    // pass (t4), the out-of-window (t5), or the pruned (t6) feature.
+    const subtaskGids = (client.getTaskSubtasks as any).mock.calls.map((c: any[]) => c[0]).sort();
+    expect(subtaskGids).toEqual(['t1', 't2', 't3']);
+
+    // The t1 defect subtask is serialized into the classifier prompt as evidence.
+    const prompt: string = create.mock.calls[0][0].messages[0].content;
+    expect(prompt).toContain('subtask created by Matthew Fite: \\"Header image 404s on load\\"');
+  });
+});
+
+describe('asana.feature_qa_stats — template filter', () => {
+  it('excludes the "Feature template" artifact even when it shows QA activity', async () => {
+    const templateTask = feature('tmpl', 'Feature template', {
+      created_at: '2026-05-01T00:00:00Z',
+      modified_at: '2026-06-30T00:00:00Z',
+    });
+    const templateStories = [move('Matthew Fite', 'QA Review', 'Rework', '2026-06-15T12:00:00Z')];
+
+    const client = {
+      getProjectTasks: vi.fn(async () => [feature('t1', 'Real feature'), templateTask]),
+      getTaskStories: vi.fn(async (gid: string) =>
+        gid === 't1'
+          ? [move('Matthew Fite', 'QA Review', 'Rework', '2026-06-10T12:00:00Z')]
+          : templateStories,
+      ),
+      getTaskSubtasks: vi.fn(async () => []),
+      getCurrentUser: vi.fn(async () => ({ gid: 'u', name: 'Bot' })),
+    } as unknown as AsanaApiClient;
+
+    const claude = claudeReturning([{ gid: 't1', isRealBug: true, reason: 'x' }]);
+    const conn = new AsanaConnector({ client, claude });
+    const out = await conn.tools[0].execute(RANGE) as any;
+
+    // Only the real feature counts; the template is dropped before story fetch.
+    expect(out.totals.featuresWithQaActivity).toBe(1);
+    expect((client.getTaskStories as any).mock.calls.map((c: any[]) => c[0])).not.toContain('tmpl');
+    expect(out.features.map((f: any) => f.name)).toEqual(['Real feature']);
   });
 });

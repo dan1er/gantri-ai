@@ -2,19 +2,22 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { z } from 'zod';
 import { logger } from '../../logger.js';
 import { callClaudeWithResilience } from '../../llm/resilient-claude.js';
-import type { Bounce } from './story-analyzer.js';
 
 /**
  * ONE batched LLM call classifies every bounced feature as a genuine functional
  * bug vs process/environment noise. Deterministic detection (who bounced it,
  * when) happens upstream in the story-analyzer; the LLM only judges intent from
- * the bounce metadata + evidence comments.
+ * the bounce metadata + evidence (nearby comments and defect sub-tasks).
  *
- * isRealBug=true ONLY for genuine functional defects in the feature under test.
- * isRealBug=false for: merge conflicts, preview/staging environment issues,
- * unclear/outdated acceptance criteria, missing/unclear QA notes or testing
- * steps, process/ownership disputes, "expected behavior" reclassifications,
- * stakeholder-originated change requests, waiting-on-dependency pauses.
+ * CALIBRATION: a QA reviewer does not bounce a ticket out of QA without a cause,
+ * and Gantri QA logs the defect detail in a sub-task rather than a comment — so
+ * a QA bounce (`isQaBouncer=true`) DEFAULTS to isRealBug=true and is only flipped
+ * to false by EXPLICIT non-bug evidence (merge conflicts, preview/staging/deploy
+ * environment issues, outdated/unclear acceptance criteria including "expected
+ * behavior" reclassifications, missing/unclear QA notes or testing-step
+ * requests, ownership/scope/process disputes, stakeholder change requests,
+ * waiting-on-dependency pauses, template artifacts). A bounce performed only by
+ * non-QA people keeps a neutral default (thin evidence → isRealBug=false).
  *
  * If the call fails after resilience (or returns an unparseable shape), we
  * return `degraded: true` and an empty map — the connector then marks those
@@ -43,10 +46,22 @@ const CLASSIFIER_BATCH_SIZE = 40;
  */
 const CLASSIFIER_MAX_TOKENS = 4096;
 
+/** One bounce as handed to the classifier. Mirrors story-analyzer's `Bounce`
+ *  plus `isQaBouncer` — whether the person who performed the bounce is a QA
+ *  reviewer, which drives the default classification. */
+export interface ClassifierBounce {
+  by: string;
+  from: string;
+  to: string;
+  at: string;
+  isQaBouncer: boolean;
+  evidenceComments: string[];
+}
+
 export interface BouncedFeatureInput {
   gid: string;
   taskName: string;
-  bounces: Bounce[];
+  bounces: ClassifierBounce[];
 }
 
 export interface Classification {
@@ -171,17 +186,23 @@ function buildPrompt(features: BouncedFeatureInput[]): string {
       from: b.from,
       to: b.to,
       at: b.at,
+      isQaBouncer: b.isQaBouncer,
       evidenceComments: b.evidenceComments,
     })),
   }));
 
   return [
-    'You are auditing an engineering QA board. Each item below is a FEATURE ticket that was bounced backward out of a QA stage (or reopened after being marked done). For EACH feature decide whether the bounce represents a GENUINE FUNCTIONAL BUG in the feature under test, or PROCESS / ENVIRONMENT noise.',
+    'You are auditing an engineering QA board. Each item below is a FEATURE ticket that was bounced backward out of a QA stage (or reopened after being marked done). For EACH feature decide whether ANY of its bounces represents a GENUINE FUNCTIONAL BUG that QA (or a developer) found in the feature under test, versus PROCESS / ENVIRONMENT / CRITERIA noise.',
     '',
-    'isRealBug = true  → a genuine functional defect in the feature being tested (wrong behavior, crash, broken flow, incorrect data, visual regression, missing required behavior).',
-    'isRealBug = false → NOT a functional defect. This includes: merge conflicts, preview/staging environment issues, unclear or outdated acceptance criteria, missing/unclear QA notes or testing steps, process/ownership disputes, "expected behavior" reclassifications, stakeholder-originated change requests, and waiting-on-dependency pauses.',
+    'Each bounce carries an `isQaBouncer` flag (the person who performed the move is a QA reviewer). QA does not bounce a ticket out of QA without a cause, and logs the defect detail in a sub-task that may not appear in the comments. So apply these DEFAULTS:',
+    '- Bounce with isQaBouncer=true → isRealBug=TRUE, UNLESS the evidence EXPLICITLY indicates a non-bug cause (see the false list). Thin, empty, or comment-less evidence on a QA bounce STILL means isRealBug=TRUE.',
+    '- Bounce performed only by non-QA people (isQaBouncer=false) → judge purely from the evidence; when the evidence is thin or ambiguous, isRealBug=FALSE.',
     '',
-    'When the evidence is thin, lean on the section transition and any comments. If it is genuinely ambiguous but looks like a real functional problem, mark true; if it looks like process/env/criteria, mark false.',
+    'isRealBug=TRUE signals: errors / broken / crash / "not working" / does not match the design or spec; a defect-sounding sub-task created around the bounce time; "issue found"; visual or layout defects; wrong or missing data shown; incorrect behavior.',
+    '',
+    'isRealBug=FALSE ONLY when the evidence EXPLICITLY shows one of these non-bug causes: merge conflicts or PR-review-pending process gaps; preview / staging / deploy environment issues; outdated or unclear acceptance criteria (including "expected behavior" reclassifications); missing or unclear QA notes or testing-steps requests; ownership / scope / process disputes; stakeholder-originated change requests; waiting-on-a-dependency pauses; template artifacts.',
+    '',
+    'A feature may have several bounces — mark isRealBug=TRUE if ANY qualifying bounce is a real functional finding under the rules above.',
     '',
     'Output ONLY valid JSON, no commentary, no markdown fence — an array with one object per input feature (same gids), in this exact shape:',
     '[{"gid": "<gid>", "isRealBug": true|false, "reason": "<one short phrase, at most 12 words>"}]',

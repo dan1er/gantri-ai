@@ -44,6 +44,19 @@ describe('AsanaApiClient auth + core', () => {
     const [url] = fetchImpl.mock.calls[0];
     expect(String(url)).toContain('/tasks/42/stories');
   });
+
+  it('getTaskSubtasks hits /tasks/{gid}/subtasks with opt_fields', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({
+      data: [{ gid: 'sub1', name: 'Logo overlaps title', created_at: '2026-06-10T12:00:00Z', created_by: { name: 'Matthew Fite' } }],
+    }));
+    const client = new AsanaApiClient({ accessToken: 'tok', fetchImpl });
+    const subtasks = await client.getTaskSubtasks('42', 'name,created_at,created_by.name');
+    expect(subtasks).toHaveLength(1);
+    expect(subtasks[0]).toMatchObject({ name: 'Logo overlaps title', created_by: { name: 'Matthew Fite' } });
+    const [url] = fetchImpl.mock.calls[0];
+    expect(String(url)).toContain('/tasks/42/subtasks');
+    expect(String(url)).toMatch(/opt_fields=name(%2C|,)created_at/);
+  });
 });
 
 describe('AsanaApiClient pagination', () => {
@@ -66,6 +79,18 @@ describe('AsanaApiClient pagination', () => {
     const tasks = await client.getProjectTasks('123', 'name');
     expect(tasks.length).toBe(1);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('getTaskSubtasks follows next_page.offset until exhausted', async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ data: [{ gid: 'sub1', name: 'a' }], next_page: { offset: 'OFF1', path: '', uri: '' } }))
+      .mockResolvedValueOnce(jsonResponse({ data: [{ gid: 'sub2', name: 'b' }], next_page: null }));
+    const client = new AsanaApiClient({ accessToken: 'tok', fetchImpl });
+    const subtasks = await client.getTaskSubtasks('42', 'name');
+    expect(subtasks.map((s) => s.gid)).toEqual(['sub1', 'sub2']);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(String(fetchImpl.mock.calls[0][0])).not.toContain('offset=');
+    expect(String(fetchImpl.mock.calls[1][0])).toContain('offset=OFF1');
   });
 });
 
@@ -97,5 +122,17 @@ describe('AsanaApiClient error + retry', () => {
     const client = new AsanaApiClient({ accessToken: 'tok', fetchImpl, retryDelayMs: 1 });
     await expect(client.getCurrentUser()).rejects.toBeInstanceOf(AsanaApiError);
     expect(fetchImpl).toHaveBeenCalledTimes(2); // initial + 1 retry
+  });
+
+  it('getTaskSubtasks throws AsanaApiError on a 404 with status + body', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ errors: [{ message: 'Not Found' }] }, 404));
+    const client = new AsanaApiClient({ accessToken: 'tok', fetchImpl });
+    await expect(client.getTaskSubtasks('42', 'name')).rejects.toBeInstanceOf(AsanaApiError);
+    try {
+      await client.getTaskSubtasks('42', 'name');
+    } catch (e) {
+      expect((e as AsanaApiError).status).toBe(404);
+      expect((e as AsanaApiError).body).toEqual({ errors: [{ message: 'Not Found' }] });
+    }
   });
 });

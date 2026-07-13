@@ -64,4 +64,9 @@ export const DEFAULT_CACHE_POLICIES: Record<string, CachePolicy> = {
   'gsc.list_sites': { version: 1, settleDays: 0, openTtlSec: 3600, dateRangePath: '_none' },
   'gsc.search_performance': { version: 1, settleDays: 5, openTtlSec: 600, dateRangePath: 'dateRange' },
   'gsc.inspect_url': { version: 1, settleDays: 0, openTtlSec: 1800, dateRangePath: '_none' },
+
+  // Asana — task history for a closed window is stable, but stories keep landing
+  // for a couple weeks after a feature ships (post-release QA reopens). Settle
+  // after 14 days; refresh open windows every 30 min.
+  'asana.feature_qa_stats': { version: 1, settleDays: 14, openTtlSec: 1800, dateRangePath: 'dateRange' },
 };

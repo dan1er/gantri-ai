@@ -232,7 +232,19 @@ Watch the deploy log. The deploy succeeds when you see "Machine ... is now in a 
 
 ## Reference trail
 
-Most recent end-to-end implementation: `klaviyo.consented_signups` (April 2026). See:
+Most recent end-to-end implementation: `asana.feature_qa_stats` (July 2026) — a
+connector whose single tool combines a paginated REST client, a pure
+deterministic story-parser (`story-analyzer.ts`, HTTP-free + heavily
+unit-tested), and ONE batched Haiku classification (`qa-classifier.ts`) that
+degrades gracefully (`degraded:true`) when the LLM is unavailable. It needs the
+shared Anthropic `claude` client passed via deps, so it is constructed AFTER the
+`claude` instance in `src/index.ts`, not next to the other secret reads. See:
+- Spec: `docs/superpowers/specs/2026-07-13-asana-feature-qa-stats-design.md`
+- Plan: `docs/superpowers/plans/2026-07-13-asana-feature-qa-stats.md`
+- Files: `src/connectors/asana/{board-config,client,story-analyzer,qa-classifier,connector}.ts`
+- Smoke: `scripts/smoke-asana.sh` + `scripts/smoke-asana-tools.mjs`
+
+Prior end-to-end implementation: `klaviyo.consented_signups` (April 2026). See:
 - Spec: `docs/superpowers/specs/2026-04-29-klaviyo-consented-signups-design.md`
 - Plan: `docs/superpowers/plans/2026-04-29-klaviyo-consented-signups.md`
 - Branch: `feat/klaviyo-consented-signups`
@@ -246,6 +258,7 @@ Other complete reference connectors:
 - `src/connectors/northbeam-api/` — public REST API with CSV export pattern
 - `src/connectors/rollup/` — the original scheduled-rollup-job pattern (reference for Phase D2)
 - `src/connectors/klaviyo/` — most recent rollup pattern with all phases
+- `src/connectors/asana/` — pure deterministic parser split out from the HTTP client + a batched, gracefully-degrading LLM classification step (needs the shared `claude` deps)
 
 ---
 

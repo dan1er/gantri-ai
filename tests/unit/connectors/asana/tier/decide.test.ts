@@ -3,7 +3,7 @@ import { decideTier, DOMAIN_BASE_TIER, type Domain, type Facts, type Ternary } f
 import type { DeliveryTier } from '../../../../../src/connectors/asana/board-config.js';
 
 /**
- * The Notion "Delivery Tier Classifier" rubric page (Version 2, domain-base model),
+ * The Notion "Delivery Tier Classifier" rubric page (Version 1, domain-base model),
  * encoded as fixtures so the code is provably aligned with the public doc. The
  * functional domain sets a BASE tier; the change (Step 3/4) raises or lowers it;
  * uncertainty floors to T1; a definite T2 stays T2. Finally the LLM's own tier is
@@ -42,12 +42,16 @@ describe('DOMAIN_BASE_TIER — transcribed from the Notion page', () => {
       .filter(([, t]) => t === 'T2')
       .map(([d]) => d)
       .sort();
+    // Seven T2 base domains, matching the Notion page table: the three inherently
+    // dangerous ones (auth, inventory, production) plus the four customer money/order
+    // surfaces (checkout, orders, order management, payouts / statements / quotes).
     expect(t2).toEqual(
       [
         'auth_accounts',
         'inventory_materials',
         'order_management',
         'orders_notifications',
+        'payouts_statements',
         'production_workflow',
         'shopping_checkout',
       ].sort(),
@@ -61,6 +65,45 @@ describe('DOMAIN_BASE_TIER — transcribed from the Notion page', () => {
     expect(DOMAIN_BASE_TIER.unknown).toBe('T1');
     expect(DOMAIN_BASE_TIER.porter_orders_payments).toBe('T1');
     expect(DOMAIN_BASE_TIER.porter_accounts_orgs).toBe('T1');
+  });
+
+  it('pins the money-adjacent domains by name (page-table parity)', () => {
+    // payouts_statements is a customer money surface → T2 base (page table). The
+    // MadeOS money-adjacent domains stay T1 base and only reach T2 via Step 3's
+    // money trigger. These are the invariants the final model depends on.
+    expect(DOMAIN_BASE_TIER.payouts_statements).toBe('T2');
+    expect(DOMAIN_BASE_TIER.made_quoting_billing).toBe('T1');
+    expect(DOMAIN_BASE_TIER.made_order_management).toBe('T1');
+  });
+});
+
+describe('decideTier — money-adjacent domain invariants', () => {
+  it('payouts/statements behaviour change with no hard trigger keeps the T2 base', () => {
+    const d = decideTier(facts({ behavior_change: 'yes', domain: 'payouts_statements' }));
+    expect(d.tier).toBe('T2');
+    expect(d.baseTier).toBe('T2');
+    expect(d.firedRule).toBe('behavior_at_base');
+  });
+
+  it('made_quoting_billing keeps T1 for a recoverable change, escalates to T2 on money', () => {
+    const recoverable = decideTier(
+      facts({ behavior_change: 'yes', visual_blast_radius: 'yes', domain: 'made_quoting_billing' }),
+    );
+    expect(recoverable.tier).toBe('T1');
+    expect(recoverable.baseTier).toBe('T1');
+
+    const money = decideTier(facts({ behavior_change: 'yes', money: 'yes', domain: 'made_quoting_billing' }));
+    expect(money.tier).toBe('T2');
+    expect(money.firedRule).toBe('t2_risk_trigger');
+  });
+
+  it('made_order_management escalates to T2 on an irreversible customer action', () => {
+    const d = decideTier(
+      facts({ behavior_change: 'yes', irreversible_external: 'yes', domain: 'made_order_management' }),
+    );
+    expect(d.tier).toBe('T2');
+    expect(d.baseTier).toBe('T1');
+    expect(d.firedRule).toBe('t2_risk_trigger');
   });
 });
 

@@ -1,4 +1,4 @@
-Version: 2
+Version: 1
 
 # Delivery Tier Classifier
 
@@ -13,7 +13,7 @@ The change is backend-only / infrastructure / CI / a data migration / logging / 
 Identify the ticket's functional domain — pick exactly one — and take its **base tier** from the table.
 
 - Backend (`porter_*`) domains sit at T1, not T2: QA validates through the UI only, so backend risk is engineering's Non-UI Lane gate (Step 1); their base applies only when a ticket in these domains still has a UI surface.
-- Money-adjacent domains (checkout, orders, quotes / payouts) also sit at T1: they become **T2 exactly when the change affects pricing / money** — that is Step 3's money trigger, matching the framework's "Orders, if there is a chance of money loss."
+- Money-adjacent customer surfaces (checkout, orders, order management, payouts / statements / quotes) sit at **T2**: a defect there can lose money or commit a customer irreversibly, so they verify before production by default. Step 3 still downgrades a purely cosmetic or behavior-preserving change on these surfaces the same as any other domain (a restyle of the checkout page is not a T2).
 
 | Domain | Covers | Base tier |
 | --- | --- | --- |
@@ -23,7 +23,7 @@ Identify the ticket's functional domain — pick exactly one — and take its **
 | shopping_checkout | cart, checkout, payments, tax, shipping, discounts | T2 |
 | orders_notifications | orders, confirmations, customer emails / SMS | T2 |
 | order_management | orders, refunds / returns, replacements (Factory OS) | T2 |
-| payouts_statements | statements, payouts, quotes | T1 |
+| payouts_statements | statements, payouts, quotes | T2 |
 | made_order_management | orders (MadeOS) | T1 |
 | made_quoting_billing | quotes, estimates, invoices | T1 |
 | gift_cards | purchase / redeem gift cards | T1 |

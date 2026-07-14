@@ -245,6 +245,27 @@ Invariants that do NOT move regardless of page content (governance floor):
 
 State of the page at last check (2026-07-14 night, converged change-based model): 1· no UI surface → T0 · 2· no behavior change → T0/T1, never T2 · 3· behavior change AND (money | irreversible-customer | data/inventory integrity | access/security) → T2 · 4· everything else → T1; uncertain → T1. Domain = output tag only.
 
+## Addendum 4 — FINAL MODEL (Danny-confirmed directly, 2026-07-14). Supersedes all prior addendums where they conflict.
+
+Danny's decision: domain sets the base tier (keeps the rubric consistent with the QA-agreed framework's "classified by functional domain"); risk is the determinator via downgrade; the framework's own Verification cases are the escalation safety net.
+
+### Decision function — FINAL (pure code; LLM supplies domain + signals + evidence)
+
+1. `ui_testable === 'no'` → **T0** (+ Non-UI Lane note when the backend area is money/orders/inventory/auth/pricing). Terminal.
+2. `base = DOMAIN_BASE_TIER[domain]` — full 36-domain table transcribed from the Notion page (Danny's list; normalize the page's `porter_catlog_products` typo to `porter_catalog_products` in code and fix the page at parity check). `unknown` → T1.
+3. **Risk downgrade**: no behavior change → cosmetic (label/copy/styling) → **T0**; visible-but-behavior-preserving (layout/restyle/reorder, logic intact) → **min(base, T1)**. Behavior-changing → keep `base`.
+4. **Hard-trigger escalation (safety net, framework's own Verification cases)**: behavior change AND (money | irreversible action hitting a real external customer | data/inventory integrity | access/security) → **T2**, regardless of domain base.
+5. **Uncertainty floor**: any decision-relevant `unclear` or `domain=unknown` → at least **T1** (a definite T2 stays T2; step-1 terminal T0 unaffected unless `ui_testable` itself is unclear).
+6. `tier_domain_minimums` is **DROPPED** (YAGNI): the DOMAIN_BASE_TIER table is the single calibration lever. Monday-report recommendations are applied by editing the table via PR + updating the Notion page in the same change.
+
+### Extraction signals — FINAL
+
+`ui_testable`, `behavior_change`, `cosmetic_only`, `money`, `irreversible_external`, `data_integrity`, `access_security`, `visual_blast_radius` (kept for reporting), each yes/no/unclear + verbatim evidence, plus `domain` (36-value enum + unknown). Output contract: the page's `{tier, domain, why, evidence}` JSON plus a machine appendix requesting `signals`; code recomputes the tier from signals and uses the recomputed value; LLM-tier ≠ code-tier → treat as unclear (T1 floor) + count in the Monday report as a calibration miss.
+
+### Prompt presentation (page + shipped file must stay verbatim-equivalent, file may add the marked machine appendix)
+
+Step order on the page: 1· UI-testable check → 2· functional domain + base tier table → 3· risk evaluation (downgrade when the change doesn't carry the domain's risk; the four Verification cases always verify before production) → 4· uncertainty → T1. Reads domain-first (framework-consistent); risk decides.
+
 ### Consequences
 
 - `src/prompts/delivery-tier-standard.md` is rewritten to match the Notion page verbatim (steps 1–4 + table + JSON contract asking for the signals; the bot still computes the tier in code — the page's "output tier" instruction is satisfied because code recomputation from the same rules yields the identical tier).

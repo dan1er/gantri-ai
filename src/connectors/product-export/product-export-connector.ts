@@ -14,7 +14,8 @@ import { logger } from '../../logger.js';
  * Background: Sales needs to hand wholesale partners an up-to-date
  * spec sheet of our products during onboarding. This tool covers everything
  * Porter stores TODAY (name, SKUs, dimensions, materials, list price, lead
- * time, bulb info, spec/cut sheets, product URL). The richer per-spec columns
+ * time, bulb info, product/image URLs, and browser-clickable cut-sheet +
+ * install-instruction PDF URLs). The richer per-spec columns
  * the ticket asks for (structured wattage/lumens/CRI/color-temp, dimmable,
  * UL/ADA ratings, canopy dims, Google Drive photo link) require Porter schema
  * additions + manual data entry in FactoryOS and light up automatically once
@@ -55,7 +56,9 @@ export const WHOLESALE_DEFAULTS = {
 } as const;
 
 const PRODUCT_URL_BASE = 'https://www.gantri.com/products';
-/** Public Cloudinary base for product photos (verified against the live PDP). */
+/** Public Cloudinary base for product assets — photos, cut-sheet PDFs and
+ *  download PDFs all live under this prefix (PDFs are served via image/upload).
+ *  Verified against the live PDP + Porter's cut-sheet output. */
 const IMAGE_URL_BASE = 'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products';
 /** Hard ceiling on the generated CSV — matches the `reports.attach_file`
  *  content cap (reports-connector.ts). At ~121 active products this is moot,
@@ -197,6 +200,10 @@ export interface CatalogProduct {
 interface SkuAssetShape {
   selectedWhiteBackgroundPhoto?: string | null;
   whiteBackgroundPhotos?: string[] | null;
+  /** Cached cut-sheet PDF filename. Porter generates the cut-sheet PDF lazily
+   *  (on first PDP download) and writes its Cloudinary filename here; it is the
+   *  read-only source for the browser-clickable Cut Sheet URL. */
+  cutSheet?: string | null;
 }
 
 /** Structured bulb specs decoded from `specs.bulb` (mirrors the PDP). */
@@ -302,8 +309,8 @@ const BASE_COLUMNS: ColumnDef[] = [
   { header: 'Country of Origin', value: () => WHOLESALE_DEFAULTS.countryOfOrigin },
   { header: 'Product URL', value: (c) => productUrl(c.product.id, c.sku) },
   { header: 'Image URL', value: (c) => primaryImageUrl(c.product, c.sku) },
-  { header: 'Cut Sheet', value: (c) => (c.product.downloads?.cutSheet?.isConfigured ? 'Available' : '') },
-  { header: 'Install Instructions', value: (c) => (hasItems(c.product.downloads?.instructions) ? 'Available' : '') },
+  { header: 'Cut Sheet URL', value: (c) => cutSheetUrl(c.product, c.sku) },
+  { header: 'Install Instructions URLs', value: (c) => instructionUrls(c.product) },
 ];
 
 const INTERNAL_COST_COLUMNS: ColumnDef[] = [
@@ -333,7 +340,7 @@ export class ProductExportConnector implements Connector {
       description: [
         'Export Gantri product catalog data as a downloadable CSV attachment. Use this whenever the user asks for a product spec sheet / catalog / price list / "product data to share with a wholesale partner" / "export our products as a CSV".',
         '',
-        'Each row is one SKU (color variant) by default — i.e. "all SKUs per product". Columns: product name, designer, category, size, SKU, color, status, list price (USD), lead time, summary, description, material, recommended + compatible bulbs, dimensions, footprint, backplate, cord length, weight, return policy, warranty, country of origin, product URL, and cut-sheet / install-instruction availability.',
+        'Each row is one SKU (color variant) by default — i.e. "all SKUs per product". Columns: product name, designer, category, size, SKU, color, status, list price (USD), lead time, summary, description, material, recommended + compatible bulbs, dimensions, footprint, backplate, cord length, weight, return policy, warranty, country of origin, product URL, image URL, and browser-clickable cut-sheet + install-instruction PDF URLs.',
         '',
         'Filters: `status` (Active default, or "all"), `category` (single name or array — see below), `productIds` (explicit allow-list), `productNameContains`, `granularity` ("sku" default | "product").',
         '',
@@ -605,10 +612,6 @@ function backplateWH(b: SpecsShape['backplate']): string {
   return `${w} x ${h}`;
 }
 
-function hasItems(v: unknown): boolean {
-  return Array.isArray(v) && v.length > 0;
-}
-
 /**
  * Decode the `specs.bulb` code into structured bulb specs, mirroring the PDP's
  * `BULB_NAME_MAPPINGS` lookup. Returns blanks for fields not derivable from the
@@ -697,6 +700,57 @@ export function productUrl(id: number, sku: string): string {
   // the ?sku query — so the bare id form is robust and needs no slug logic.
   const base = `${PRODUCT_URL_BASE}/${id}`;
   return sku ? `${base}?sku=${encodeURIComponent(sku)}` : base;
+}
+
+/**
+ * Browser-clickable cut-sheet PDF URL for a SKU.
+ *
+ * Porter renders the cut-sheet PDF lazily — the first PDP download triggers
+ * generation + a Cloudinary upload, and the resulting filename is cached in
+ * `skuAssets[sku].cutSheet`. That public download endpoint ALSO writes the
+ * product row (`product.update`), so it is NOT read-only and we never call it
+ * from the export. Instead we rebuild the exact same Cloudinary URL directly
+ * from the cached filename (a pure read), which resolves to the real PDF.
+ *
+ * The cut sheet is a product-level spec document (only the white-background
+ * photo differs by color), so when the requested SKU has no cached PDF yet we
+ * fall back to any sibling SKU's cached cut sheet for the same product — every
+ * such link resolves and points at the right document. Blank only when no SKU
+ * of the product has a cached cut sheet.
+ */
+export function cutSheetUrl(product: CatalogProduct, sku: string): string {
+  const assets = product.skuAssets;
+  if (!assets) return '';
+  // Prefer the exact SKU's cached cut sheet.
+  const exact = sku ? cutSheetFileName(assets[sku]) : null;
+  if (exact) return `${IMAGE_URL_BASE}/${product.id}/${sku}/${exact}`;
+  // Fall back to the first sibling SKU that has a cached cut sheet.
+  for (const [assetSku, asset] of Object.entries(assets)) {
+    const fileName = cutSheetFileName(asset);
+    if (fileName) return `${IMAGE_URL_BASE}/${product.id}/${assetSku}/${fileName}`;
+  }
+  return '';
+}
+
+function cutSheetFileName(asset: SkuAssetShape | undefined): string | null {
+  const fileName = asset?.cutSheet;
+  return typeof fileName === 'string' && fileName.length > 0 ? fileName : null;
+}
+
+/**
+ * Browser-clickable install-instruction PDF URLs for a product, `; `-joined.
+ *
+ * `downloads.instructions` holds one or more instruction PDF filenames, stored
+ * per product (not per SKU) under `products/{id}/downloads/`. Verified form:
+ * Cloudinary image/upload + the `dynamic-assets` prefix resolves to the PDF
+ * (raw/upload and the prefix-less variants 404). Blank when there are none.
+ */
+export function instructionUrls(product: CatalogProduct): string {
+  const files = (product.downloads?.instructions ?? []).filter(
+    (f): f is string => typeof f === 'string' && f.length > 0,
+  );
+  if (files.length === 0) return '';
+  return files.map((f) => `${IMAGE_URL_BASE}/${product.id}/downloads/${f}`).join('; ');
 }
 
 function exportFilename(args: Args): string {

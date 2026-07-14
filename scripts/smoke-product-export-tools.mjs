@@ -45,7 +45,7 @@ async function run(label, args) {
   console.log(`headers: ${Object.keys(rows[0] ?? {}).join(' | ')}`);
   console.log('first 3 rows:');
   for (const r of rows.slice(0, 3)) {
-    console.log(`  ${r['Product Name']} [${r.SKU}] $${r['List Price (USD)']} | ${r.Category} | ${r.Wattage}/${r.Lumens}lm/${r['Color Temperature']} dimm=${r.Dimmable} | cert=${r.Certification} | img=${r['Image URL'] ? 'Y' : '-'}`);
+    console.log(`  ${r['Product Name']} [${r.SKU}] $${r['List Price (USD)']} | ${r.Category} | ${r.Wattage}/${r.Lumens}lm/${r['Color Temperature']} dimm=${r.Dimmable} | cert=${r.Certification} | img=${r['Image URL'] ? 'Y' : '-'} cut=${r['Cut Sheet URL'] ? 'Y' : '-'} inst=${r['Install Instructions URLs'] ? 'Y' : '-'}`);
   }
   return { res, rows };
 }
@@ -107,6 +107,30 @@ try {
   const all = await run('All Active products', { status: 'Active', granularity: 'sku', includeInternalCost: false });
   check('full catalog exported >50 products', all.res.productsExported > 50, `${all.res.productsExported} products`);
   check('full catalog CSV under 2MB cap', all.res.attachment.content.length < 1_900_000, `${all.res.attachment.content.length} bytes`);
+
+  // Cut-sheet + install-instruction PDF URLs — the whole point of this fix. Cut
+  // sheets are lazily cached per SKU, so we assert a conservative coverage floor
+  // (Phase-1: ~29% of active SKU rows carry one) and that a sample link actually
+  // resolves to a PDF in the browser — a marker like "Available" never would.
+  const allRows = all.rows;
+  const cutRows = allRows.filter((r) => r['Cut Sheet URL']);
+  const cutPct = (100 * cutRows.length) / allRows.length;
+  check('≥15% of active SKU rows carry a Cut Sheet URL', cutPct >= 15, `${cutPct.toFixed(1)}% (${cutRows.length}/${allRows.length})`);
+  const instRows = allRows.filter((r) => r['Install Instructions URLs']);
+  check('some active SKU rows carry Install Instructions URLs', instRows.length > 0, `${instRows.length} rows`);
+
+  // Every emitted URL must be a real, partner-clickable asset (200 + PDF).
+  if (cutRows.length) {
+    const url = cutRows[0]['Cut Sheet URL'];
+    const res = await fetch(url, { method: 'HEAD' });
+    const ct = res.headers.get('content-type') || '';
+    check('sample Cut Sheet URL resolves (200 PDF)', res.status === 200 && ct.includes('pdf'), `${res.status} ${ct} ${url.slice(0, 80)}…`);
+  }
+  if (instRows.length) {
+    const url = instRows[0]['Install Instructions URLs'].split('; ')[0];
+    const res = await fetch(url, { method: 'HEAD' });
+    check('sample Install Instructions URL resolves (200)', res.status === 200, `${res.status} ${url.slice(0, 80)}…`);
+  }
 
   console.log(`\n${failures === 0 ? '✅ ALL SMOKE CHECKS PASSED' : `❌ ${failures} CHECK(S) FAILED`}`);
   process.exit(failures === 0 ? 0 : 1);

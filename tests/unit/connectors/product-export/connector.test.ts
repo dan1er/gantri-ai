@@ -15,6 +15,8 @@ import {
   decodeBulb,
   certification,
   primaryImageUrl,
+  cutSheetUrl,
+  instructionUrls,
   fullProductName,
   WHOLESALE_DEFAULTS,
   type CatalogProduct,
@@ -68,10 +70,30 @@ function lagoRow(): unknown[] {
       footPrint: { width: 4.5, height: 0, depth: 4.5 },
       backplate: { width: 0, height: 0 },
     },
-    { cutSheet: { isConfigured: true }, instructions: [], models2D: [], models3D: [] },
+    // `downloads` mirrors the raw already-parsed object Grafana hands back for
+    // the json column (nested cutSheet.data, per-type arrays). The cut-sheet PDF
+    // filename does NOT live here — Porter caches it in skuAssets[sku].cutSheet,
+    // so the marker-only fixture the old test used could never have produced a
+    // real URL.
+    {
+      instructions: ['10018-install-instructions_1740000000000.pdf'],
+      cutSheet: {
+        isConfigured: true,
+        data: {
+          frontViewPhoto: '10018-cut-sheet-2d-drawing-front-view_1769817919223.png',
+          firstLifestyleViewPhoto: '10018--lifestyle-photos-abc_1765420178863.jpg',
+        },
+      },
+      models2D: [],
+      models3D: [],
+    },
     { '10018-cm-carbon': 26800 },
     {
-      '10018-cm-snow': { selectedWhiteBackgroundPhoto: '10018-cm-snow--product-photos-abc.jpg' },
+      // snow has a cached cut-sheet PDF filename; carbon does not (→ sibling fallback).
+      '10018-cm-snow': {
+        selectedWhiteBackgroundPhoto: '10018-cm-snow--product-photos-abc.jpg',
+        cutSheet: '10018-cm-snow-cut-sheet_1779271198808.pdf',
+      },
       '10018-cm-carbon': { whiteBackgroundPhotos: ['10018-cm-carbon--product-photos-def.jpg'] },
     },
   ];
@@ -166,9 +188,12 @@ describe('products.export_catalog', () => {
     expect(headers).toEqual(
       expect.arrayContaining([
         'SKU', 'List Price (USD)', 'Product URL', 'Return Policy', 'Bulb Type', 'Certification', 'Image URL',
-        'CRI', 'Voltage', 'Dimmer Type',
+        'CRI', 'Voltage', 'Dimmer Type', 'Cut Sheet URL', 'Install Instructions URLs',
       ]),
     );
+    // Old availability markers are gone — replaced by URL-bearing columns.
+    expect(headers).not.toContain('Cut Sheet');
+    expect(headers).not.toContain('Install Instructions');
 
     const snow = rows.find((r) => r.SKU === '10018-cm-snow')!;
     const carbon = rows.find((r) => r.SKU === '10018-cm-carbon')!;
@@ -192,7 +217,20 @@ describe('products.export_catalog', () => {
     expect(snow['Return Policy']).toBe(WHOLESALE_DEFAULTS.returnPolicy);
     expect(snow['Country of Origin']).toBe('USA');
     expect(snow['Product URL']).toBe('https://www.gantri.com/products/10018?sku=10018-cm-snow');
-    expect(snow['Cut Sheet']).toBe('Available');
+    // Cut Sheet URL: real, browser-clickable Cloudinary PDF built from the
+    // cached skuAssets[sku].cutSheet filename (NOT the old "Available" marker).
+    expect(snow['Cut Sheet URL']).toBe(
+      'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10018/10018-cm-snow/10018-cm-snow-cut-sheet_1779271198808.pdf',
+    );
+    // carbon has no cached cut sheet of its own → sibling fallback to snow's
+    // (the cut sheet is a product-level doc, so the link still resolves).
+    expect(carbon['Cut Sheet URL']).toBe(snow['Cut Sheet URL']);
+    // Install instruction PDF URL built from downloads.instructions[] filenames,
+    // stored per product under /downloads/. Same for every SKU of the product.
+    expect(snow['Install Instructions URLs']).toBe(
+      'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10018/downloads/10018-install-instructions_1740000000000.pdf',
+    );
+    expect(carbon['Install Instructions URLs']).toBe(snow['Install Instructions URLs']);
 
     // Bulb specs decoded from specs.bulb ("E26, T8, 94mm") via BULB_NAME_MAPPINGS.
     expect(snow['Bulb Code']).toBe('E26, T8, 94mm');
@@ -242,6 +280,9 @@ describe('products.export_catalog', () => {
     expect(gift.CRI).toBe('');
     expect(gift.Voltage).toBe('');
     expect(gift['Dimmer Type']).toBe('');
+    // No downloads / skuAssets → both PDF URL columns blank (never a marker).
+    expect(gift['Cut Sheet URL']).toBe('');
+    expect(gift['Install Instructions URLs']).toBe('');
   });
 
   it('keeps CRI but blanks voltage and dimmer type for wireless lights', async () => {
@@ -538,6 +579,51 @@ describe('parsing + formatting helpers', () => {
     expect(primaryImageUrl(p, '')).toBe('');
   });
 
+  it('cutSheetUrl builds a Cloudinary PDF URL from the cached filename, with sibling fallback', () => {
+    const p = {
+      id: 10258,
+      skuAssets: {
+        '10258-lg-sage-black': { cutSheet: '10258-lg-sage-black-cut-sheet_1778288503179.pdf' },
+        '10258-lg-mist-white': { cutSheet: '10258-lg-mist-white-cut-sheet_1781821971769.pdf' },
+        '10258-lg-olive-none': { whiteBackgroundPhotos: ['x.jpg'] }, // no cached cut sheet
+      },
+    } as unknown as CatalogProduct;
+    // Exact SKU → its own cut sheet.
+    expect(cutSheetUrl(p, '10258-lg-sage-black')).toBe(
+      'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10258/10258-lg-sage-black/10258-lg-sage-black-cut-sheet_1778288503179.pdf',
+    );
+    // SKU with no cached cut sheet → falls back to a sibling SKU's cut sheet
+    // (path points at the sibling's folder, where the asset actually lives).
+    expect(cutSheetUrl(p, '10258-lg-olive-none')).toBe(
+      'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10258/10258-lg-sage-black/10258-lg-sage-black-cut-sheet_1778288503179.pdf',
+    );
+    // Product granularity (empty sku) → first cached sibling.
+    expect(cutSheetUrl(p, '')).toContain('/10258/10258-lg-sage-black/');
+    // No cached cut sheet anywhere → blank, never a marker.
+    const none = { id: 10018, skuAssets: { '10018-cm-snow': { whiteBackgroundPhotos: ['y.jpg'] } } } as unknown as CatalogProduct;
+    expect(cutSheetUrl(none, '10018-cm-snow')).toBe('');
+    expect(cutSheetUrl({ id: 99, skuAssets: null } as unknown as CatalogProduct, 'x')).toBe('');
+  });
+
+  it('instructionUrls joins per-product install-instruction PDF URLs, blank when none', () => {
+    const one = {
+      id: 10221,
+      downloads: { instructions: ['2182025Fold-Wall-userassembly_1739921311106.pdf'] },
+    } as unknown as CatalogProduct;
+    expect(instructionUrls(one)).toBe(
+      'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10221/downloads/2182025Fold-Wall-userassembly_1739921311106.pdf',
+    );
+    // Multiple files → `; `-joined, order preserved.
+    const many = { id: 500, downloads: { instructions: ['a.pdf', 'b.pdf'] } } as unknown as CatalogProduct;
+    expect(instructionUrls(many)).toBe(
+      'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/500/downloads/a.pdf; ' +
+        'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/500/downloads/b.pdf',
+    );
+    // Empty / missing / null → blank.
+    expect(instructionUrls({ id: 1, downloads: { instructions: [] } } as unknown as CatalogProduct)).toBe('');
+    expect(instructionUrls({ id: 1, downloads: null } as unknown as CatalogProduct)).toBe('');
+  });
+
   it('expandRows derives a sku when defaultSku is missing', () => {
     const product = {
       id: 500,
@@ -557,5 +643,11 @@ describe('parsing + formatting helpers', () => {
     expect(p.colors).toHaveLength(2);
     expect(p.specs?.price).toBe(24800);
     expect(p.skuPrices).toEqual({ '10018-cm-carbon': 26800 });
+    // Regression guard: the json `downloads`/`skuAssets` columns come back from
+    // Grafana as already-parsed nested objects — ensureObject must pass them
+    // through intact so the URL builders can read instructions + cached cut
+    // sheets (the field the old marker code never touched).
+    expect(p.downloads?.instructions).toEqual(['10018-install-instructions_1740000000000.pdf']);
+    expect(p.skuAssets?.['10018-cm-snow']?.cutSheet).toBe('10018-cm-snow-cut-sheet_1779271198808.pdf');
   });
 });

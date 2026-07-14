@@ -11,6 +11,7 @@ import {
 import type { AsanaApiClient } from '../../../../../src/connectors/asana/client.js';
 import type { TierClassificationsRepo, TierClassificationRecord } from '../../../../../src/storage/repositories/tier-classifications.js';
 import type { TierWeeklyReportsRepo } from '../../../../../src/storage/repositories/tier-weekly-reports.js';
+import type { TierPrChecksRepo } from '../../../../../src/storage/repositories/tier-pr-checks.js';
 
 const NOW = new Date('2026-07-15T15:00:00Z'); // Wed afternoon (NY), same week as Mon 2026-07-13.
 
@@ -25,6 +26,8 @@ function rec(o: Partial<TierClassificationRecord>): TierClassificationRecord {
     confirmedTier: o.confirmedTier ?? o.tier ?? 'T0',
     diffFloorTier: o.diffFloorTier ?? null,
     liftedByUnclear: o.liftedByUnclear ?? false,
+    calibrationMismatch: o.calibrationMismatch ?? false,
+    stage: o.stage ?? 'provisional',
     flags: [],
     domain: o.domain ?? 'unknown',
     decidedBy: o.decidedBy ?? 'bot',
@@ -57,12 +60,14 @@ describe('computeWeeklyReport', () => {
       rec({ taskGid: 'c3', domain: 'content_marketing', tier: 'T2' }),
       // design_workflow: 2 tickets, 1 lifted → 50% inconclusive (flagged > 30%).
       rec({ taskGid: 'd1', domain: 'design_workflow', tier: 'T1', liftedByUnclear: true }),
-      rec({ taskGid: 'd2', domain: 'design_workflow', tier: 'T0' }),
+      // One calibration mismatch this week.
+      rec({ taskGid: 'd2', domain: 'design_workflow', tier: 'T0', calibrationMismatch: true }),
     ],
     escapeTasksLast30d: [{ gid: 'e1', domain: 'shopping_checkout' }],
     overridesLast7d: [rec({ taskGid: 'ov1', domain: 'shopping_checkout', tier: 'T0', humanTier: 'T2', decidedBy: 'human_override' })],
     // The three content_marketing T2 tickets have shipped → they count toward move-down.
     completedTaskGids: ['c1', 'c2', 'c3'],
+    authoritativeLast7d: { confirmed: 3, superseded: 1 },
   };
 
   const payload = computeWeeklyReport(inputs, NOW);
@@ -97,6 +102,14 @@ describe('computeWeeklyReport', () => {
     expect(payload.volume.approxTokens).toBe(6 * 4300);
   });
 
+  it('Provisional → authoritative: change rate over 7d', () => {
+    expect(payload.authoritative).toEqual({ confirmed: 3, superseded: 1, total: 4, changeRatePct: 25 });
+  });
+
+  it('Calibration mismatches: counts 7d LLM/rubric disagreements', () => {
+    expect(payload.calibrationMismatches7d).toBe(1);
+  });
+
   it('renders a deterministic report body', () => {
     const text = renderWeeklyReport(payload);
     expect(text).toContain('week of 2026-07-13');
@@ -104,6 +117,9 @@ describe('computeWeeklyReport', () => {
     expect(text).toContain('content_marketing: T2→T1 (3 clean T2 ticket(s))');
     expect(text).toContain('task ov1: bot T0 → human T2');
     expect(text).toContain('design_workflow: 50% (1/2)');
+    expect(text).toContain('1/4 superseded (25%)');
+    expect(text).toContain('*6. Calibration mismatches*');
+    expect(text).toContain('• 1 — the model disagreed');
   });
 });
 
@@ -121,6 +137,11 @@ describe('WeeklyTierReporter.maybeSend — scheduling & idempotency', () => {
       listOverridesSince: vi.fn().mockResolvedValue([]),
       get: vi.fn().mockResolvedValue(null),
     } as unknown as TierClassificationsRepo;
+    const prChecks = {
+      countByVerdictSince: vi
+        .fn()
+        .mockResolvedValue({ confirmed: 0, superseded: 0, human_owned: 0, no_record: 0 }),
+    } as unknown as TierPrChecksRepo;
     const client = {
       getProjectTasksUnbounded: vi.fn().mockResolvedValue([]),
     } as unknown as AsanaApiClient;
@@ -132,6 +153,7 @@ describe('WeeklyTierReporter.maybeSend — scheduling & idempotency', () => {
     const reporter = new WeeklyTierReporter({
       classifications,
       weeklyRepo,
+      prChecks,
       client,
       slack,
       resolveDannySlackId: async () => 'U123',

@@ -5,6 +5,7 @@ import type {
   TierClassificationRecord,
 } from '../../../storage/repositories/tier-classifications.js';
 import type { TierWeeklyReportsRepo } from '../../../storage/repositories/tier-weekly-reports.js';
+import type { TierPrChecksRepo } from '../../../storage/repositories/tier-pr-checks.js';
 import {
   SOFTWARE_BOARD_PROJECT_GID,
   TYPE_FIELD_GID,
@@ -106,6 +107,9 @@ export interface WeeklyReportInputs {
    *  counts tickets that actually shipped and cleared QA — an open ticket has
    *  trivially had zero escapes and must not lower a domain's tier. */
   completedTaskGids: string[];
+  /** Authoritative-pass verdicts over the last 7 days: how often the Code-Review
+   *  diff SUPERSEDED the provisional tier vs CONFIRMED it. */
+  authoritativeLast7d: { confirmed: number; superseded: number };
 }
 
 export interface MoveUpRec {
@@ -137,6 +141,13 @@ export interface WeeklyReportPayload {
   moveDown: MoveDownRec[];
   disagreements: DisagreementRec[];
   inconclusive: InconclusiveRec[];
+  /** Provisional → authoritative change rate: how often the Code-Review diff moved
+   *  the tier away from the early description-based guess (measures how much early
+   *  ticket descriptions mislead). */
+  authoritative: { confirmed: number; superseded: number; total: number; changeRatePct: number };
+  /** Count of classifications in the last 7d where the LLM's own tier disagreed
+   *  with the rubric-computed tier (floored to T1). */
+  calibrationMismatches7d: number;
   volume: { classified7d: number; approxTokens: number };
 }
 
@@ -224,12 +235,22 @@ export function computeWeeklyReport(inputs: WeeklyReportInputs, now: Date): Week
   }
   inconclusive.sort((a, b) => b.ratePct - a.ratePct || a.domain.localeCompare(b.domain));
 
+  // 5. Provisional → authoritative change rate over 7d.
+  const { confirmed, superseded } = inputs.authoritativeLast7d;
+  const authTotal = confirmed + superseded;
+  const changeRatePct = authTotal === 0 ? 0 : Math.round((superseded / authTotal) * 1000) / 10;
+
+  // 6. Calibration mismatches (LLM tier ≠ rubric tier) over 7d.
+  const calibrationMismatches7d = sevenDay.filter((c) => c.calibrationMismatch).length;
+
   return {
     weekStart,
     moveUp,
     moveDown,
     disagreements,
     inconclusive,
+    authoritative: { confirmed, superseded, total: authTotal, changeRatePct },
+    calibrationMismatches7d,
     volume: {
       classified7d: sevenDay.length,
       approxTokens: sevenDay.length * APPROX_TOKENS_PER_CLASSIFICATION,
@@ -284,8 +305,26 @@ export function renderWeeklyReport(payload: WeeklyReportPayload): string {
   }
   lines.push('');
 
+  lines.push('*5. Provisional → authoritative* (Code-Review diff re-check, last 7d)');
+  if (payload.authoritative.total === 0) {
+    lines.push('• none — no tickets reached Code Review with a diff this week');
+  } else {
+    lines.push(
+      `• ${payload.authoritative.superseded}/${payload.authoritative.total} superseded (${payload.authoritative.changeRatePct}%) — how often the early description-based tier was wrong once the diff was seen`,
+    );
+  }
+  lines.push('');
+
+  lines.push('*6. Calibration mismatches* (model tier ≠ rubric tier, floored to T1, last 7d)');
+  if (payload.calibrationMismatches7d === 0) {
+    lines.push('• none — model and rubric agree');
+  } else {
+    lines.push(`• ${payload.calibrationMismatches7d} — the model disagreed with the deterministic rubric; review the prompt`);
+  }
+  lines.push('');
+
   lines.push(
-    `*5. Volume* — ${payload.volume.classified7d} ticket(s) classified this week, ≈${payload.volume.approxTokens.toLocaleString('en-US')} tokens.`,
+    `*7. Volume* — ${payload.volume.classified7d} ticket(s) classified this week, ≈${payload.volume.approxTokens.toLocaleString('en-US')} tokens.`,
   );
   return lines.join('\n');
 }
@@ -302,6 +341,7 @@ const OPT_FIELDS_BOARD = [
 export interface WeeklyReporterDeps {
   classifications: TierClassificationsRepo;
   weeklyRepo: TierWeeklyReportsRepo;
+  prChecks: TierPrChecksRepo;
   client: AsanaApiClient;
   slack: WebClient;
   /** Resolve Danny's Slack user id (authorized_users row / env override). */
@@ -354,10 +394,12 @@ export class WeeklyTierReporter {
     if (existing) return { sent: false, reason: 'already_sent', weekStart };
 
     const nowMs = now.getTime();
-    const [classificationsLast30d, overridesLast7d, boardSignals] = await Promise.all([
+    const sevenDaysAgoIso = new Date(nowMs - SEVEN_DAYS_MS).toISOString();
+    const [classificationsLast30d, overridesLast7d, boardSignals, authVerdicts] = await Promise.all([
       this.deps.classifications.listSince(new Date(nowMs - THIRTY_DAYS_MS).toISOString()),
-      this.deps.classifications.listOverridesSince(new Date(nowMs - SEVEN_DAYS_MS).toISOString()),
+      this.deps.classifications.listOverridesSince(sevenDaysAgoIso),
       fetchBoardSignals(this.deps, nowMs),
+      this.deps.prChecks.countByVerdictSince(sevenDaysAgoIso),
     ]);
 
     const payload = computeWeeklyReport(
@@ -366,6 +408,7 @@ export class WeeklyTierReporter {
         overridesLast7d,
         escapeTasksLast30d: boardSignals.escapeTasks,
         completedTaskGids: boardSignals.completedTaskGids,
+        authoritativeLast7d: { confirmed: authVerdicts.confirmed, superseded: authVerdicts.superseded },
       },
       now,
     );

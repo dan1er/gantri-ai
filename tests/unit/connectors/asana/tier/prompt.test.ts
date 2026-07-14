@@ -26,4 +26,13 @@ describe('delivery-tier rubric prompt', () => {
     expect(section).toMatch(/product-page price/i);
     expect(section).toMatch(/order-history amount/i);
   });
+
+  it('carves out diff mode: the diff is authoritative and evidence may come from it', async () => {
+    // The v2 PR re-check sends this same file as the system prompt while asking the
+    // model to judge from the diff. Without a carve-out, the "ticket text ONLY" /
+    // "evidence copied from the ticket" ground rules would fight the diff instruction.
+    const diffSection = prompt.slice(prompt.indexOf('### Diff mode'), prompt.indexOf('## The facts'));
+    expect(diffSection).toMatch(/diff is\*?\*? authoritative/i);
+    expect(diffSection).toMatch(/verbatim from the \*?\*?diff/i);
+  });
 });

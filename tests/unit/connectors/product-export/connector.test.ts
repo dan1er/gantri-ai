@@ -108,6 +108,28 @@ function wirelessRow(): unknown[] {
   ];
 }
 
+function wirelessTaskRow(): unknown[] {
+  return [
+    10600,
+    'Beam Task',
+    'Wireless Task Light',
+    null,
+    'Studio Beam',
+    'Active',
+    'Marketplace',
+    null,
+    null,
+    47,
+    '7-8 weeks',
+    pgColorsLiteral([{ code: 'carbon', name: 'Carbon', defaultSku: '10600-st-carbon' }]),
+    { code: 'st', name: 'Standard' },
+    { price: 14800, bulb: 'LED PANEL, 110mm' },
+    null,
+    null,
+    null,
+  ];
+}
+
 function makeConnector(runSqlImpl: () => Promise<{ fields: string[]; rows: unknown[][] }>) {
   const grafana = { runSql: vi.fn(runSqlImpl) } as unknown as GrafanaConnector;
   return { connector: new ProductExportConnector({ grafana }), grafana };
@@ -283,6 +305,50 @@ describe('products.export_catalog', () => {
     expect(result.error.code).toBe('NO_PRODUCTS');
   });
 
+  it('exports MULTIPLE categories in ONE attachment (no CSV-per-category fan-out)', async () => {
+    // Regression: "our wireless lights" spans several categories. A single call
+    // with a category array must yield ONE CSV containing rows from all of them,
+    // never one attachment per category.
+    const { connector } = makeConnector(async () => ({
+      fields: FIELDS,
+      rows: [wirelessRow(), wirelessTaskRow()],
+    }));
+    const result: any = await connector.tools[0].execute({
+      status: 'Active',
+      category: ['Wireless Table Light', 'Wireless Task Light'],
+      granularity: 'sku',
+      includeInternalCost: false,
+    });
+
+    // Exactly one file, covering both categories.
+    expect(result.attachment).toBeTruthy();
+    expect(result.attachment.format).toBe('csv');
+    expect(result.productsExported).toBe(2);
+
+    const rows = parseCsv(result.attachment.content);
+    expect(rows).toHaveLength(2);
+    expect(result.rowsExported).toBe(2);
+    const categories = new Set(rows.map((r) => r.Category));
+    expect(categories).toEqual(new Set(['Wireless Table Light', 'Wireless Task Light']));
+
+    // Filename uses the neutral multi-category label, not just one category's name.
+    expect(result.attachment.filename).toContain('multi-category');
+  });
+
+  it('NO_PRODUCTS message renders a category array as names, not "[object Object]"', async () => {
+    const { connector } = makeConnector(async () => ({ fields: FIELDS, rows: [] }));
+    const result: any = await connector.tools[0].execute({
+      status: 'Active',
+      category: ['Wireless Table Light', 'Wireless Task Light'],
+      granularity: 'sku',
+      includeInternalCost: false,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('NO_PRODUCTS');
+    expect(result.error.message).not.toMatch(/\[object Object\]|,\s*,/);
+    expect(result.error.message).toContain('Wireless Table Light, Wireless Task Light');
+  });
+
   it('surfaces a QUERY_FAILED error when the SQL proxy throws', async () => {
     const { connector } = makeConnector(async () => {
       throw new Error('boom');
@@ -318,6 +384,31 @@ describe('SQL builder', () => {
     const sql = buildCatalogSql({ status: 'all', granularity: 'sku', includeInternalCost: false });
     expect(sql).not.toContain('status =');
     expect(sql).not.toContain('WHERE');
+  });
+
+  it('uses category = for a single category', () => {
+    const sql = buildCatalogSql({ status: 'Active', category: 'Table Light', granularity: 'sku', includeInternalCost: false });
+    expect(sql).toContain(`category = 'Table Light'`);
+    expect(sql).not.toContain('category IN');
+  });
+
+  it('uses category IN for multiple categories, each escaped', () => {
+    const sql = buildCatalogSql({
+      status: 'Active',
+      category: ['Wireless Table Light', 'Wireless Task Light'],
+      granularity: 'sku',
+      includeInternalCost: false,
+    });
+    expect(sql).toContain(`category IN ('Wireless Table Light', 'Wireless Task Light')`);
+    expect(sql).not.toContain('category =');
+
+    const escaped = buildCatalogSql({
+      status: 'all',
+      category: ["O'Hare Light", 'Table Light'],
+      granularity: 'sku',
+      includeInternalCost: false,
+    });
+    expect(escaped).toContain(`category IN ('O''Hare Light', 'Table Light')`);
   });
 });
 

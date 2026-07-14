@@ -109,11 +109,14 @@ const Args = z.object({
     .default('Active')
     .describe('Which products to include. "Active" (default) = currently-sold catalog; "all" = every product regardless of status.'),
   category: z
-    .string()
-    .min(1)
-    .max(60)
+    .union([z.string().min(1).max(60), z.array(z.string().min(1).max(60)).min(1).max(20)])
     .optional()
-    .describe('Optional category filter, e.g. "Table Light", "Floor Light", "Wall Light", "Pendant Light".'),
+    .describe(
+      'Optional category filter — either a single category name OR an array of them, all exported into ONE CSV. ' +
+        'Valid categories: Accessory, Clamp Light, Floor Light, Gift Card, Pendant Light, Table Light, Wall Light, Wall Sconce, ' +
+        'Flush Mount, Wireless Floor Lantern, Wireless Mini Light, Wireless Table Light, Wireless Task Light. ' +
+        '"Wireless lights" is not one category — it spans four (Wireless Floor Lantern / Wireless Mini Light / Wireless Table Light / Wireless Task Light); pass them together as an array in a single call.',
+    ),
   productIds: z
     .array(z.number().int().positive())
     .max(2000)
@@ -332,7 +335,11 @@ export class ProductExportConnector implements Connector {
         '',
         'Each row is one SKU (color variant) by default — i.e. "all SKUs per product". Columns: product name, designer, category, size, SKU, color, status, list price (USD), lead time, summary, description, material, recommended + compatible bulbs, dimensions, footprint, backplate, cord length, weight, return policy, warranty, country of origin, product URL, and cut-sheet / install-instruction availability.',
         '',
-        'Filters: `status` (Active default, or "all"), `category` (e.g. "Table Light"), `productIds` (explicit allow-list), `productNameContains`, `granularity` ("sku" default | "product").',
+        'Filters: `status` (Active default, or "all"), `category` (single name or array — see below), `productIds` (explicit allow-list), `productNameContains`, `granularity` ("sku" default | "product").',
+        '',
+        'CATEGORIES: `category` accepts a single category name OR an array of names — all exported into ONE CSV. Valid categories: Accessory, Clamp Light, Floor Light, Gift Card, Pendant Light, Table Light, Wall Light, Wall Sconce, Flush Mount, Wireless Floor Lantern, Wireless Mini Light, Wireless Table Light, Wireless Task Light. "Wireless lights" is NOT a single category — it spans four; export them together, e.g. "our wireless lights" → ONE call with category: ["Wireless Floor Lantern","Wireless Mini Light","Wireless Table Light","Wireless Task Light"].',
+        '',
+        '⚠️ ALWAYS make exactly ONE export_catalog call per export request — pass multiple categories as an array. NEVER call it once per category: every call produces a separate CSV file in Slack.',
         '',
         'PARTNER-SAFE BY DEFAULT: internal cost fields (manufacturer price, royalty) are EXCLUDED. Only set `includeInternalCost:true` for an internal pull, never for a partner-facing export.',
         '',
@@ -369,11 +376,12 @@ export class ProductExportConnector implements Connector {
 
     const products = rows.map((r) => parseProductRow(fields, r));
     if (products.length === 0) {
+      const categories = normalizeCategories(args.category);
       return {
         ok: false,
         error: {
           code: 'NO_PRODUCTS',
-          message: `No products matched the filter (status=${args.status}${args.category ? `, category=${args.category}` : ''}).`,
+          message: `No products matched the filter (status=${args.status}${categories ? `, category=${categories.join(', ')}` : ''}).`,
         },
       };
     }
@@ -428,13 +436,31 @@ export function escapeSql(input: string): string {
   return input.replace(/'/g, "''");
 }
 
+/**
+ * Normalize the optional `category` arg (a single string, an array of strings,
+ * or undefined) into a clean array of category names, or `undefined` when no
+ * category filter was supplied. Trims and drops empty entries so a stray blank
+ * never produces a `category = ''` clause.
+ */
+export function normalizeCategories(category: string | string[] | undefined): string[] | undefined {
+  if (category == null) return undefined;
+  const list = Array.isArray(category) ? category : [category];
+  const cleaned = list.map((c) => c.trim()).filter((c) => c.length > 0);
+  return cleaned.length ? cleaned : undefined;
+}
+
 export function buildCatalogSql(args: Args): string {
   const conds: string[] = [];
   if (args.status !== 'all') {
     conds.push(`status = '${escapeSql(args.status)}'`);
   }
-  if (args.category) {
-    conds.push(`category = '${escapeSql(args.category)}'`);
+  const categories = normalizeCategories(args.category);
+  if (categories) {
+    conds.push(
+      categories.length === 1
+        ? `category = '${escapeSql(categories[0])}'`
+        : `category IN (${categories.map((c) => `'${escapeSql(c)}'`).join(', ')})`,
+    );
   }
   if (args.productIds?.length) {
     // ints, validated by zod — safe to inline.
@@ -675,9 +701,19 @@ export function productUrl(id: number, sku: string): string {
 
 function exportFilename(args: Args): string {
   const parts = ['gantri-product-catalog'];
-  if (args.category) parts.push(args.category.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''));
+  const categories = normalizeCategories(args.category);
+  if (categories) {
+    // Single category → slug it; multiple → a stable, neutral label so the
+    // filename stays short and doesn't misleadingly name just one category.
+    parts.push(categories.length === 1 ? slugify(categories[0]) : 'multi-category');
+  }
   if (args.status === 'all') parts.push('all');
   return `${parts.join('-')}.csv`;
+}
+
+/** Lowercase, non-alphanumerics → single dashes, trimmed — for filenames. */
+function slugify(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
 
 // ---------------------------------------------------------------------------

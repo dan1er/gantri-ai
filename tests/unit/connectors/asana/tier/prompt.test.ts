@@ -1,13 +1,21 @@
 import { describe, it, expect } from 'vitest';
 import { loadTierStandard, parseTierPromptVersion } from '../../../../../src/connectors/asana/tier/extract.js';
 import { DOMAIN_BASE_TIER, type Domain } from '../../../../../src/connectors/asana/tier/decide.js';
+import {
+  splitStandard,
+  buildFallbackRubric,
+  parseDomainTable,
+  validateRubricBody,
+} from '../../../../../src/connectors/asana/tier/rubric-source.js';
 
 /**
- * The public rubric prompt must stay verbatim-equivalent to the Notion "Delivery
- * Tier Classifier" page (Version 4, the domain-base model) plus the clearly-marked
- * bot-only machine appendix (signals contract + diff-mode carve-out). These guards
- * keep the four rubric steps, the domain→base-tier table, and the signals contract
- * in sync so page ↔ code ↔ prompt agree.
+ * The committed `delivery-tier-standard.md` is now the FALLBACK SNAPSHOT of the live
+ * Notion "Delivery Tier Classifier" page (Version 4, the domain-base model) — its page
+ * body — plus the repo-owned MACHINE APPENDIX (the signals JSON contract + diff-mode
+ * carve-out, which stays committed so it is stable under page edits). These guards keep
+ * the four rubric steps, the domain→base-tier table, and the signals contract in sync so
+ * page ↔ code ↔ prompt agree, AND prove the fallback body is a valid rubric whose parsed
+ * table equals the committed `DOMAIN_BASE_TIER` seed.
  */
 describe('delivery-tier rubric prompt', () => {
   const prompt = loadTierStandard();
@@ -134,5 +142,43 @@ describe('delivery-tier rubric prompt', () => {
     // Always-no cases survive the rewrite.
     expect(section).toMatch(/data migrations and one-off backfills are \*\*always\*\* `no`/i);
     expect(section).toMatch(/webhook \/ sync \/ race internals/i);
+  });
+
+  describe('as the fallback snapshot for the runtime rubric source', () => {
+    const { body, appendix } = splitStandard(prompt);
+
+    it('splits into a page body and the repo-owned appendix', () => {
+      expect(body).toContain('# Delivery Tier Classifier');
+      expect(body).not.toContain('MACHINE APPENDIX'); // appendix is split off
+      expect(appendix).toContain('MACHINE APPENDIX');
+      expect(appendix).toContain('signals'); // the JSON contract stays repo-owned
+    });
+
+    it('the page body passes the runtime structural validation', () => {
+      const v = validateRubricBody(body);
+      expect(v.ok, v.error).toBe(true);
+      expect(v.version).toBe(parseTierPromptVersion(prompt));
+    });
+
+    it('the fallback body table equals the committed DOMAIN_BASE_TIER seed', () => {
+      const { tableMap, missing, invalid } = parseDomainTable(body);
+      expect(missing).toEqual([]);
+      expect(invalid).toEqual([]);
+      // Every domain in the committed seed is parsed to the same base tier.
+      for (const [domain, base] of Object.entries(DOMAIN_BASE_TIER) as [Domain, string][]) {
+        expect(tableMap[domain], domain).toBe(base);
+      }
+      // No extra domains beyond the seed.
+      expect(Object.keys(tableMap).sort()).toEqual(Object.keys(DOMAIN_BASE_TIER).sort());
+    });
+
+    it('buildFallbackRubric yields the committed version + DOMAIN_BASE_TIER map', () => {
+      const rubric = buildFallbackRubric(prompt);
+      expect(rubric.version).toBe(parseTierPromptVersion(prompt));
+      expect(rubric.tableMap).toEqual(DOMAIN_BASE_TIER);
+      expect(rubric.promptText).toContain('# Delivery Tier Classifier');
+      expect(rubric.promptText).toContain('MACHINE APPENDIX'); // body + appendix assembled
+      expect(rubric.hash).toMatch(/^[0-9a-f]{64}$/);
+    });
   });
 });

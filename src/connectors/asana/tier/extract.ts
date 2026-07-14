@@ -92,10 +92,12 @@ export function loadTierStandard(): string {
 }
 
 /** Content hash used for the classification cache: identical hash → identical
- *  facts → free reuse. Includes the prompt version so a rubric change invalidates
- *  every prior classification. */
-export function tierInputHash(promptVersion: number, input: ExtractInput): string {
-  const payload = `${promptVersion}\n${input.name}\n${input.notes}\n${input.typeName}`;
+ *  facts → free reuse. Includes the prompt version AND the live rubric hash so a
+ *  rubric change (a bumped version OR an in-place page edit at the same version)
+ *  invalidates every prior classification and re-runs the ticket. `rubricHash`
+ *  defaults to '' so callers that predate the runtime rubric stay hash-stable. */
+export function tierInputHash(promptVersion: number, input: ExtractInput, rubricHash = ''): string {
+  const payload = `${promptVersion}\n${rubricHash}\n${input.name}\n${input.notes}\n${input.typeName}`;
   return createHash('sha256').update(payload).digest('hex');
 }
 

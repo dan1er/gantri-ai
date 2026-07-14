@@ -199,6 +199,10 @@ export interface Facts {
  *  and `llmTier`). */
 export type FactKey = Exclude<keyof Facts, 'domain' | 'llmTier'>;
 
+/** A domain → base-tier map. At runtime this is parsed from the live Notion page
+ *  (the Step 2 table); `DOMAIN_BASE_TIER` is the committed fallback seed. */
+export type DomainBaseTierMap = Record<Domain, DeliveryTier>;
+
 /** Which rubric step produced the tier — drives the "Why" line in the comment. */
 export type FiredRule =
   | 'not_ui_testable'
@@ -264,7 +268,16 @@ function minTier(a: DeliveryTier, b: DeliveryTier): DeliveryTier {
   return TIER_RANK[a] <= TIER_RANK[b] ? a : b;
 }
 
-export function decideTier(facts: Facts): Decision {
+/**
+ * @param tableMap the domain → base-tier map to apply. Defaults to the committed
+ *   `DOMAIN_BASE_TIER` seed; the poller / authoritative pass pass the live map
+ *   parsed from the Notion page so a page edit recalibrates the base tier at
+ *   runtime. A domain missing from the map degrades to the committed seed (then
+ *   to T1), so a partial map can never crash classification.
+ */
+export function decideTier(facts: Facts, tableMap: DomainBaseTierMap = DOMAIN_BASE_TIER): Decision {
+  const baseTierOf = (domain: Domain): DeliveryTier =>
+    tableMap[domain] ?? DOMAIN_BASE_TIER[domain] ?? 'T1';
   // Step 1 — no UI surface → T0 (terminal). The Non-UI Lane note is engineering's
   // binding gate whenever the backend touches money / orders / inventory / auth /
   // pricing. Only a LITERAL `no` is terminal; `unclear` falls through. The
@@ -274,7 +287,7 @@ export function decideTier(facts: Facts): Decision {
     const flags: FlagKey[] = touchesSensitiveBackend(facts) ? ['non_ui_lane'] : [];
     return {
       tier: 'T0',
-      baseTier: DOMAIN_BASE_TIER[facts.domain],
+      baseTier: baseTierOf(facts.domain),
       liftedByUnclear: false,
       calibrationMismatch: false,
       flags,
@@ -284,7 +297,7 @@ export function decideTier(facts: Facts): Decision {
   }
 
   // Step 2 — domain base tier.
-  const base = DOMAIN_BASE_TIER[facts.domain];
+  const base = baseTierOf(facts.domain);
   const domainUnknown = facts.domain === 'unknown';
   const uiUnclear = facts.ui_testable.value === 'unclear';
 

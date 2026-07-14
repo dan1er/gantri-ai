@@ -179,3 +179,67 @@ Out of scope (explicitly): per-domain default-lane table (YAGNI until Monday-rep
 ## Cost envelope
 
 ~1 Haiku call/ticket (≈4k in / 300 out, system prompt cached) ≈ half a cent per ticket; PR re-checks similar with diff truncation. Weekly report: zero LLM. Everything else is templates and SQL.
+
+## Addendum (2026-07-14, post-approval design iteration)
+
+Two additive extensions, folded in after the initial approval. Both are inert until Danny acts; neither changes the decision function above.
+
+### Expanded functional domain enum
+
+Grounded in the real product routes. Marketplace adds: `trade_b2b`, `creators_referral`, `gift_cards`. Factory OS adds: `order_management`, `product_catalog_design`, `payouts_statements`, `organizations_wholesale`, `promotions_gifting`, `machines_fleet`. MadeOS adds: `made_quoting_billing`, `made_products_catalog`. `unknown` remains the safe fallback; the zod enum in `extract.ts` and the prompt file's domain list must both carry the full set, and the weekly report slices by all of them.
+
+### Domain minimum tiers (approved escalations)
+
+Operationalizes the framework's Domain Movement Rules without auto-moving anything:
+
+```sql
+create table tier_domain_minimums (
+  domain text primary key,
+  min_tier text not null check (min_tier in ('T0','T1','T2')),
+  reason text not null,
+  approved_by text not null,
+  created_at timestamptz not null default now()
+);
+```
+
+- Applied AFTER `decideTier`: `finalTier = max(computedTier, domainMinimum)`. It can only raise, never lower.
+- **Exception (QA-is-UI-only stays supreme): the minimum does NOT apply when `ui_testable === 'no'`** — escalating a backend-only ticket to a QA gate is meaningless; that risk stays in the Non-UI Lane.
+- When a minimum lifts a ticket, the comment appends: `Lifted to T2 by domain escalation (approved <date>: <reason>).`
+- **The table is seeded EMPTY.** Rows are added/removed only on Danny's explicit approval — the Monday report proposes moves; Danny approves; a row is inserted (manually in v1; a Slack management tool is a future nicety). The "Approved escalations" table on the Notion rubric page is a display-only mirror of this table, updated when it changes — the bot never reads rules from Notion at runtime (governance: rubric and escalation state must be PR-reviewed / Danny-gated, and the classifier must not depend on Notion availability).
+
+## Addendum 2 (2026-07-14, model pivot — SUPERSEDES the extraction facts + decision function above)
+
+The team-facing rubric page (Notion `39ddb572aef48169897efefd543290b9`) converged on a **domain-base-tier model**. This addendum reconciles it with the determinism requirement: the LLM extracts only lookup-ish signals; the tier is computed in code from a versioned table. Page and code produce identical tiers.
+
+### Extraction (replaces the 7-fact list)
+
+The LLM answers, each `yes | no | unclear` (+ verbatim evidence), plus the domain:
+
+- `ui_testable` — same boundary as before (backend-only/infra/CI/migration/logging/internal job → no).
+- `cosmetic_only` — copy, text, styling, or a minor UI tweak that does NOT change how the feature works.
+- `visual_blast_radius` — same boundary as before (new/removed screen · shared component · layout restructure).
+- `touches_t2_area` — the change touches money/orders/inventory/auth even if backend-only (drives the Non-UI Lane note).
+- `domain` — one value from the domain table below (or `unknown`).
+
+### Decision function v2 (pure code, ordered)
+
+1. `ui_testable === 'no'` → **T0** (+ Non-UI Lane note when `touches_t2_area`). Terminal.
+2. `cosmetic_only === 'yes'` → **T0**. Terminal.
+3. Base tier = `DOMAIN_BASE_TIER[domain]` (table below; `unknown` → T1).
+4. `visual_blast_radius === 'yes'` → tier = max(tier, T1).
+5. Uncertainty floor: any decision-relevant `unclear` (incl. `ui_testable`/`cosmetic_only` unclear or domain unknown) → tier = max(tier, T1). A definite T2 stays T2.
+6. Dynamic escalations: tier = max(tier, `tier_domain_minimums[domain]`) — skipped when `ui_testable === 'no'` (QA-is-UI-only stays supreme).
+
+### DOMAIN_BASE_TIER (versioned in code as data; the Notion page mirrors it)
+
+T2: `auth_accounts`, `shopping_checkout`, `orders_notifications`, `gift_cards`, `trade_b2b`, `order_management`, `inventory_materials`, `payouts_statements`, `promotions_gifting`, `organizations_wholesale`, `production_workflow`, `made_order_management`, `made_quoting_billing`, `porter_orders_payments`, `porter_inventory_materials`, `porter_accounts_orgs`, `porter_manufacturing_jobs`, `porter_fulfillment_shipping`, `porter_integrations`.
+T1: `product_discovery`, `product_configuration`, `content_marketing`, `creators_referral`, `product_catalog_design`, `machines_fleet`, `production_monitoring`, `factory_administration`, `design_workflow`, `customer_operations`, `made_products_catalog`, `made_administration`, `porter_catalog_products`, `design_system`, `unknown`.
+T0: `reporting_analytics`, `platform_infra`.
+
+These assignments are proposed defaults (derived from repo/route structure) — QA/EM tune them via PR; the Monday report's data justifies changes over time.
+
+### Consequences
+
+- `src/prompts/delivery-tier-standard.md` is rewritten to match the Notion page verbatim (steps 1–4 + table + JSON contract asking for the signals; the bot still computes the tier in code — the page's "output tier" instruction is satisfied because code recomputation from the same rules yields the identical tier).
+- Common-cases fixtures survive mostly unchanged (checkout copy → T0 via cosmetic exception; migration/backend → T0 + Non-UI Lane via step 1; shared component → T1 via step 4). New fixtures: inventory UI change → T2 (base tier); reporting dashboard tweak → T0 (base tier) unless blast-radius lifts it.
+- Runtime prompt source stays the **repo file** (approved spec). The Notion page banner must truthfully say the bot runs an identical, same-change-synced copy — the "fetched at runtime" claim on the page must be corrected at parity check. A Notion-runtime loader remains a contained, Danny-gated follow-up.

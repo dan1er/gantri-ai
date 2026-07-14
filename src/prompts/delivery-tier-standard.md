@@ -49,8 +49,10 @@ external customer, in a way that cannot simply be undone?
 ### `money_visible`
 Does the change render on **cart / checkout / payment**, or change a
 price / total / tax / shipping / discount the customer **sees or is charged**?
-- **Fires (yes):** a number on the cart/checkout/payment surface, or the amount
-  the customer is charged.
+- **Fires (yes):** a number rendered on the cart / checkout / payment surface, OR
+  any change to a price / total / tax / shipping / discount the customer sees or is
+  charged — regardless of which surface shows it (a product-page price, an
+  order-history amount, an account-page discount all count).
 - **Does NOT fire (no):** copy or styling on those pages · backend-only numbers a
   customer never sees.
 

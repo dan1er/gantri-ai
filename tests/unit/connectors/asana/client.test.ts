@@ -59,6 +59,56 @@ describe('AsanaApiClient auth + core', () => {
   });
 });
 
+describe('AsanaApiClient writes', () => {
+  it('getTask hits /tasks/{gid} with opt_fields and returns data', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ data: { gid: '42', name: 'Refund flow', notes: 'body' } }));
+    const client = new AsanaApiClient({ accessToken: 'tok', fetchImpl });
+    const t = await client.getTask('42', 'name,notes');
+    expect(t).toMatchObject({ gid: '42', name: 'Refund flow', notes: 'body' });
+    const [url] = fetchImpl.mock.calls[0];
+    expect(String(url)).toContain('/tasks/42');
+    expect(String(url)).toMatch(/opt_fields=name(%2C|,)notes/);
+  });
+
+  it('setEnumCustomField PUTs the wrapped custom_fields body as JSON', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ data: { gid: '42' } }));
+    const client = new AsanaApiClient({ accessToken: 'tok', fetchImpl });
+    await client.setEnumCustomField('42', 'field-1', 'opt-t2');
+    const [url, opts] = fetchImpl.mock.calls[0];
+    expect(String(url)).toContain('/tasks/42');
+    expect(opts.method).toBe('PUT');
+    expect(opts.headers['Content-Type']).toBe('application/json');
+    expect(JSON.parse(opts.body)).toEqual({ data: { custom_fields: { 'field-1': 'opt-t2' } } });
+  });
+
+  it('createStory POSTs the comment text and returns the created story', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ data: { gid: 'story-9', text: 'hi' } }));
+    const client = new AsanaApiClient({ accessToken: 'tok', fetchImpl });
+    const story = await client.createStory('42', 'hi');
+    expect(story.gid).toBe('story-9');
+    const [url, opts] = fetchImpl.mock.calls[0];
+    expect(String(url)).toContain('/tasks/42/stories');
+    expect(opts.method).toBe('POST');
+    expect(JSON.parse(opts.body)).toEqual({ data: { text: 'hi' } });
+  });
+
+  it('retries a write once on 429 then succeeds', async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(new Response('rate limited', { status: 429 }))
+      .mockResolvedValueOnce(jsonResponse({ data: { gid: 'story-9' } }));
+    const client = new AsanaApiClient({ accessToken: 'tok', fetchImpl, retryDelayMs: 1 });
+    const story = await client.createStory('42', 'hi');
+    expect(story.gid).toBe('story-9');
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('throws AsanaApiError on a failed write', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ errors: [{ message: 'Forbidden' }] }, 403));
+    const client = new AsanaApiClient({ accessToken: 'tok', fetchImpl });
+    await expect(client.setEnumCustomField('42', 'f', 'o')).rejects.toBeInstanceOf(AsanaApiError);
+  });
+});
+
 describe('AsanaApiClient pagination', () => {
   it('follows next_page.offset until exhausted', async () => {
     const fetchImpl = vi.fn()

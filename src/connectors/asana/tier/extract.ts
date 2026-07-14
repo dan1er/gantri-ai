@@ -94,10 +94,18 @@ export function loadTierStandard(): string {
 /** Content hash used for the classification cache: identical hash → identical
  *  facts → free reuse. Includes the prompt version AND the live rubric hash so a
  *  rubric change (a bumped version OR an in-place page edit at the same version)
- *  invalidates every prior classification and re-runs the ticket. `rubricHash`
- *  defaults to '' so callers that predate the runtime rubric stay hash-stable. */
+ *  invalidates every prior classification and re-runs the ticket.
+ *
+ *  `rubricHash` defaults to '' and, when empty, the payload layout is IDENTICAL to
+ *  the original two-argument version (`version\nname\nnotes\ntype`). This keeps
+ *  fallback-mode callers — and every record persisted before the runtime rubric
+ *  shipped — hash-stable, so the first tick after deploy does NOT re-classify the
+ *  whole board just because the signature gained a hash slot. A non-empty rubric
+ *  hash is spliced in so the SAME ticket under a DIFFERENT live rubric re-classifies. */
 export function tierInputHash(promptVersion: number, input: ExtractInput, rubricHash = ''): string {
-  const payload = `${promptVersion}\n${rubricHash}\n${input.name}\n${input.notes}\n${input.typeName}`;
+  const payload = rubricHash
+    ? `${promptVersion}\n${rubricHash}\n${input.name}\n${input.notes}\n${input.typeName}`
+    : `${promptVersion}\n${input.name}\n${input.notes}\n${input.typeName}`;
   return createHash('sha256').update(payload).digest('hex');
 }
 

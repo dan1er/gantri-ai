@@ -323,6 +323,35 @@ export class TierPoller {
     const prevConfirmed = prev?.confirmedTier ?? null;
     const outcome = prev ? 'reclassified' : 'classified';
 
+    // Silent-update guard: a re-classification of an EXISTING provisional ticket
+    // whose decided tier is UNCHANGED (the field already holds it — this branch is
+    // only reached when the field matches the bot's last decision) must NOT re-write
+    // the field or post a duplicate comment; it only refreshes the stored facts /
+    // input hash. Without this, adopting a new rubric — which bumps the rubric hash so
+    // every tracked ticket's input hash mismatches — would spam a fresh provisional
+    // comment (and a redundant field write) across the whole board on the next tick.
+    if (prev && decision.tier === prev.tier && prev.commentGid) {
+      await this.deps.repo.upsertBot({
+        taskGid: task.gid,
+        inputHash: hash,
+        promptVersion: this.activeRubric.version,
+        facts,
+        tier: decision.tier,
+        confirmedTier: prevConfirmed ?? decision.tier,
+        liftedByUnclear: decision.liftedByUnclear,
+        calibrationMismatch: decision.calibrationMismatch,
+        stage: 'provisional',
+        flags: decision.flags,
+        domain: facts.domain,
+        commentGid: prev.commentGid,
+      });
+      logger.info(
+        { taskGid: task.gid, tier: decision.tier },
+        'delivery_tier_reclassify_unchanged',
+      );
+      return outcome;
+    }
+
     // Phase 1 — record the decision before touching Asana. `confirmedTier` stays at
     // the previously confirmed tier so a crash here is recoverable. This is the
     // PROVISIONAL pass — the Code-Review pass confirms it from the diff later.
@@ -443,6 +472,11 @@ export class TierPoller {
       domain: record.domain,
       commentGid,
     });
+    // Keep the caller's in-memory record consistent with what we just persisted, so a
+    // downstream re-classify in the SAME tick (the silent-update guard in `classify`)
+    // reads the freshly-backfilled comment gid / confirmed tier and doesn't re-post.
+    record.confirmedTier = record.tier;
+    record.commentGid = commentGid;
   }
 
   /** Re-read the field fresh and, if it now holds a tier the bot never wrote (a

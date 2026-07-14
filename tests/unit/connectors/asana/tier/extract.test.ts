@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import {
   extractFacts,
   extractFactsFromDiff,
@@ -259,5 +260,28 @@ describe('tierInputHash', () => {
   });
   it('changes when the ticket text changes', () => {
     expect(tierInputHash(1, INPUT)).not.toBe(tierInputHash(1, { ...INPUT, notes: 'different' }));
+  });
+
+  it('is backward-compatible: the empty-rubric-hash default matches the original two-arg layout', () => {
+    // A record persisted BEFORE the runtime rubric shipped was hashed with the
+    // original `version\nname\notes\ntype` payload. The empty-rubric-hash path must
+    // reproduce it byte-for-byte, or the first tick after deploy re-classifies the
+    // whole board (duplicate comments + field re-writes) for no real change.
+    const legacy = createHash('sha256')
+      .update(`1\n${INPUT.name}\n${INPUT.notes}\n${INPUT.typeName}`)
+      .digest('hex');
+    expect(tierInputHash(1, INPUT)).toBe(legacy);
+    expect(tierInputHash(1, INPUT, '')).toBe(legacy);
+  });
+
+  it('changes when the live rubric hash changes (same ticket re-classifies under a new rubric)', () => {
+    // The stated requirement: including the rubric hash means an identical ticket
+    // re-classifies after a Notion page edit. A different rubric hash → a different
+    // input hash, and a non-empty rubric hash differs from the empty-hash default.
+    const a = tierInputHash(1, INPUT, 'rubric-hash-a');
+    const b = tierInputHash(1, INPUT, 'rubric-hash-b');
+    expect(a).not.toBe(b);
+    expect(a).not.toBe(tierInputHash(1, INPUT));
+    expect(a).not.toBe(tierInputHash(1, INPUT, ''));
   });
 });

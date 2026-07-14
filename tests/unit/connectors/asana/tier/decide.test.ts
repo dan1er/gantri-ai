@@ -84,6 +84,34 @@ describe('DOMAIN_BASE_TIER — transcribed from the Notion page', () => {
   });
 });
 
+describe('decideTier — runtime tableMap parameter (live Notion base tiers)', () => {
+  // The whole point of the runtime rubric: editing a domain's base-tier row on the
+  // Notion page must change the tier the classifier assigns. `decideTier` takes the
+  // parsed table as an argument; these tests prove it consumes that argument and does
+  // NOT read the committed DOMAIN_BASE_TIER directly. A behaviour-changing ticket with
+  // no hard trigger and no restore lands exactly at the domain base tier, so the base
+  // is the sole thing under test here.
+  const behaviorAtBase = facts({ behavior_change: 'yes', domain: 'content_marketing' });
+
+  it('defaults to the committed base tier when no map is passed', () => {
+    expect(decideTier(behaviorAtBase).tier).toBe('T1'); // content_marketing base = T1
+  });
+
+  it('honours an overridden base tier from the passed map (raise T1 → T2)', () => {
+    const raised = { ...DOMAIN_BASE_TIER, content_marketing: 'T2' as const };
+    const d = decideTier(behaviorAtBase, raised);
+    expect(d.tier).toBe('T2');
+    expect(d.baseTier).toBe('T2');
+  });
+
+  it('honours an overridden base tier from the passed map (lower T1 → T0)', () => {
+    const lowered = { ...DOMAIN_BASE_TIER, content_marketing: 'T0' as const };
+    const d = decideTier(behaviorAtBase, lowered);
+    expect(d.tier).toBe('T0');
+    expect(d.baseTier).toBe('T0');
+  });
+});
+
 describe('decideTier — money-adjacent domain invariants', () => {
   it('payouts/statements behaviour change with no hard trigger keeps the T1 base', () => {
     // A behaviour-changing payouts ticket with no money/irreversible/integrity/access

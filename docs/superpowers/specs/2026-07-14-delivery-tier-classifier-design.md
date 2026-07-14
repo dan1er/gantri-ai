@@ -230,13 +230,20 @@ The LLM answers, each `yes | no | unclear` (+ verbatim evidence), plus the domai
 5. Uncertainty floor: any decision-relevant `unclear` (incl. `ui_testable`/`cosmetic_only` unclear or domain unknown) → tier = max(tier, T1). A definite T2 stays T2.
 6. Dynamic escalations: tier = max(tier, `tier_domain_minimums[domain]`) — skipped when `ui_testable === 'no'` (QA-is-UI-only stays supreme).
 
-### DOMAIN_BASE_TIER (versioned in code as data; the Notion page mirrors it)
+### DOMAIN_BASE_TIER + step wording: transcribed from the live Notion page at implementation time
 
-T2: `auth_accounts`, `shopping_checkout`, `orders_notifications`, `gift_cards`, `trade_b2b`, `order_management`, `inventory_materials`, `payouts_statements`, `promotions_gifting`, `organizations_wholesale`, `production_workflow`, `made_order_management`, `made_quoting_billing`, `porter_orders_payments`, `porter_inventory_materials`, `porter_accounts_orgs`, `porter_manufacturing_jobs`, `porter_fulfillment_shipping`, `porter_integrations`.
-T1: `product_discovery`, `product_configuration`, `content_marketing`, `creators_referral`, `product_catalog_design`, `machines_fleet`, `production_monitoring`, `factory_administration`, `design_workflow`, `customer_operations`, `made_products_catalog`, `made_administration`, `porter_catalog_products`, `design_system`, `unknown`.
-T0: `reporting_analytics`, `platform_infra`.
+The rubric CONTENT (the domain→base-tier table rows, the exception/step wording, the T1 behavior-preserving cap) is being iterated on the Notion rubric page (`39ddb572aef48169897efefd543290b9`). To avoid spec staleness: **the implementer fetches the page at build time and transcribes it verbatim** into the code table + the prompt file; the parity check before the PR confirms page ↔ code ↔ prompt agree. Known-latest shape (2026-07-14 evening): T2 trimmed to ~11 domains where a defect directly costs money, is irreversible for a real customer, or corrupts data; customer-facing-but-recoverable → T1; internal read-only + infra → T0; plus a **behavior-preserving cap**: a change in a T2 domain that leaves the money/order/data/auth logic intact (restyle, layout, reorder) is capped at **T1** — requiring one extra extraction signal, `behavior_change` (yes/no/unclear + evidence).
 
-These assignments are proposed defaults (derived from repo/route structure) — QA/EM tune them via PR; the Monday report's data justifies changes over time.
+Invariants that do NOT move regardless of page content (governance floor):
+- The LLM outputs only signals + domain-tag + evidence; the tier is computed in pure code (same input → same tier). The signal set is derived from the page's steps at transcription time.
+- `ui_testable=no` → terminal T0 (+ Non-UI Lane note when the backend area is money/orders/inventory/auth/pricing).
+- No-behavior-change is never T2 (cosmetic → T0; minor-but-behavior-preserving → T1).
+- Uncertainty floor: unclear/unknown → at least T1, never T0; a definite T2 stays T2.
+- Dynamic escalations: `tier_domain_minimums` max() on top (Danny-approved rows only; skipped when not UI-testable). The domain tag itself never sets a base tier.
+- Human-set field values are never modified; overrides are recorded and reported.
+- The shipped prompt file and the page must be textually equivalent at merge time.
+
+State of the page at last check (2026-07-14 night, converged change-based model): 1· no UI surface → T0 · 2· no behavior change → T0/T1, never T2 · 3· behavior change AND (money | irreversible-customer | data/inventory integrity | access/security) → T2 · 4· everything else → T1; uncertain → T1. Domain = output tag only.
 
 ### Consequences
 

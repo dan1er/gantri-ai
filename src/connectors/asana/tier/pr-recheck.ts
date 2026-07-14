@@ -190,12 +190,6 @@ export class PrRecheck {
     const currentTier: DeliveryTier =
       optionGidToTier(currentGid) ?? record.confirmedTier ?? record.tier;
 
-    // A bot record whose field still holds a bot-written tier is bot-set; if a
-    // human has changed the field to something the bot never wrote, it is
-    // human-set and the field is off-limits (comment only).
-    const botSet =
-      record.decidedBy === 'bot' && (currentGid === null || botKnownGids(record).has(currentGid));
-
     const { diff, truncated } = await this.deps.gh.prDiff(repo, pr.number);
     const facts = await extractFactsFromDiff(
       { name: task.name ?? '', notes: task.notes ?? '', typeName: typeName(task), diff, truncated },
@@ -204,50 +198,85 @@ export class PrRecheck {
     const decision = decideTier(facts);
     const diffTier = decision.tier;
 
-    // Raise-only: a lower or equal diff tier is silent.
+    // Raise-only: a lower or equal diff tier (vs the baseline read) is silent.
     if (!isHigherTier(diffTier, currentTier)) {
+      await this.record(repo, pr, taskGid, 'consistent', diffTier, false);
+      return 'consistent';
+    }
+
+    // Close the read → LLM → write TOCTOU: the baseline read above was taken before
+    // the multi-second diff extraction, so a human may have set the field meanwhile.
+    // Re-read fresh and recompute both ownership and the raise decision against it —
+    // never overwrite (or lower) a human decision made in that window.
+    const fresh = await this.deps.client.getTask(taskGid, OPT_FIELDS_TASK);
+    const freshGid = currentTierOptionGid(fresh);
+    const freshTier: DeliveryTier = optionGidToTier(freshGid) ?? record.confirmedTier ?? record.tier;
+    const botOwns =
+      record.decidedBy === 'bot' && (freshGid === null || botKnownGids(record).has(freshGid));
+
+    if (!isHigherTier(diffTier, freshTier)) {
+      // A human (or a prior tick) already raised the field to or above the diff tier.
       await this.record(repo, pr, taskGid, 'consistent', diffTier, false);
       return 'consistent';
     }
 
     const comment = renderTierRaiseComment({
       prNumber: pr.number,
-      fromTier: currentTier,
+      fromTier: freshTier,
       toTier: diffTier,
       decision,
       facts,
       promptVersion: this.deps.promptVersion,
     });
 
-    if (botSet) {
-      // Bot owns the field: raise it, comment, and sync the stored record so the
+    if (botOwns) {
+      // Keep the ticket-TEXT hash so a follow-up poll (with unchanged notes) does
+      // not re-run and revert the raise; the facts are the diff facts that justify it.
+      const textHash = tierInputHash(this.deps.promptVersion, {
+        name: task.name ?? '',
+        notes: task.notes ?? '',
+        typeName: typeName(task),
+      });
+      // Phase 1 — persist the raise BEFORE writing the field (crash-safe, mirroring
+      // the poller): confirmedTier stays at the previously confirmed tier so a crash
+      // between the field write and the finalize cannot manufacture a false override.
+      // diffFloorTier records the diff-authoritative floor a later text
+      // re-classification must not lower.
+      await this.deps.classifications.upsertBot({
+        taskGid,
+        inputHash: textHash,
+        promptVersion: this.deps.promptVersion,
+        facts,
+        tier: diffTier,
+        confirmedTier: record.confirmedTier ?? record.tier,
+        diffFloorTier: diffTier,
+        liftedByUnclear: decision.liftedByUnclear,
+        flags: decision.flags,
+        domain: facts.domain,
+        commentGid: record.commentGid,
+      });
+      // Phase 2 — write the field, comment, then finalize the confirmed tier so the
       // next poll sees `field === record.tier` and does not flag a false override.
       await this.deps.client.setEnumCustomField(taskGid, DELIVERY_TIER_FIELD_GID, tierToOptionGid(diffTier));
       const story = await this.deps.client.createStory(taskGid, comment);
       await this.deps.classifications.upsertBot({
         taskGid,
-        // Keep the ticket-TEXT hash so a follow-up poll (with unchanged notes) does
-        // not re-run and revert the raise; the facts below are the diff facts that
-        // justify it.
-        inputHash: tierInputHash(this.deps.promptVersion, {
-          name: task.name ?? '',
-          notes: task.notes ?? '',
-          typeName: typeName(task),
-        }),
+        inputHash: textHash,
         promptVersion: this.deps.promptVersion,
         facts,
         tier: diffTier,
         confirmedTier: diffTier,
+        diffFloorTier: diffTier,
         liftedByUnclear: decision.liftedByUnclear,
         flags: decision.flags,
         domain: facts.domain,
         commentGid: story?.gid ?? record.commentGid,
       });
-      logger.info({ repo, pr: pr.number, taskGid, from: currentTier, to: diffTier }, 'delivery_tier_pr_raise_bot');
+      logger.info({ repo, pr: pr.number, taskGid, from: freshTier, to: diffTier }, 'delivery_tier_pr_raise_bot');
     } else {
       // Human owns the field: comment only, never touch the field or the record.
       await this.deps.client.createStory(taskGid, comment);
-      logger.info({ repo, pr: pr.number, taskGid, from: currentTier, to: diffTier }, 'delivery_tier_pr_raise_human');
+      logger.info({ repo, pr: pr.number, taskGid, from: freshTier, to: diffTier }, 'delivery_tier_pr_raise_human');
     }
 
     await this.record(repo, pr, taskGid, 'raise', diffTier, true);

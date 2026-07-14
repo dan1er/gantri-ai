@@ -160,6 +160,28 @@ describe('TierPoller.runOnce — human overrides & idempotency', () => {
     expect(client.setEnumCustomField).not.toHaveBeenCalled();
   });
 
+  it('records a human override when a human CLEARS a field the bot had confirmed', async () => {
+    // Bot confirmed T1 (confirmedTier === tier). A human then cleared the field to
+    // disagree. An empty field with confirmedTier === tier can only be a human clear
+    // (a crashed write leaves confirmedTier below tier), so it must be recorded as an
+    // override and never re-applied — not repaired forever.
+    const record: Partial<TierClassificationRecord> = {
+      taskGid: 'c1',
+      tier: 'T1',
+      confirmedTier: 'T1',
+      decidedBy: 'bot',
+      inputHash: 'h',
+    };
+    const { poller, client, repo } = buildPoller(
+      [task({ gid: 'c1', tierOptionGid: null })],
+      { get: vi.fn().mockResolvedValue(record) },
+    );
+    const res = await poller.runOnce();
+    expect(res.overrides).toBe(1);
+    expect(repo.markOverride).toHaveBeenCalledWith('c1', null);
+    expect(client.setEnumCustomField).not.toHaveBeenCalled();
+  });
+
   it('never touches a task already flagged human_override', async () => {
     const record: Partial<TierClassificationRecord> = { taskGid: 'ov', tier: 'T0', decidedBy: 'human_override' };
     const { poller, client, repo } = buildPoller(
@@ -261,6 +283,33 @@ describe('TierPoller.runOnce — crash recovery & TOCTOU (never freeze on a part
   });
 });
 
+describe('TierPoller.runOnce — diff-derived floor (never lower a PR-raised tier)', () => {
+  it('holds the diff floor when a notes edit reclassifies lower', async () => {
+    // A v2 PR re-check raised this ticket to T2 from the diff and stored a T2 floor.
+    // The author then edited the description; the poll re-classifies from text and
+    // decides T0 (the mock always returns T0). The field must NOT be lowered: the
+    // record stays T2, no field write, no comment — just the hash is refreshed.
+    const t = task({ gid: 'f1', tierOptionGid: tierToOptionGid('T2') });
+    const record: Partial<TierClassificationRecord> = {
+      taskGid: 'f1',
+      tier: 'T2',
+      confirmedTier: 'T2',
+      diffFloorTier: 'T2',
+      decidedBy: 'bot',
+      inputHash: 'stale-hash-from-old-notes',
+      commentGid: 'story-old',
+    };
+    const { poller, client, repo } = buildPoller([t], { get: vi.fn().mockResolvedValue(record) });
+    const res = await poller.runOnce();
+    expect(res.reclassified).toBe(1);
+    expect(client.setEnumCustomField).not.toHaveBeenCalled();
+    expect(client.createStory).not.toHaveBeenCalled();
+    const upserts = (repo.upsertBot as ReturnType<typeof vi.fn>).mock.calls;
+    expect(upserts.length).toBe(1);
+    expect(upserts[0][0]).toMatchObject({ tier: 'T2', confirmedTier: 'T2', diffFloorTier: 'T2' });
+  });
+});
+
 describe('TierPoller.runOnce — override sweep over non-candidates', () => {
   it('records a human override on a COMPLETED task the bot had classified', async () => {
     // A completed task is not a candidate, so processOne never runs — but a human
@@ -273,6 +322,7 @@ describe('TierPoller.runOnce — override sweep over non-candidates', () => {
       facts: {} as any,
       tier: 'T1',
       confirmedTier: 'T1',
+      diffFloorTier: null,
       liftedByUnclear: false,
       flags: [],
       domain: 'shopping_checkout',
@@ -302,6 +352,7 @@ describe('TierPoller.runOnce — override sweep over non-candidates', () => {
       facts: {} as any,
       tier: 'T1',
       confirmedTier: 'T1',
+      diffFloorTier: null,
       liftedByUnclear: false,
       flags: [],
       domain: 'shopping_checkout',

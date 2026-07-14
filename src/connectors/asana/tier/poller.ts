@@ -3,6 +3,7 @@ import type { TierClassificationsRepo, TierClassificationRecord } from '../../..
 import {
   DELIVERY_TIER_FIELD_GID,
   SOFTWARE_BOARD_PROJECT_GID,
+  TIER_RANK,
   TYPE_FIELD_GID,
   isFeatureTemplateTask,
   isTierExcludedType,
@@ -182,6 +183,16 @@ export class TierPoller {
         return this.classify(task, record);
       }
 
+      // A human deliberately CLEARED a tier the bot had already confirmed. An empty
+      // field whose record shows `confirmedTier === tier` can only be a human clear:
+      // a crashed write always leaves `confirmedTier` BELOW `tier` (or null), never
+      // equal. Human override is sacred — record it and never touch the task again.
+      if (currentGid === null && record.confirmedTier === record.tier) {
+        await this.deps.repo.markOverride(task.gid, null);
+        logger.info({ taskGid: task.gid, botTier: record.tier }, 'delivery_tier_human_cleared');
+        return 'overrides';
+      }
+
       // The field is empty or still holds the previously CONFIRMED tier: the bot's
       // write of `record.tier` was lost mid-flight (crash between the field write
       // and its persist, or between the pre-write record and the field write).
@@ -218,7 +229,34 @@ export class TierPoller {
     const facts = await extractFacts(input, this.deps.extract);
     const decision = decideTier(facts);
     const prevConfirmed = prev?.confirmedTier ?? null;
+    const floorTier = prev?.diffFloorTier ?? null;
     const outcome = prev ? 'reclassified' : 'classified';
+
+    // Never lower below a diff-derived floor. A prior PR re-check raised this ticket
+    // from the authoritative diff; a text-only re-classification (notes edit) must
+    // not undo that. When the fresh text tier is below the floor, keep the raised
+    // record intact and only refresh the input hash so we stop re-running until the
+    // notes change again — no field write, no comment, no LLM-driven lowering.
+    if (prev && floorTier && TIER_RANK[decision.tier] < TIER_RANK[floorTier]) {
+      await this.deps.repo.upsertBot({
+        taskGid: task.gid,
+        inputHash: hash,
+        promptVersion: prev.promptVersion,
+        facts: prev.facts,
+        tier: prev.tier,
+        confirmedTier: prev.confirmedTier,
+        diffFloorTier: floorTier,
+        liftedByUnclear: prev.liftedByUnclear,
+        flags: prev.flags,
+        domain: prev.domain,
+        commentGid: prev.commentGid,
+      });
+      logger.info(
+        { taskGid: task.gid, decided: decision.tier, floor: floorTier },
+        'delivery_tier_diff_floor_held',
+      );
+      return outcome;
+    }
 
     // Phase 1 — record the decision before touching the field. `confirmedTier`
     // stays at the previously confirmed tier so a crash here is recoverable.
@@ -229,6 +267,7 @@ export class TierPoller {
       facts,
       tier: decision.tier,
       confirmedTier: prevConfirmed,
+      diffFloorTier: floorTier,
       liftedByUnclear: decision.liftedByUnclear,
       flags: decision.flags,
       domain: facts.domain,
@@ -256,6 +295,7 @@ export class TierPoller {
       facts,
       tier: decision.tier,
       confirmedTier: decision.tier,
+      diffFloorTier: floorTier,
       liftedByUnclear: decision.liftedByUnclear,
       flags: decision.flags,
       domain: facts.domain,
@@ -292,6 +332,7 @@ export class TierPoller {
       facts: record.facts,
       tier: record.tier,
       confirmedTier: record.tier,
+      diffFloorTier: record.diffFloorTier,
       liftedByUnclear: record.liftedByUnclear,
       flags: record.flags,
       domain: record.domain,
@@ -310,6 +351,7 @@ export class TierPoller {
       facts: record.facts,
       tier: record.tier,
       confirmedTier: record.tier,
+      diffFloorTier: record.diffFloorTier,
       liftedByUnclear: record.liftedByUnclear,
       flags: record.flags,
       domain: record.domain,

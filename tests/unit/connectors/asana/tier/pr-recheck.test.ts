@@ -62,6 +62,7 @@ function record(over: Partial<TierClassificationRecord>): TierClassificationReco
     facts: {} as any,
     tier: 'T0',
     confirmedTier: 'T0',
+    diffFloorTier: null,
     liftedByUnclear: false,
     flags: [],
     domain: 'shopping_checkout',
@@ -95,6 +96,9 @@ interface BuildOpts {
   prs?: ReturnType<typeof pr>[];
   diffTier?: DeliveryTier;
   fieldTier?: DeliveryTier | null;
+  /** When set, the pre-write re-read returns this field value (a human edit landing
+   *  during the LLM window) instead of `fieldTier`. */
+  freshFieldTier?: DeliveryTier | null;
   record?: TierClassificationRecord | null;
   exists?: boolean;
 }
@@ -104,8 +108,16 @@ function build(o: BuildOpts = {}) {
     listOpenPRs: vi.fn().mockResolvedValue(o.prs ?? [pr()]),
     prDiff: vi.fn().mockResolvedValue({ diff: 'diff --git a/x b/x\n+charge', truncated: false }),
   } as unknown as GithubDispatcher;
+  const baseline = task('9999999999', o.fieldTier === null ? null : tierToOptionGid(o.fieldTier ?? 'T0'));
+  const getTask =
+    o.freshFieldTier === undefined
+      ? vi.fn().mockResolvedValue(baseline)
+      : vi
+          .fn()
+          .mockResolvedValueOnce(baseline)
+          .mockResolvedValue(task('9999999999', o.freshFieldTier === null ? null : tierToOptionGid(o.freshFieldTier)));
   const client = {
-    getTask: vi.fn().mockResolvedValue(task('9999999999', o.fieldTier === null ? null : tierToOptionGid(o.fieldTier ?? 'T0'))),
+    getTask,
     setEnumCustomField: vi.fn().mockResolvedValue(undefined),
     createStory: vi.fn().mockResolvedValue({ gid: 'story-new' }),
   } as unknown as AsanaApiClient;
@@ -197,6 +209,48 @@ describe('PrRecheck.runOnce — raise-only semantics', () => {
     expect(prChecks.insert).toHaveBeenCalledWith(
       expect.objectContaining({ verdict: 'raise', suggestedTier: 'T2', commented: true }),
     );
+  });
+
+  it('bot-set raise persists the record BEFORE writing the field (crash-safe ordering)', async () => {
+    const { recheck, client, classifications } = build({
+      fieldTier: 'T0',
+      diffTier: 'T2',
+      record: record({ tier: 'T0', confirmedTier: 'T0', decidedBy: 'bot' }),
+    });
+    const order: string[] = [];
+    (classifications.upsertBot as ReturnType<typeof vi.fn>).mockImplementation((rec: { confirmedTier: string | null }) => {
+      order.push(`upsert:${rec.confirmedTier}`);
+      return Promise.resolve();
+    });
+    (client.setEnumCustomField as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      order.push('field');
+      return Promise.resolve();
+    });
+    await recheck.runOnce();
+    // Pre-write record (confirmedTier still the previous T0) lands before the field
+    // write; the finalize (confirmedTier T2) lands after. A crash mid-way can never
+    // orphan the field into a phantom human override.
+    expect(order).toEqual(['upsert:T0', 'field', 'upsert:T2']);
+    // The raise carries a diff-derived floor so a later notes edit cannot lower it.
+    expect(classifications.upsertBot).toHaveBeenCalledWith(expect.objectContaining({ diffFloorTier: 'T2' }));
+  });
+
+  it('respects a human who set the field during the diff-extraction window (no overwrite)', async () => {
+    // Baseline read shows an empty bot-owned field; by the time the bot re-reads
+    // before writing, a human has set T1 (a value the bot never wrote). The diff is
+    // T2 so a raise is still warranted, but the field is now human-owned — the bot
+    // must only comment, never touch the field or the record.
+    const { recheck, client, classifications } = build({
+      fieldTier: null,
+      freshFieldTier: 'T1',
+      diffTier: 'T2',
+      record: record({ tier: 'T0', confirmedTier: 'T0', decidedBy: 'bot' }),
+    });
+    const res = await recheck.runOnce();
+    expect(res.raised).toBe(1);
+    expect(client.setEnumCustomField).not.toHaveBeenCalled();
+    expect(classifications.upsertBot).not.toHaveBeenCalled();
+    expect(client.createStory).toHaveBeenCalledWith('9999999999', expect.stringContaining('T1 → T2'));
   });
 
   it('human-set field: comments only, never touches the field or the record', async () => {

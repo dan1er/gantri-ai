@@ -75,6 +75,13 @@ export function isHigherTier(a: DeliveryTier, b: DeliveryTier): boolean {
   return TIER_RANK[a] > TIER_RANK[b];
 }
 
+/** The higher of two tiers. A null second argument (no floor) returns `a`. Used to
+ *  clamp a text-derived tier up to a diff-derived floor (never lower it). */
+export function maxTier(a: DeliveryTier, b: DeliveryTier | null): DeliveryTier {
+  if (!b) return a;
+  return TIER_RANK[a] >= TIER_RANK[b] ? a : b;
+}
+
 /** True when a Type option display name is excluded from tier classification. */
 export function isTierExcludedType(typeName: string | null | undefined): boolean {
   if (!typeName) return false;

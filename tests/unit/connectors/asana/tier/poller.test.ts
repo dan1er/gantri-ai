@@ -61,16 +61,26 @@ function task(o: TaskOpts): AsanaTask {
   };
 }
 
-/** Build a poller over a fixed task list + injectable repo. */
-function buildPoller(tasks: AsanaTask[], repo: Partial<TierClassificationsRepo>) {
+/** Build a poller over a fixed task list + injectable repo. `getTask` re-reads the
+ *  same task list by gid (the poller re-reads the field fresh before writing);
+ *  override `freshByGid` to simulate a human setting the field in that window. */
+function buildPoller(
+  tasks: AsanaTask[],
+  repo: Partial<TierClassificationsRepo>,
+  freshByGid?: Record<string, AsanaTask>,
+) {
   const client = {
-    getProjectTasks: vi.fn().mockResolvedValue(tasks),
+    getProjectTasksUnbounded: vi.fn().mockResolvedValue(tasks),
+    getTask: vi.fn((gid: string) =>
+      Promise.resolve(freshByGid?.[gid] ?? tasks.find((t) => t.gid === gid)),
+    ),
     setEnumCustomField: vi.fn().mockResolvedValue(undefined),
     createStory: vi.fn().mockResolvedValue({ gid: 'story-1' }),
   } as unknown as AsanaApiClient;
   const claude = claudeAlwaysT0();
   const fullRepo = {
     get: vi.fn().mockResolvedValue(null),
+    listActiveBot: vi.fn().mockResolvedValue([]),
     upsertBot: vi.fn().mockResolvedValue(undefined),
     markOverride: vi.fn().mockResolvedValue(undefined),
     ...repo,
@@ -92,10 +102,15 @@ describe('TierPoller.runOnce — candidate gating', () => {
     expect(res.classified).toBe(1);
     expect(client.setEnumCustomField).toHaveBeenCalledWith('t1', DELIVERY_TIER_FIELD_GID, tierToOptionGid('T0'));
     expect(client.createStory).toHaveBeenCalledTimes(1);
-    expect(repo.upsertBot).toHaveBeenCalledTimes(1);
-    const rec = (repo.upsertBot as ReturnType<typeof vi.fn>).mock.calls[0][0];
-    expect(rec.tier).toBe('T0');
-    expect(rec.commentGid).toBe('story-1');
+    // A pre-write record (durable before the field write) then a finalize with the
+    // comment gid and the confirmed tier.
+    const upserts = (repo.upsertBot as ReturnType<typeof vi.fn>).mock.calls;
+    expect(upserts.length).toBe(2);
+    expect(upserts[0][0]).toMatchObject({ tier: 'T0', confirmedTier: null, commentGid: null });
+    const final = upserts[upserts.length - 1][0];
+    expect(final.tier).toBe('T0');
+    expect(final.confirmedTier).toBe('T0');
+    expect(final.commentGid).toBe('story-1');
   });
 
   it('excludes tasks created before ROLLOUT_DATE, thin descriptions, completed tasks, and excluded Types', async () => {
@@ -130,6 +145,7 @@ describe('TierPoller.runOnce — human overrides & idempotency', () => {
     const record: Partial<TierClassificationRecord> = {
       taskGid: 'o1',
       tier: 'T0',
+      confirmedTier: 'T0',
       decidedBy: 'bot',
       inputHash: 'whatever',
     };
@@ -159,7 +175,7 @@ describe('TierPoller.runOnce — human overrides & idempotency', () => {
   it('is idempotent: a bot task whose notes hash is unchanged is skipped (no re-classify)', async () => {
     const t = task({ gid: 'i1', tierOptionGid: tierToOptionGid('T0') });
     const hash = tierInputHash(PROMPT_VERSION, { name: t.name, notes: t.notes!, typeName: 'Feature' });
-    const record: Partial<TierClassificationRecord> = { taskGid: 'i1', tier: 'T0', decidedBy: 'bot', inputHash: hash };
+    const record: Partial<TierClassificationRecord> = { taskGid: 'i1', tier: 'T0', confirmedTier: 'T0', decidedBy: 'bot', inputHash: hash };
     const { poller, client } = buildPoller([t], { get: vi.fn().mockResolvedValue(record) });
     const res = await poller.runOnce();
     expect(res.skipped).toBe(1);
@@ -172,6 +188,7 @@ describe('TierPoller.runOnce — human overrides & idempotency', () => {
     const record: Partial<TierClassificationRecord> = {
       taskGid: 'r1',
       tier: 'T0',
+      confirmedTier: 'T0',
       decidedBy: 'bot',
       inputHash: 'stale-hash-from-old-notes',
     };
@@ -179,6 +196,127 @@ describe('TierPoller.runOnce — human overrides & idempotency', () => {
     const res = await poller.runOnce();
     expect(res.reclassified).toBe(1);
     expect(client.setEnumCustomField).toHaveBeenCalledTimes(1);
-    expect(repo.upsertBot).toHaveBeenCalledTimes(1);
+    // Pre-write record + finalize.
+    expect(repo.upsertBot).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('TierPoller.runOnce — crash recovery & TOCTOU (never freeze on a partial write)', () => {
+  it('recovers a lost field write instead of misreading it as a human override', async () => {
+    // The bot decided T1 and recorded it, but the field write never landed (crash):
+    // the field still shows the previously confirmed T0. Next tick must re-apply the
+    // T1 write, NOT record a bot-T1 → human-T0 "override".
+    const record: Partial<TierClassificationRecord> = {
+      taskGid: 'p1',
+      tier: 'T1',
+      confirmedTier: 'T0',
+      decidedBy: 'bot',
+      inputHash: 'hash',
+      commentGid: 'story-old',
+    };
+    const { poller, client, repo } = buildPoller(
+      [task({ gid: 'p1', tierOptionGid: tierToOptionGid('T0') })],
+      { get: vi.fn().mockResolvedValue(record) },
+    );
+    const res = await poller.runOnce();
+    expect(res.reclassified).toBe(1);
+    expect(res.overrides).toBe(0);
+    expect(repo.markOverride).not.toHaveBeenCalled();
+    // Re-applies the decided T1 with no new LLM extraction.
+    expect(client.setEnumCustomField).toHaveBeenCalledWith('p1', DELIVERY_TIER_FIELD_GID, tierToOptionGid('T1'));
+  });
+
+  it('orphan recovery: a bot record with an empty field re-applies the write (no human-set assumption)', async () => {
+    const record: Partial<TierClassificationRecord> = {
+      taskGid: 'p2',
+      tier: 'T0',
+      confirmedTier: null,
+      decidedBy: 'bot',
+      inputHash: 'hash',
+      commentGid: 'story-old',
+    };
+    const { poller, client } = buildPoller(
+      [task({ gid: 'p2', tierOptionGid: null })],
+      { get: vi.fn().mockResolvedValue(record) },
+    );
+    const res = await poller.runOnce();
+    expect(res.reclassified).toBe(1);
+    expect(client.setEnumCustomField).toHaveBeenCalledWith('p2', DELIVERY_TIER_FIELD_GID, tierToOptionGid('T0'));
+  });
+
+  it('aborts the write when a human sets the field during the scan→write window', async () => {
+    // Scan sees an empty field; by the time the bot re-reads before writing, a human
+    // has set T2. The bot must respect it: no field write, record the override.
+    const scanTask = task({ gid: 'w1', tierOptionGid: null });
+    const humanEdited = task({ gid: 'w1', tierOptionGid: tierToOptionGid('T2') });
+    const { poller, client, repo } = buildPoller(
+      [scanTask],
+      { get: vi.fn().mockResolvedValue(null) },
+      { w1: humanEdited },
+    );
+    const res = await poller.runOnce();
+    expect(res.overrides).toBe(1);
+    expect(repo.markOverride).toHaveBeenCalledWith('w1', 'T2');
+    expect(client.setEnumCustomField).not.toHaveBeenCalled();
+  });
+});
+
+describe('TierPoller.runOnce — override sweep over non-candidates', () => {
+  it('records a human override on a COMPLETED task the bot had classified', async () => {
+    // A completed task is not a candidate, so processOne never runs — but a human
+    // re-tiered it (bot T1 → human T2) and that disagreement must still be captured.
+    const record: TierClassificationRecord = {
+      taskGid: 'done1',
+      inputHash: 'h',
+      promptVersion: 1,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      facts: {} as any,
+      tier: 'T1',
+      confirmedTier: 'T1',
+      liftedByUnclear: false,
+      flags: [],
+      domain: 'shopping_checkout',
+      decidedBy: 'bot',
+      humanTier: null,
+      commentGid: null,
+      createdAt: '2026-07-20T00:00:00Z',
+      updatedAt: '2026-07-20T00:00:00Z',
+    };
+    const { poller, client, repo } = buildPoller(
+      [task({ gid: 'done1', completed: true, tierOptionGid: tierToOptionGid('T2') })],
+      { listActiveBot: vi.fn().mockResolvedValue([record]) },
+    );
+    const res = await poller.runOnce();
+    expect(res.candidates).toBe(0);
+    expect(res.overrides).toBe(1);
+    expect(repo.markOverride).toHaveBeenCalledWith('done1', 'T2');
+    expect(client.setEnumCustomField).not.toHaveBeenCalled();
+  });
+
+  it('does not flag a completed task whose field still matches the bot record', async () => {
+    const record: TierClassificationRecord = {
+      taskGid: 'done2',
+      inputHash: 'h',
+      promptVersion: 1,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      facts: {} as any,
+      tier: 'T1',
+      confirmedTier: 'T1',
+      liftedByUnclear: false,
+      flags: [],
+      domain: 'shopping_checkout',
+      decidedBy: 'bot',
+      humanTier: null,
+      commentGid: null,
+      createdAt: '2026-07-20T00:00:00Z',
+      updatedAt: '2026-07-20T00:00:00Z',
+    };
+    const { poller, repo } = buildPoller(
+      [task({ gid: 'done2', completed: true, tierOptionGid: tierToOptionGid('T1') })],
+      { listActiveBot: vi.fn().mockResolvedValue([record]) },
+    );
+    const res = await poller.runOnce();
+    expect(res.overrides).toBe(0);
+    expect(repo.markOverride).not.toHaveBeenCalled();
   });
 });

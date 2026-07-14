@@ -12,6 +12,10 @@ export interface TierClassificationRecord {
   promptVersion: number;
   facts: Facts;
   tier: DeliveryTier;
+  /** The tier the bot has confirmed written to the Asana field (null until the
+   *  field write is verified). Lets the poller distinguish its own in-flight
+   *  write from a human override after a crash / partial failure. */
+  confirmedTier: DeliveryTier | null;
   liftedByUnclear: boolean;
   flags: FlagKey[];
   domain: string | null;
@@ -30,6 +34,7 @@ function rowFromDb(r: Record<string, any>): TierClassificationRecord {
     promptVersion: r.prompt_version,
     facts: r.facts as Facts,
     tier: r.tier as DeliveryTier,
+    confirmedTier: (r.confirmed_tier as DeliveryTier | null) ?? null,
     liftedByUnclear: !!r.lifted_by_unclear,
     flags: (r.flags ?? []) as FlagKey[],
     domain: (r.domain as string | null) ?? null,
@@ -48,6 +53,9 @@ export interface TierUpsert {
   promptVersion: number;
   facts: Facts;
   tier: DeliveryTier;
+  /** The tier confirmed written to the field. Set to the previously confirmed
+   *  tier for the pre-write record, then to `tier` once the field write lands. */
+  confirmedTier: DeliveryTier | null;
   liftedByUnclear: boolean;
   flags: FlagKey[];
   domain: string | null;
@@ -76,6 +84,7 @@ export class TierClassificationsRepo {
         prompt_version: rec.promptVersion,
         facts: rec.facts,
         tier: rec.tier,
+        confirmed_tier: rec.confirmedTier,
         lifted_by_unclear: rec.liftedByUnclear,
         flags: rec.flags,
         domain: rec.domain,
@@ -96,6 +105,18 @@ export class TierClassificationsRepo {
       .update({ decided_by: 'human_override', human_tier: humanTier, updated_at: new Date().toISOString() })
       .eq('task_gid', taskGid);
     if (error) throw new Error(`tier_classifications markOverride failed: ${error.message}`);
+  }
+
+  /** Every bot-owned (non-overridden) classification. The poller loads these once
+   *  per tick so it can detect human overrides even on tasks that no longer pass
+   *  the candidate gate (completed, excluded Type, or shrunk description). */
+  async listActiveBot(): Promise<TierClassificationRecord[]> {
+    const { data, error } = await this.client
+      .from('tier_classifications')
+      .select('*')
+      .eq('decided_by', 'bot');
+    if (error) throw new Error(`tier_classifications listActiveBot failed: ${error.message}`);
+    return (data ?? []).map(rowFromDb);
   }
 
   /** All rows created at or after `sinceIso` (for the weekly report). */

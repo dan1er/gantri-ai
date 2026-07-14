@@ -15,6 +15,11 @@ create table if not exists tier_classifications (
   lifted_by_unclear boolean not null default false,
   flags jsonb not null default '[]',
   domain text,
+  -- The tier the bot has verified is written to the Asana field. Distinct from
+  -- `tier` (the bot's latest decision, which may be one step ahead if the field
+  -- write is mid-flight). The two together let the poller tell its own
+  -- incomplete write apart from a human override across a crash / partial failure.
+  confirmed_tier text check (confirmed_tier in ('T0','T1','T2')),
   decided_by text not null default 'bot' check (decided_by in ('bot','human_override')),
   human_tier text,
   comment_gid text,

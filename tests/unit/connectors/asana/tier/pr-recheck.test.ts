@@ -15,22 +15,29 @@ const PROMPT = 'Version: 1\n\nrubric';
 const PROMPT_VERSION = 1;
 const ASANA_LINK = 'See https://app.asana.com/0/1111111111/9999999999 for details.';
 
-/** Facts that decide to a given tier. T0 = all no + ui yes; T1 = visual blast;
- *  T2 = money visible. */
+/** A signals envelope that decides to a given tier. T0 = cosmetic; T1 = behavior
+ *  change, recoverable; T2 = behavior change touching money. */
 function factsFor(tier: DeliveryTier): Record<string, unknown> {
-  const base = {
+  const signals = {
     ui_testable: { value: 'yes', evidence: 'clickable' },
+    behavior_change: { value: 'no', evidence: '' },
+    cosmetic_only: { value: 'yes', evidence: 'label' },
+    money: { value: 'no', evidence: '' },
     irreversible_external: { value: 'no', evidence: '' },
-    money_visible: { value: 'no', evidence: '' },
+    data_integrity: { value: 'no', evidence: '' },
+    access_security: { value: 'no', evidence: '' },
     visual_blast_radius: { value: 'no', evidence: '' },
-    brand_critical: { value: 'no', evidence: '' },
-    backend_data: { value: 'no', evidence: '' },
-    coordinated_launch: { value: 'no', evidence: '' },
-    domain: 'shopping_checkout',
   };
-  if (tier === 'T1') return { ...base, visual_blast_radius: { value: 'yes', evidence: 'shared component' } };
-  if (tier === 'T2') return { ...base, money_visible: { value: 'yes', evidence: 'charge amount' } };
-  return base;
+  if (tier === 'T1') {
+    signals.behavior_change = { value: 'yes', evidence: 'new flow' };
+    signals.cosmetic_only = { value: 'no', evidence: '' };
+  }
+  if (tier === 'T2') {
+    signals.behavior_change = { value: 'yes', evidence: 'new flow' };
+    signals.cosmetic_only = { value: 'no', evidence: '' };
+    signals.money = { value: 'yes', evidence: 'charge amount' };
+  }
+  return { tier, domain: 'shopping_checkout', why: 'x', evidence: 'y', signals };
 }
 
 function claudeReturning(tier: DeliveryTier) {

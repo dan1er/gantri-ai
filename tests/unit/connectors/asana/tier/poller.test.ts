@@ -13,16 +13,22 @@ const PROMPT = 'Version: 1\n\nrubric';
 const PROMPT_VERSION = 1;
 const ROLLOUT_MS = Date.parse('2026-07-14T00:00:00Z');
 
-/** A facts object that decides to T0 (low-risk). */
+/** A signals envelope that decides to T0 (cosmetic, no behavior change). */
 const T0_FACTS = {
-  ui_testable: { value: 'yes', evidence: 'clickable' },
-  irreversible_external: { value: 'no', evidence: '' },
-  money_visible: { value: 'no', evidence: '' },
-  visual_blast_radius: { value: 'no', evidence: '' },
-  brand_critical: { value: 'no', evidence: '' },
-  backend_data: { value: 'no', evidence: '' },
-  coordinated_launch: { value: 'no', evidence: '' },
+  tier: 'T0',
   domain: 'content_marketing',
+  why: 'Step 2: cosmetic copy change',
+  evidence: 'fix the label',
+  signals: {
+    ui_testable: { value: 'yes', evidence: 'clickable' },
+    behavior_change: { value: 'no', evidence: '' },
+    cosmetic_only: { value: 'yes', evidence: 'fix the label' },
+    money: { value: 'no', evidence: '' },
+    irreversible_external: { value: 'no', evidence: '' },
+    data_integrity: { value: 'no', evidence: '' },
+    access_security: { value: 'no', evidence: '' },
+    visual_blast_radius: { value: 'no', evidence: '' },
+  },
 };
 
 function claudeAlwaysT0() {

@@ -10,15 +10,24 @@ import {
 
 const PROMPT = 'Version: 1\n\nrubric body';
 
+/** The rubric page's `{ tier, domain, why, evidence, signals }` envelope. The bot
+ *  recomputes the tier from `signals`, so the code reads the signals object + the
+ *  domain tag. */
 const FULL_FACTS = {
-  ui_testable: { value: 'yes', evidence: 'user can place an order' },
-  irreversible_external: { value: 'yes', evidence: 'refunds issued automatically' },
-  money_visible: { value: 'no', evidence: '' },
-  visual_blast_radius: { value: 'no', evidence: '' },
-  brand_critical: { value: 'no', evidence: '' },
-  backend_data: { value: 'yes', evidence: 'orders module' },
-  coordinated_launch: { value: 'no', evidence: '' },
+  tier: 'T2',
   domain: 'shopping_checkout',
+  why: 'Step 3: changes how much the customer is charged',
+  evidence: 'refunds issued automatically',
+  signals: {
+    ui_testable: { value: 'yes', evidence: 'user can place an order' },
+    behavior_change: { value: 'yes', evidence: 'refunds issued automatically' },
+    cosmetic_only: { value: 'no', evidence: '' },
+    money: { value: 'yes', evidence: 'refunds issued automatically' },
+    irreversible_external: { value: 'no', evidence: '' },
+    data_integrity: { value: 'no', evidence: '' },
+    access_security: { value: 'no', evidence: '' },
+    visual_blast_radius: { value: 'no', evidence: '' },
+  },
 };
 
 function claudeReturning(...texts: string[]) {
@@ -34,7 +43,7 @@ describe('extractFacts', () => {
     const claude = claudeReturning(JSON.stringify(FULL_FACTS));
     const facts = await extractFacts(INPUT, { claude, prompt: PROMPT });
     expect(facts.ui_testable).toEqual({ value: 'yes', evidence: 'user can place an order' });
-    expect(facts.irreversible_external.evidence).toBe('refunds issued automatically');
+    expect(facts.money.evidence).toBe('refunds issued automatically');
     expect(facts.domain).toBe('shopping_checkout');
   });
 
@@ -64,7 +73,10 @@ describe('extractFacts', () => {
   });
 
   it('rejects a zod-invalid value (bad ternary) and retries', async () => {
-    const bad = JSON.stringify({ ...FULL_FACTS, ui_testable: { value: 'maybe', evidence: '' } });
+    const bad = JSON.stringify({
+      ...FULL_FACTS,
+      signals: { ...FULL_FACTS.signals, ui_testable: { value: 'maybe', evidence: '' } },
+    });
     const claude = claudeReturning(bad, JSON.stringify(FULL_FACTS));
     const facts = await extractFacts(INPUT, { claude, prompt: PROMPT });
     expect(facts.ui_testable.value).toBe('yes');

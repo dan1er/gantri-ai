@@ -194,7 +194,7 @@ export class AsanaConnector implements Connector {
     const facts = await extractFacts(input, { claude: this.claude, prompt });
     const decision = decideTier(facts);
     const evidence =
-      decision.evidenceFact && decision.firedRule !== 'inconclusive_lift'
+      decision.evidenceFact && decision.firedRule !== 'inconclusive'
         ? facts[decision.evidenceFact].evidence
         : '';
 

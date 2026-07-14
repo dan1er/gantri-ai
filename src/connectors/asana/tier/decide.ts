@@ -2,165 +2,208 @@ import type { DeliveryTier } from '../board-config.js';
 
 /**
  * Pure, deterministic tier computation. The LLM (see `extract.ts`) only produces
- * `Facts`; this function turns facts into a tier. Same facts → same tier, always.
- * The rubric this encodes is the public "Pre-Production Test Tiering" decision
- * tree, plus Danny's two automation rules: not UI-testable → T0; inconclusive →
- * lift to T1.
+ * `Facts` (signals + a domain tag); this function turns them into a tier. Same
+ * facts → same tier, always.
+ *
+ * The rubric this encodes is the public "Delivery Tier Classifier" Notion page,
+ * transcribed verbatim into `src/prompts/delivery-tier-standard.md`. It is a
+ * change-based model: risk — not the domain — decides the tier. The domain is an
+ * output tag only (used for reporting), never a tier driver.
+ *
+ * Steps (stop at the first that assigns a tier):
+ *   1. No UI surface → T0 (+ Non-UI Lane note when the backend touches
+ *      money / orders / inventory / auth / pricing).
+ *   2. Doesn't change how the feature works → never T2 (cosmetic → T0; more than
+ *      cosmetic but still no behavior change → T1).
+ *   3. Changes behavior AND is hard to recover from or costly (money · irreversible
+ *      for a real customer · data/inventory integrity · access/security) → T2.
+ *   4. Everything else → T1. Unsure whether step 3 applies → T1, never T0.
  */
 
 export type Ternary = 'yes' | 'no' | 'unclear';
 
-/** One extracted fact: a ternary answer plus a short verbatim evidence quote. */
+/** One extracted signal: a ternary answer plus a short verbatim evidence quote. */
 export interface FactValue {
   value: Ternary;
   evidence: string;
 }
 
-/** The functional domains from the public framework, plus `unknown`. */
+/**
+ * The functional domains from the public rubric page, plus `unknown`. This is an
+ * OUTPUT TAG only — it never sets the tier. The page's `porter_catalog_products`
+ * spelling is the corrected one (the page's earlier `porter_catlog_products` typo
+ * is normalized here and on the page at parity check).
+ */
 export const DOMAIN_ENUM = [
+  // Marketplace
   'auth_accounts',
-  'product_discovery',
-  'product_configuration',
   'shopping_checkout',
   'orders_notifications',
+  'order_management',
+  'gift_cards',
+  'trade_b2b',
+  'promotions_gifting',
+  'organizations_wholesale',
+  'product_discovery',
+  'product_configuration',
   'content_marketing',
-  'production_workflow',
-  'scheduling_fulfillment',
+  'creators_referral',
+  // Factory OS
   'inventory_materials',
+  'production_workflow',
+  'product_catalog_design',
+  'machines_fleet',
   'production_monitoring',
   'factory_administration',
+  'payouts_statements',
+  // MadeOS
   'made_order_management',
+  'made_quoting_billing',
   'design_workflow',
   'customer_operations',
-  'reporting_analytics',
+  'made_products_catalog',
   'made_administration',
+  // Cross-cutting
+  'reporting_analytics',
+  'design_system',
+  'platform_infra',
+  // Porter (backend)
+  'porter_orders_payments',
+  'porter_accounts_orgs',
+  'porter_inventory_materials',
+  'porter_manufacturing_jobs',
+  'porter_fulfillment_shipping',
+  'porter_integrations',
+  'porter_catalog_products',
   'unknown',
 ] as const;
 
 export type Domain = (typeof DOMAIN_ENUM)[number];
 
-/** The full fact set the classifier extracts from a ticket. */
+/** The full signal set the classifier extracts from a ticket. */
 export interface Facts {
+  /** Can QA meaningfully validate this through the product UI? */
   ui_testable: FactValue;
+  /** Does the change alter how the feature actually works? */
+  behavior_change: FactValue;
+  /** Copy / text / styling / spacing / layout only — no behavior change? */
+  cosmetic_only: FactValue;
+  /** Creates or changes a charge, refund, payout, price, tax, shipping, discount,
+   *  credit, or gift-card value. */
+  money: FactValue;
+  /** Commits or cancels a real order, sends a customer email/SMS/push, or
+   *  hard-deletes customer data. */
   irreversible_external: FactValue;
-  money_visible: FactValue;
+  /** Can corrupt orders, inventory, or stored records in a hard-to-undo way. */
+  data_integrity: FactValue;
+  /** Changes authentication, access, or permissions in a risky way. */
+  access_security: FactValue;
+  /** Wide visual reach (new/removed screen · shared component · layout
+   *  restructure). Extracted for REPORTING ONLY — it never sets the tier. */
   visual_blast_radius: FactValue;
-  brand_critical: FactValue;
-  backend_data: FactValue;
-  coordinated_launch: FactValue;
   domain: Domain;
 }
 
-/** The fact keys that carry a ternary value + evidence (everything but `domain`). */
+/** The signal keys that carry a ternary value + evidence (everything but `domain`). */
 export type FactKey = Exclude<keyof Facts, 'domain'>;
 
-/** Which rubric rule produced the tier — drives the "Why" line in the comment. */
+/** Which rubric step produced the tier — drives the "Why" line in the comment. */
 export type FiredRule =
   | 'not_ui_testable'
-  | 'money_or_irreversible'
-  | 'visual_blast'
-  | 'inconclusive_lift'
-  | 'low_risk';
+  | 'cosmetic'
+  | 'no_behavior_change'
+  | 't2_risk_trigger'
+  | 'behavior_recoverable'
+  | 'inconclusive';
 
 /** Non-tier-changing annotations that append to the comment. */
-export type FlagKey = 'non_ui_lane' | 'brand_critical' | 'coordinated_launch';
+export type FlagKey = 'non_ui_lane';
 
 export interface Decision {
   tier: DeliveryTier;
-  /** True when the inconclusive rule raised the tier to T1. */
+  /** True when uncertainty forced the tier up to T1 (never leave unsure at T0). */
   liftedByUnclear: boolean;
   flags: FlagKey[];
   firedRule: FiredRule;
-  /** The fact whose evidence best explains the decision, or null for `low_risk`. */
+  /** The signal whose evidence best explains the decision, or null when none. */
   evidenceFact: FactKey | null;
 }
 
+/** The four risk signals that make a behavior-changing ticket T2 (rubric step 3). */
+const T2_TRIGGERS: FactKey[] = ['money', 'irreversible_external', 'data_integrity', 'access_security'];
+
 /**
- * The facts, in priority order, that can change the tier (used both by the base
- * computation and by the inconclusive-lift check). `brand_critical`,
- * `backend_data`, and `coordinated_launch` are flags only, never tier drivers.
+ * Domains whose backend is money / orders / inventory / auth / pricing sensitive.
+ * A non-UI-testable change in one of these carries the Non-UI Lane note even when
+ * no risk signal fired yes (e.g. a behavior-preserving refactor of payments code).
  */
-const DECISION_FACTS: FactKey[] = [
-  'ui_testable',
-  'irreversible_external',
-  'money_visible',
-  'visual_blast_radius',
-];
+const SENSITIVE_NONUI_DOMAINS: ReadonlySet<Domain> = new Set<Domain>([
+  'shopping_checkout',
+  'orders_notifications',
+  'order_management',
+  'gift_cards',
+  'promotions_gifting',
+  'payouts_statements',
+  'made_order_management',
+  'made_quoting_billing',
+  'inventory_materials',
+  'auth_accounts',
+  'organizations_wholesale',
+  'porter_orders_payments',
+  'porter_accounts_orgs',
+  'porter_inventory_materials',
+  'porter_fulfillment_shipping',
+]);
 
-/** Compute the flags that append to the comment (they never change the tier). */
-function computeFlags(facts: Facts): FlagKey[] {
-  const flags: FlagKey[] = [];
-  const moneyOrIrreversible =
-    facts.money_visible.value === 'yes' || facts.irreversible_external.value === 'yes';
-  // Non-UI Lane: engineering verification is the binding gate whenever there is
-  // backend-data risk, or when a non-UI-testable change still moves real money /
-  // fires an irreversible external effect (QA cannot gate it, so engineering must).
-  if (facts.backend_data.value === 'yes' || (facts.ui_testable.value === 'no' && moneyOrIrreversible)) {
-    flags.push('non_ui_lane');
-  }
-  if (facts.brand_critical.value === 'yes') flags.push('brand_critical');
-  if (facts.coordinated_launch.value === 'yes') flags.push('coordinated_launch');
-  return flags;
-}
-
-/** First decision-relevant fact whose value is `unclear`, in priority order. */
-function firstUnclearDecisionFact(facts: Facts): FactKey | null {
-  for (const key of DECISION_FACTS) {
-    if (facts[key].value === 'unclear') return key;
-  }
-  return null;
+/** True when a non-UI-testable change should carry the Non-UI Lane note. */
+function touchesSensitiveBackend(facts: Facts): boolean {
+  if (T2_TRIGGERS.some((k) => facts[k].value === 'yes')) return true;
+  return SENSITIVE_NONUI_DOMAINS.has(facts.domain);
 }
 
 export function decideTier(facts: Facts): Decision {
-  const flags = computeFlags(facts);
-
-  // 1. Not UI-testable is terminal T0 — QA cannot gate it, so QA tiers are moot.
-  //    Backend/money/irreversible risk still surfaces as the Non-UI Lane flag,
-  //    which is engineering's binding gate. Only a LITERAL `no` is terminal;
-  //    `unclear` falls through and can lift to T1.
+  // Step 1 — no UI surface → T0 (terminal). The Non-UI Lane note is engineering's
+  // binding gate whenever the backend touches money / orders / inventory / auth /
+  // pricing. Only a LITERAL `no` is terminal; `unclear` falls through.
   if (facts.ui_testable.value === 'no') {
-    return {
-      tier: 'T0',
-      liftedByUnclear: false,
-      flags,
-      firedRule: 'not_ui_testable',
-      evidenceFact: 'ui_testable',
-    };
+    const flags: FlagKey[] = touchesSensitiveBackend(facts) ? ['non_ui_lane'] : [];
+    return { tier: 'T0', liftedByUnclear: false, flags, firedRule: 'not_ui_testable', evidenceFact: 'ui_testable' };
   }
 
-  // 2-4. Base tier (treating `unclear` as `no`), first match wins.
-  let baseTier: DeliveryTier;
-  let firedRule: FiredRule;
-  let evidenceFact: FactKey | null;
-  if (facts.irreversible_external.value === 'yes' || facts.money_visible.value === 'yes') {
-    baseTier = 'T2';
-    firedRule = 'money_or_irreversible';
-    evidenceFact = facts.money_visible.value === 'yes' ? 'money_visible' : 'irreversible_external';
-  } else if (facts.visual_blast_radius.value === 'yes') {
-    baseTier = 'T1';
-    firedRule = 'visual_blast';
-    evidenceFact = 'visual_blast_radius';
-  } else {
-    baseTier = 'T0';
-    firedRule = 'low_risk';
-    evidenceFact = null;
-  }
+  // When UI-testability itself is unclear, a cosmetic-looking change must not settle
+  // at T0 — we cannot confirm there is nothing to test, so it floors at T1.
+  const uiUnclear = facts.ui_testable.value === 'unclear';
 
-  // Inconclusive lift (Danny's rule): a definite T2 stays T2, but when the base
-  // tier is below T1 and any decision-relevant fact is unclear, lift to T1 — we
-  // cannot let inconclusive risk ship as T0. The lift is capped at T1.
-  if (baseTier === 'T0') {
-    const unclearFact = firstUnclearDecisionFact(facts);
-    if (unclearFact) {
-      return {
-        tier: 'T1',
-        liftedByUnclear: true,
-        flags,
-        firedRule: 'inconclusive_lift',
-        evidenceFact: unclearFact,
-      };
+  // Step 2 — the change does NOT alter how the feature works → never T2.
+  if (facts.behavior_change.value === 'no') {
+    if (facts.cosmetic_only.value === 'yes') {
+      if (uiUnclear) {
+        return { tier: 'T1', liftedByUnclear: true, flags: [], firedRule: 'inconclusive', evidenceFact: 'ui_testable' };
+      }
+      // Purely cosmetic — copy / style / layout only → T0.
+      return { tier: 'T0', liftedByUnclear: false, flags: [], firedRule: 'cosmetic', evidenceFact: 'cosmetic_only' };
     }
+    // More than cosmetic but still no behavior change → T1.
+    return { tier: 'T1', liftedByUnclear: false, flags: [], firedRule: 'no_behavior_change', evidenceFact: 'behavior_change' };
   }
 
-  return { tier: baseTier, liftedByUnclear: false, flags, firedRule, evidenceFact };
+  // Step 3 — the change DOES alter behavior. T2 only if it is also hard to recover
+  // from or costly (money · irreversible external · data integrity · access/security).
+  if (facts.behavior_change.value === 'yes') {
+    const trigger = T2_TRIGGERS.find((k) => facts[k].value === 'yes');
+    if (trigger) {
+      return { tier: 'T2', liftedByUnclear: false, flags: [], firedRule: 't2_risk_trigger', evidenceFact: trigger };
+    }
+    // Unsure whether step 3 applies (a risk signal is unclear) → T1, never leave it
+    // at a lower tier.
+    const unclearTrigger = T2_TRIGGERS.find((k) => facts[k].value === 'unclear');
+    if (unclearTrigger) {
+      return { tier: 'T1', liftedByUnclear: true, flags: [], firedRule: 'inconclusive', evidenceFact: unclearTrigger };
+    }
+    // Step 4 — behavior change that is quickly recoverable → T1.
+    return { tier: 'T1', liftedByUnclear: false, flags: [], firedRule: 'behavior_recoverable', evidenceFact: 'behavior_change' };
+  }
+
+  // `behavior_change` is unclear → step 4 uncertainty rule → T1 (never T0).
+  return { tier: 'T1', liftedByUnclear: true, flags: [], firedRule: 'inconclusive', evidenceFact: 'behavior_change' };
 }

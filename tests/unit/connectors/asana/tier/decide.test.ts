@@ -2,129 +2,163 @@ import { describe, it, expect } from 'vitest';
 import { decideTier, type Facts, type Ternary } from '../../../../../src/connectors/asana/tier/decide.js';
 
 /**
- * The "Common cases" table from the public Pre-Production Test Tiering guide,
- * encoded verbatim as fixtures so the code is provably aligned with the doc. Each
- * case names the ticket, the facts it maps to, and the tier + flags it must
- * produce.
+ * The Notion "Delivery Tier Classifier" rubric page, encoded as fixtures so the
+ * code is provably aligned with the public doc. The model is change-based: risk —
+ * not the domain — decides the tier. Each case names the ticket, the signals it
+ * maps to, and the tier + flags it must produce.
  */
 
 /** Build a fact set from partial overrides; everything defaults to `no`. */
-function facts(overrides: Partial<Record<keyof Omit<Facts, 'domain'>, Ternary>> & { domain?: Facts['domain'] } = {}): Facts {
+function facts(
+  overrides: Partial<Record<keyof Omit<Facts, 'domain'>, Ternary>> & { domain?: Facts['domain'] } = {},
+): Facts {
   const v = (t: Ternary = 'no') => ({ value: t, evidence: '' });
   return {
     ui_testable: v(overrides.ui_testable ?? 'yes'),
+    behavior_change: v(overrides.behavior_change),
+    cosmetic_only: v(overrides.cosmetic_only),
+    money: v(overrides.money),
     irreversible_external: v(overrides.irreversible_external),
-    money_visible: v(overrides.money_visible),
+    data_integrity: v(overrides.data_integrity),
+    access_security: v(overrides.access_security),
     visual_blast_radius: v(overrides.visual_blast_radius),
-    brand_critical: v(overrides.brand_critical),
-    backend_data: v(overrides.backend_data),
-    coordinated_launch: v(overrides.coordinated_launch),
     domain: overrides.domain ?? 'unknown',
   };
 }
 
-describe('decideTier — Common cases (public rubric table, verbatim)', () => {
-  it('checkout copy change → T0', () => {
-    // Copy on checkout is NOT money_visible and NOT blast radius.
-    const d = decideTier(facts({ ui_testable: 'yes', domain: 'shopping_checkout' }));
+describe('decideTier — rubric page (change-based, verbatim)', () => {
+  it('checkout copy change → T0 (Step 2 cosmetic)', () => {
+    const d = decideTier(
+      facts({ ui_testable: 'yes', behavior_change: 'no', cosmetic_only: 'yes', domain: 'shopping_checkout' }),
+    );
     expect(d.tier).toBe('T0');
-    expect(d.liftedByUnclear).toBe(false);
+    expect(d.firedRule).toBe('cosmetic');
     expect(d.flags).toEqual([]);
-  });
-
-  it('styling tweak → T0', () => {
-    const d = decideTier(facts({ ui_testable: 'yes' }));
-    expect(d.tier).toBe('T0');
-    expect(d.firedRule).toBe('low_risk');
-  });
-
-  it('new self-contained element on one screen → T0', () => {
-    // Explicitly NOT visual_blast_radius.
-    const d = decideTier(facts({ ui_testable: 'yes', visual_blast_radius: 'no' }));
-    expect(d.tier).toBe('T0');
-  });
-
-  it('shared component edit → T1', () => {
-    const d = decideTier(facts({ ui_testable: 'yes', visual_blast_radius: 'yes' }));
-    expect(d.tier).toBe('T1');
-    expect(d.firedRule).toBe('visual_blast');
     expect(d.liftedByUnclear).toBe(false);
   });
 
-  it('new screen → T1', () => {
-    const d = decideTier(facts({ ui_testable: 'yes', visual_blast_radius: 'yes' }));
-    expect(d.tier).toBe('T1');
-    expect(d.flags).toEqual([]);
+  it('styling tweak → T0 (Step 2 cosmetic)', () => {
+    const d = decideTier(facts({ ui_testable: 'yes', behavior_change: 'no', cosmetic_only: 'yes' }));
+    expect(d.tier).toBe('T0');
+    expect(d.firedRule).toBe('cosmetic');
   });
 
-  it('new screen on the brand list → T1 + brand flag', () => {
-    const d = decideTier(facts({ ui_testable: 'yes', visual_blast_radius: 'yes', brand_critical: 'yes' }));
-    expect(d.tier).toBe('T1');
-    expect(d.flags).toContain('brand_critical');
+  it('reporting dashboard tweak (read-only, cosmetic) → T0', () => {
+    const d = decideTier(
+      facts({ ui_testable: 'yes', behavior_change: 'no', cosmetic_only: 'yes', domain: 'reporting_analytics' }),
+    );
+    expect(d.tier).toBe('T0');
   });
 
-  it('backend orders/payments change → T0 + Non-UI Lane note', () => {
-    const d = decideTier(facts({ ui_testable: 'no', backend_data: 'yes', domain: 'shopping_checkout' }));
+  it('shared-component restyle, no behavior change → T1 (Step 2 non-cosmetic)', () => {
+    const d = decideTier(
+      facts({ ui_testable: 'yes', behavior_change: 'no', cosmetic_only: 'no', visual_blast_radius: 'yes' }),
+    );
+    expect(d.tier).toBe('T1');
+    expect(d.firedRule).toBe('no_behavior_change');
+    expect(d.liftedByUnclear).toBe(false);
+  });
+
+  it('new screen with recoverable new behavior → T1 (Step 4)', () => {
+    const d = decideTier(facts({ ui_testable: 'yes', behavior_change: 'yes', visual_blast_radius: 'yes' }));
+    expect(d.tier).toBe('T1');
+    expect(d.firedRule).toBe('behavior_recoverable');
+  });
+
+  it('backend orders/payments change → T0 + Non-UI Lane note (Step 1)', () => {
+    const d = decideTier(facts({ ui_testable: 'no', money: 'yes', domain: 'shopping_checkout' }));
     expect(d.tier).toBe('T0');
     expect(d.firedRule).toBe('not_ui_testable');
     expect(d.flags).toContain('non_ui_lane');
   });
 
-  it('migration → T0 + Non-UI Lane', () => {
-    const d = decideTier(facts({ ui_testable: 'no', backend_data: 'yes' }));
+  it('database migration → T0 + Non-UI Lane note (Step 1)', () => {
+    const d = decideTier(facts({ ui_testable: 'no', data_integrity: 'yes', domain: 'porter_orders_payments' }));
     expect(d.tier).toBe('T0');
     expect(d.flags).toContain('non_ui_lane');
   });
 
-  it('change that alters whether/how much a charge fires → T2', () => {
-    // Testable through the checkout UI, and it moves a real customer charge.
-    const d = decideTier(facts({ ui_testable: 'yes', irreversible_external: 'yes', domain: 'shopping_checkout' }));
+  it('behavior-preserving refactor of payments code → T0 + Non-UI Lane via sensitive domain', () => {
+    // No risk signal fires yes, but the backend area (checkout) is money-sensitive.
+    const d = decideTier(facts({ ui_testable: 'no', behavior_change: 'no', domain: 'shopping_checkout' }));
+    expect(d.tier).toBe('T0');
+    expect(d.flags).toContain('non_ui_lane');
+  });
+
+  it('backend logging change in a non-sensitive area → T0, no Non-UI Lane note', () => {
+    const d = decideTier(facts({ ui_testable: 'no', domain: 'platform_infra' }));
+    expect(d.tier).toBe('T0');
+    expect(d.flags).toEqual([]);
+  });
+
+  it('change that alters how much a charge fires → T2 (Step 3 money)', () => {
+    const d = decideTier(facts({ ui_testable: 'yes', behavior_change: 'yes', money: 'yes', domain: 'shopping_checkout' }));
     expect(d.tier).toBe('T2');
-    expect(d.firedRule).toBe('money_or_irreversible');
+    expect(d.firedRule).toBe('t2_risk_trigger');
+    expect(d.evidenceFact).toBe('money');
   });
 
-  it('refactor/log/read in payments code → T0 + Non-UI Lane', () => {
-    const d = decideTier(facts({ ui_testable: 'no', backend_data: 'yes', irreversible_external: 'no', money_visible: 'no' }));
-    expect(d.tier).toBe('T0');
-    expect(d.flags).toContain('non_ui_lane');
+  it('inventory UI change that can corrupt stock → T2 (Step 3 data integrity)', () => {
+    const d = decideTier(
+      facts({ ui_testable: 'yes', behavior_change: 'yes', data_integrity: 'yes', domain: 'inventory_materials' }),
+    );
+    expect(d.tier).toBe('T2');
+    expect(d.evidenceFact).toBe('data_integrity');
+  });
+
+  it('sends a customer email on order commit → T2 (Step 3 irreversible)', () => {
+    const d = decideTier(
+      facts({ ui_testable: 'yes', behavior_change: 'yes', irreversible_external: 'yes', domain: 'orders_notifications' }),
+    );
+    expect(d.tier).toBe('T2');
+    expect(d.evidenceFact).toBe('irreversible_external');
+  });
+
+  it('permissions change that could expose data → T2 (Step 3 access/security)', () => {
+    const d = decideTier(
+      facts({ ui_testable: 'yes', behavior_change: 'yes', access_security: 'yes', domain: 'auth_accounts' }),
+    );
+    expect(d.tier).toBe('T2');
+    expect(d.evidenceFact).toBe('access_security');
   });
 });
 
-describe('decideTier — automation rules (not-UI-testable, inconclusive lift)', () => {
-  it('ui_testable=no with money=yes → T0 + binding Non-UI note', () => {
-    const d = decideTier(facts({ ui_testable: 'no', money_visible: 'yes' }));
-    expect(d.tier).toBe('T0');
-    expect(d.firedRule).toBe('not_ui_testable');
-    expect(d.flags).toContain('non_ui_lane');
-  });
-
-  it('ui_testable=unclear → T1 (inconclusive lift)', () => {
-    const d = decideTier(facts({ ui_testable: 'unclear' }));
+describe('decideTier — uncertainty floor (never leave unsure at T0)', () => {
+  it('ui_testable=unclear on an otherwise cosmetic change → T1', () => {
+    const d = decideTier(facts({ ui_testable: 'unclear', behavior_change: 'no', cosmetic_only: 'yes' }));
     expect(d.tier).toBe('T1');
     expect(d.liftedByUnclear).toBe(true);
-    expect(d.firedRule).toBe('inconclusive_lift');
+    expect(d.firedRule).toBe('inconclusive');
     expect(d.evidenceFact).toBe('ui_testable');
   });
 
-  it('money=unclear (rest no) → T1 (inconclusive lift)', () => {
-    const d = decideTier(facts({ ui_testable: 'yes', money_visible: 'unclear' }));
+  it('behavior_change=unclear → T1 (Step 4 unsure)', () => {
+    const d = decideTier(facts({ ui_testable: 'yes', behavior_change: 'unclear' }));
     expect(d.tier).toBe('T1');
     expect(d.liftedByUnclear).toBe(true);
-    expect(d.evidenceFact).toBe('money_visible');
+    expect(d.evidenceFact).toBe('behavior_change');
   });
 
-  it('irreversible=yes + others unclear → T2 (definite T2 stays T2)', () => {
+  it('behavior change with a money signal that is unclear → T1, not T2', () => {
+    const d = decideTier(facts({ ui_testable: 'yes', behavior_change: 'yes', money: 'unclear' }));
+    expect(d.tier).toBe('T1');
+    expect(d.liftedByUnclear).toBe(true);
+    expect(d.evidenceFact).toBe('money');
+  });
+
+  it('a definite T2 stays T2 even when other signals are unclear', () => {
     const d = decideTier(
-      facts({ ui_testable: 'unclear', irreversible_external: 'yes', money_visible: 'unclear', visual_blast_radius: 'unclear' }),
+      facts({ ui_testable: 'unclear', behavior_change: 'yes', money: 'yes', data_integrity: 'unclear' }),
     );
     expect(d.tier).toBe('T2');
     expect(d.liftedByUnclear).toBe(false);
-    expect(d.firedRule).toBe('money_or_irreversible');
+    expect(d.firedRule).toBe('t2_risk_trigger');
   });
 
-  it('coordinated_launch flag appends without changing the tier', () => {
-    const d = decideTier(facts({ ui_testable: 'yes', coordinated_launch: 'yes' }));
-    expect(d.tier).toBe('T0');
-    expect(d.flags).toContain('coordinated_launch');
+  it('domain is an output tag only — unknown domain never sets the tier', () => {
+    const cosmetic = decideTier(facts({ ui_testable: 'yes', behavior_change: 'no', cosmetic_only: 'yes', domain: 'unknown' }));
+    expect(cosmetic.tier).toBe('T0');
+    const t2 = decideTier(facts({ ui_testable: 'yes', behavior_change: 'yes', money: 'yes', domain: 'unknown' }));
+    expect(t2.tier).toBe('T2');
   });
 });

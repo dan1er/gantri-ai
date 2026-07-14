@@ -7,54 +7,69 @@ import type { Decision, Domain, FactKey, Facts, FlagKey } from './decide.js';
  * is auditable. English, to match the board.
  */
 
-/** Public rubric link cited in every comment (the practical guide in Notion). */
-export const RUBRIC_URL = 'https://www.notion.so/38ddb572aef4810d95d9fdd36fa3bda1';
+/** Public rubric link cited in every comment (the Delivery Tier rubric in Notion). */
+export const RUBRIC_URL = 'https://www.notion.so/39ddb572aef48169897efefd543290b9';
 
 const TIER_HEADLINE: Record<DeliveryTier, string> = {
   T0: 'T0 — engineering validation',
-  T1: 'T1 — targeted QA',
+  T1: 'T1 — production, then QA',
   T2: 'T2 — QA before production',
 };
 
-/** Human labels for the functional domains. */
+/** Human labels for the functional domains (output tag only). */
 const DOMAIN_LABEL: Record<Domain, string> = {
   auth_accounts: 'Auth & Accounts',
-  product_discovery: 'Product Discovery',
-  product_configuration: 'Product Configuration',
   shopping_checkout: 'Shopping & Checkout',
   orders_notifications: 'Orders & Notifications',
+  order_management: 'Order Management',
+  gift_cards: 'Gift Cards',
+  trade_b2b: 'Trade / B2B',
+  promotions_gifting: 'Promotions & Gifting',
+  organizations_wholesale: 'Organizations & Wholesale',
+  product_discovery: 'Product Discovery',
+  product_configuration: 'Product Configuration',
   content_marketing: 'Content & Marketing',
-  production_workflow: 'Production Workflow',
-  scheduling_fulfillment: 'Scheduling & Fulfillment',
+  creators_referral: 'Creators & Referral',
   inventory_materials: 'Inventory & Materials',
+  production_workflow: 'Production Workflow',
+  product_catalog_design: 'Product Catalog & Design',
+  machines_fleet: 'Machines & Fleet',
   production_monitoring: 'Production Monitoring',
   factory_administration: 'Factory Administration',
+  payouts_statements: 'Payouts & Statements',
   made_order_management: 'Made Order Management',
+  made_quoting_billing: 'Made Quoting & Billing',
   design_workflow: 'Design Workflow',
   customer_operations: 'Customer Operations',
-  reporting_analytics: 'Reporting & Analytics',
+  made_products_catalog: 'Made Products Catalog',
   made_administration: 'Made Administration',
+  reporting_analytics: 'Reporting & Analytics',
+  design_system: 'Design System',
+  platform_infra: 'Platform & Infrastructure',
+  porter_orders_payments: 'Porter — Orders & Payments',
+  porter_accounts_orgs: 'Porter — Accounts & Orgs',
+  porter_inventory_materials: 'Porter — Inventory & Materials',
+  porter_manufacturing_jobs: 'Porter — Manufacturing Jobs',
+  porter_fulfillment_shipping: 'Porter — Fulfillment & Shipping',
+  porter_integrations: 'Porter — Integrations',
+  porter_catalog_products: 'Porter — Catalog & Products',
   unknown: 'Unknown',
 };
 
 const FLAG_TEXT: Record<FlagKey, string> = {
-  non_ui_lane:
-    'Non-UI Lane — engineering verification is the binding gate (extra reviewer + E2E + staging).',
-  brand_critical:
-    'Brand-critical surface — author self-check against the approved design; QA looks first post-release.',
-  coordinated_launch:
-    'Coordinated launch — verify ahead of the date on preview; a binding pass upfront.',
+  non_ui_lane: 'Non-UI Lane — binding engineering gate: extra reviewer + E2E + staging.',
 };
 
-/** Human-readable name of a fact, for the inconclusive "couldn't determine X" line. */
+/** Human-readable name of a signal, for the inconclusive "couldn't determine X" line. */
 const FACT_PHRASE: Record<FactKey, string> = {
   ui_testable: 'whether this is testable through the UI',
-  irreversible_external: 'whether this fires an irreversible external effect on a customer',
-  money_visible: 'whether this changes the money the customer sees or pays',
+  behavior_change: 'whether this changes how the feature works',
+  cosmetic_only: 'whether this is a purely cosmetic change',
+  money: 'whether this changes money the customer is charged',
+  irreversible_external: 'whether this takes an irreversible action for a real customer',
+  data_integrity: 'whether this can corrupt orders, inventory, or stored records',
+  access_security: 'whether this changes authentication, access, or permissions',
   visual_blast_radius: 'the visual blast radius of this change',
-  brand_critical: 'whether this touches a brand-critical surface',
-  backend_data: 'whether this touches data-critical backend',
-  coordinated_launch: 'whether this is tied to a coordinated launch',
 };
 
 const DISPUTE_LINE =
@@ -64,18 +79,29 @@ const DISPUTE_LINE =
 function whyLine(decision: Decision): string {
   switch (decision.firedRule) {
     case 'not_ui_testable':
-      return 'this change cannot be validated through the product UI, so QA cannot gate it (rubric: Non-UI Lane).';
-    case 'money_or_irreversible':
-      return decision.evidenceFact === 'money_visible'
-        ? 'it changes the money the customer sees or pays (rubric Q3).'
-        : 'it fires an irreversible external effect on a real customer (rubric Q2).';
-    case 'visual_blast':
-      return 'it has a wide visual blast radius — a shared component, new/removed screen, or layout restructure (rubric Q4).';
-    case 'low_risk':
-      return 'it is a low-risk, UI-testable change with no money, irreversible, or wide-visual impact.';
-    case 'inconclusive_lift': {
-      const fact = decision.evidenceFact ?? 'ui_testable';
-      return `couldn't determine ${FACT_PHRASE[fact]} from the ticket → defaulting to T1 (inconclusive rule). Add detail to the description and the bot will re-classify.`;
+      return 'nothing can be tested through the product UI, so QA cannot gate it (rubric Step 1).';
+    case 'cosmetic':
+      return 'it is a purely cosmetic change — copy, styling, or layout only, with no change to how the feature works (rubric Step 2).';
+    case 'no_behavior_change':
+      return 'it changes the UI but not how the feature works (rubric Step 2) — ship, then QA validates after release.';
+    case 't2_risk_trigger':
+      switch (decision.evidenceFact) {
+        case 'money':
+          return 'it changes money — a charge, refund, payout, price, tax, shipping, discount, credit, or gift-card value (rubric Step 3).';
+        case 'irreversible_external':
+          return 'it takes an irreversible action for a real customer — a committed/cancelled order, a customer email/SMS/push, or a hard-delete (rubric Step 3).';
+        case 'data_integrity':
+          return 'it can corrupt orders, inventory, or stored records in a way that is hard to undo (rubric Step 3).';
+        case 'access_security':
+          return 'it changes authentication, access, or permissions in a way that could lock customers out or expose data (rubric Step 3).';
+        default:
+          return 'it changes behavior in a way that is hard to recover from or costly (rubric Step 3).';
+      }
+    case 'behavior_recoverable':
+      return 'it changes customer-facing behavior but is quickly recoverable (rubric Step 4) — ship, then QA validates after release.';
+    case 'inconclusive': {
+      const fact = decision.evidenceFact ?? 'behavior_change';
+      return `couldn't determine ${FACT_PHRASE[fact]} from the ticket → defaulting to T1 (rubric Step 4: unsure → T1). Add detail to the description and the bot will re-classify.`;
     }
   }
 }
@@ -91,7 +117,7 @@ export function renderTierComment(decision: Decision, facts: Facts, promptVersio
 
   // Evidence quote, only when there is a real quote to show (skip for inconclusive
   // and low-risk, where there is nothing meaningful to cite).
-  if (decision.evidenceFact && decision.firedRule !== 'inconclusive_lift') {
+  if (decision.evidenceFact && decision.firedRule !== 'inconclusive') {
     const evidence = facts[decision.evidenceFact].evidence.trim();
     if (evidence) lines.push(`Evidence: "${evidence}"`);
   }
@@ -123,7 +149,7 @@ export function renderTierRaiseComment(args: {
   lines.push(`🤖 Tier raised ${fromTier} → ${toTier} after PR #${prNumber} diff review.`);
   lines.push(`Why: ${whyLine(decision)}`);
 
-  if (decision.evidenceFact && decision.firedRule !== 'inconclusive_lift') {
+  if (decision.evidenceFact && decision.firedRule !== 'inconclusive') {
     const evidence = facts[decision.evidenceFact].evidence.trim();
     if (evidence) lines.push(`Evidence: "${evidence}"`);
   }

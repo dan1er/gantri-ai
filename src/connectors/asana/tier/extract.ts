@@ -31,12 +31,13 @@ const FactValueSchema = z.object({
 
 const FactsSchema = z.object({
   ui_testable: FactValueSchema,
+  behavior_change: FactValueSchema,
+  cosmetic_only: FactValueSchema,
+  money: FactValueSchema,
   irreversible_external: FactValueSchema,
-  money_visible: FactValueSchema,
+  data_integrity: FactValueSchema,
+  access_security: FactValueSchema,
   visual_blast_radius: FactValueSchema,
-  brand_critical: FactValueSchema,
-  backend_data: FactValueSchema,
-  coordinated_launch: FactValueSchema,
   // Domain is tolerant: an out-of-enum value degrades to `unknown` rather than
   // failing the whole extraction.
   domain: z
@@ -159,7 +160,15 @@ function tryParse(raw: string): Facts | null {
   } catch {
     return null;
   }
-  const parsed = FactsSchema.safeParse(json);
+  if (json === null || typeof json !== 'object') return null;
+  // The rubric page asks for `{ tier, domain, why, evidence, signals }`. The bot
+  // recomputes the tier from `signals` (the deterministic contract), so we read the
+  // signals object + the domain tag and ignore the model's own tier/why/evidence.
+  // Tolerate a bare signals object at the top level too (older / degraded outputs).
+  const obj = json as Record<string, unknown>;
+  const signals = obj.signals && typeof obj.signals === 'object' ? obj.signals : obj;
+  const domain = (obj as { domain?: unknown }).domain ?? (signals as { domain?: unknown }).domain;
+  const parsed = FactsSchema.safeParse({ ...(signals as Record<string, unknown>), domain });
   if (!parsed.success) return null;
   return parsed.data as Facts;
 }

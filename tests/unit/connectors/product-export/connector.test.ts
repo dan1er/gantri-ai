@@ -15,6 +15,7 @@ import {
   decodeBulb,
   certification,
   primaryImageUrl,
+  fullProductName,
   WHOLESALE_DEFAULTS,
   type CatalogProduct,
 } from '../../../../src/connectors/product-export/product-export-connector.js';
@@ -157,7 +158,9 @@ describe('products.export_catalog', () => {
     // …and the per-SKU skuPrices override (26800c → 268.00) for carbon.
     expect(carbon['List Price (USD)']).toBe('268.00');
 
-    expect(snow['Product Name']).toBe('Lago Compact');
+    // Composed display name = `name + " " + category` (Porter's fullProductName),
+    // not the bare `Products.name`. Designer stays in its own column.
+    expect(snow['Product Name']).toBe('Lago Compact Table Light');
     expect(snow.Color).toBe('Snow');
     expect(snow.Designer).toBe('Temporal Studio');
     expect(snow['Compatible Bulbs']).toBe('Philips Hue White and Color, E26, A19, 1100lm; E26, T8, 94mm');
@@ -206,9 +209,12 @@ describe('products.export_catalog', () => {
     // Backplate is all-zero → blank, not "0 x 0".
     expect(snow['Backplate (in, W x H)']).toBe('');
 
-    // Colorless product still exported once.
+    // Colorless product still exported once. Null category → graceful fallback
+    // to the bare name (no "null"/"undefined" leaking into the display name).
     const gift = rows.find((r) => r['Product Name'] === 'Gift Card')!;
     expect(gift).toBeTruthy();
+    expect(gift['Product Name']).toBe('Gift Card');
+    expect(gift['Product Name']).not.toMatch(/null|undefined/);
     expect(gift.SKU).toBe('');
     // No bulb code → electrical defaults do not apply.
     expect(gift.CRI).toBe('');
@@ -226,6 +232,8 @@ describe('products.export_catalog', () => {
     const rows = parseCsv(result.attachment.content);
     expect(rows).toHaveLength(1);
     const row = rows[0];
+    // Composed display name includes the (already-qualified) wireless category.
+    expect(row['Product Name']).toBe('Nova Portable Wireless Table Light');
     // Integrated LED panel decodes as dimmable...
     expect(row.Dimmable).toBe('Yes');
     // ...and still gets the CRI default...
@@ -397,6 +405,21 @@ describe('parsing + formatting helpers', () => {
     expect(u.base).toBe('E26');
     expect(u.type).toBe('E26, ZZ99');
     expect(u.lumens).toBe(''); // unknown — blank, not guessed
+  });
+
+  it('fullProductName composes name + category, mirroring Porter', () => {
+    // Standard product: qualified `name + category` title.
+    expect(fullProductName({ name: 'Lago Compact', category: 'Table Light' })).toBe('Lago Compact Table Light');
+    expect(fullProductName({ name: 'Cantilever', category: 'Wall Light' })).toBe('Cantilever Wall Light');
+    // Post-migration wireless categories already encode the variant.
+    expect(fullProductName({ name: 'Nova Portable', category: 'Wireless Table Light' })).toBe('Nova Portable Wireless Table Light');
+    // Null / empty category → bare name, never "null"/"undefined".
+    expect(fullProductName({ name: 'Gift Card', category: null })).toBe('Gift Card');
+    expect(fullProductName({ name: 'Some Accessory', category: '' })).toBe('Some Accessory');
+    // Designer is NOT part of the title (kept in its own column).
+    expect(fullProductName({ name: 'Lago Compact', category: 'Table Light' })).not.toContain('by');
+    // Empty name → empty string.
+    expect(fullProductName({ name: '', category: 'Table Light' })).toBe('');
   });
 
   it('certification derives from category like the PDP', () => {

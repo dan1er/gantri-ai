@@ -228,7 +228,7 @@ interface ColumnDef {
 
 const BASE_COLUMNS: ColumnDef[] = [
   { header: 'Product ID', value: (c) => String(c.product.id) },
-  { header: 'Product Name', value: (c) => c.product.name ?? '' },
+  { header: 'Product Name', value: (c) => fullProductName(c.product) },
   { header: 'Designer', value: (c) => c.product.designerName ?? '' },
   { header: 'Category', value: (c) => c.product.category ?? '' },
   { header: 'Sub Category', value: (c) => c.product.subCategory ?? '' },
@@ -617,6 +617,25 @@ export function decodeBulb(code: string | null | undefined): BulbInfo {
     dimmable: /dimmable/i.test(joined) ? 'Yes' : '',
     included: /\(included\)/i.test(joined) ? 'Yes' : '',
   };
+}
+
+/**
+ * Compose the customer-facing product display name, mirroring Porter's
+ * product-naming helper (getBaseProductName / getFullProductName, which populate
+ * the `fullProductName` field the PDP and listings render). Gantri shows the
+ * qualified `name + category` form as the product title (e.g. "Lago Compact
+ * Table Light") — the bare `name` is ambiguous because the same name recurs
+ * across categories (e.g. "Cantilever" exists as Table / Wall / Floor lights).
+ * The designer is intentionally NOT part of the title: the PDP renders it
+ * separately ("<fullProductName> by <designer>"), so we keep Designer in its own
+ * column. Falls back to the bare name when category is missing (gift cards, some
+ * accessories) and never emits "null"/"undefined".
+ */
+export function fullProductName(product: Pick<CatalogProduct, 'name' | 'category'>): string {
+  const name = (product.name ?? '').trim();
+  if (!name) return '';
+  const category = (product.category ?? '').trim();
+  return category ? `${name} ${category}` : name;
 }
 
 /**

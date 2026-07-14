@@ -16,10 +16,6 @@ export interface TierClassificationRecord {
    *  field write is verified). Lets the poller distinguish its own in-flight
    *  write from a human override after a crash / partial failure. */
   confirmedTier: DeliveryTier | null;
-  /** A diff-derived floor: the tier a v2 PR re-check raised this ticket to from the
-   *  authoritative diff. A later text-only re-classification must never lower the
-   *  field below this. Null when the ticket was never raised from a diff. */
-  diffFloorTier: DeliveryTier | null;
   liftedByUnclear: boolean;
   /** True when the LLM's own tier disagreed with the code-computed tier (floored
    *  to T1). Counted in the Monday report. */
@@ -45,7 +41,6 @@ function rowFromDb(r: Record<string, any>): TierClassificationRecord {
     facts: r.facts as Facts,
     tier: r.tier as DeliveryTier,
     confirmedTier: (r.confirmed_tier as DeliveryTier | null) ?? null,
-    diffFloorTier: (r.diff_floor_tier as DeliveryTier | null) ?? null,
     liftedByUnclear: !!r.lifted_by_unclear,
     calibrationMismatch: !!r.calibration_mismatch,
     stage: (r.stage as 'provisional' | 'authoritative' | null) ?? 'provisional',
@@ -69,9 +64,6 @@ export interface TierUpsert {
   /** The tier confirmed written to the field. Set to the previously confirmed
    *  tier for the pre-write record, then to `tier` once the field write lands. */
   confirmedTier: DeliveryTier | null;
-  /** The diff-derived floor to persist (see `TierClassificationRecord`). Carry the
-   *  previous value forward on ordinary re-writes; set it on a diff-based raise. */
-  diffFloorTier: DeliveryTier | null;
   liftedByUnclear: boolean;
   calibrationMismatch: boolean;
   /** Which pass is writing: 'provisional' (poller) or 'authoritative' (Code Review). */
@@ -104,7 +96,6 @@ export class TierClassificationsRepo {
         facts: rec.facts,
         tier: rec.tier,
         confirmed_tier: rec.confirmedTier,
-        diff_floor_tier: rec.diffFloorTier,
         lifted_by_unclear: rec.liftedByUnclear,
         calibration_mismatch: rec.calibrationMismatch,
         stage: rec.stage,

@@ -24,7 +24,6 @@ function rec(o: Partial<TierClassificationRecord>): TierClassificationRecord {
     facts: {} as any,
     tier: o.tier ?? 'T0',
     confirmedTier: o.confirmedTier ?? o.tier ?? 'T0',
-    diffFloorTier: o.diffFloorTier ?? null,
     liftedByUnclear: o.liftedByUnclear ?? false,
     calibrationMismatch: o.calibrationMismatch ?? false,
     stage: o.stage ?? 'provisional',

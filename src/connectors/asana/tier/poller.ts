@@ -3,7 +3,6 @@ import type { TierClassificationsRepo, TierClassificationRecord } from '../../..
 import {
   DELIVERY_TIER_FIELD_GID,
   SOFTWARE_BOARD_PROJECT_GID,
-  TIER_RANK,
   TYPE_FIELD_GID,
   isFeatureTemplateTask,
   isInCodeReview,
@@ -154,7 +153,11 @@ export class TierPoller {
     // board scan we already have (no extra board read). Isolated so a failure here
     // never fails the poll.
     if (this.deps.authoritative) {
-      const inCodeReview = tasks.filter((t) => !t.completed && isInCodeReview(t));
+      // Same candidate gate as the provisional pass: no backfill (rolloutDateMs), no
+      // excluded Types, no feature-template rows, and a substantive description. A
+      // pre-rollout or excluded-Type ticket sitting in Code Review must not get an
+      // LLM classification, a bot comment, or a field write.
+      const inCodeReview = tasks.filter((t) => this.isCandidate(t) && isInCodeReview(t));
       try {
         result.authoritative = await this.deps.authoritative.reviewCodeReviewTasks(inCodeReview);
       } catch (err) {
@@ -210,6 +213,11 @@ export class TierPoller {
         // Re-classify only if the description changed materially (hash differs).
         const hash = tierInputHash(this.deps.promptVersion, this.toInput(task));
         if (hash === record.inputHash) return 'skipped';
+        // An authoritative row was finalized from the PR diff at Code Review — the
+        // diff is the authoritative risk source. A later notes edit must NOT trigger
+        // a provisional text re-classification that could silently downgrade it; the
+        // tier only moves again when a new head_sha re-runs the authoritative pass.
+        if (record.stage === 'authoritative') return 'skipped';
         return this.classify(task, record);
       }
 
@@ -259,36 +267,7 @@ export class TierPoller {
     const facts = await extractFacts(input, this.deps.extract);
     const decision = decideTier(facts);
     const prevConfirmed = prev?.confirmedTier ?? null;
-    const floorTier = prev?.diffFloorTier ?? null;
     const outcome = prev ? 'reclassified' : 'classified';
-
-    // Never lower below a diff-derived floor. A prior PR re-check raised this ticket
-    // from the authoritative diff; a text-only re-classification (notes edit) must
-    // not undo that. When the fresh text tier is below the floor, keep the raised
-    // record intact and only refresh the input hash so we stop re-running until the
-    // notes change again — no field write, no comment, no LLM-driven lowering.
-    if (prev && floorTier && TIER_RANK[decision.tier] < TIER_RANK[floorTier]) {
-      await this.deps.repo.upsertBot({
-        taskGid: task.gid,
-        inputHash: hash,
-        promptVersion: prev.promptVersion,
-        facts: prev.facts,
-        tier: prev.tier,
-        confirmedTier: prev.confirmedTier,
-        diffFloorTier: floorTier,
-        liftedByUnclear: prev.liftedByUnclear,
-        calibrationMismatch: prev.calibrationMismatch,
-        stage: prev.stage,
-        flags: prev.flags,
-        domain: prev.domain,
-        commentGid: prev.commentGid,
-      });
-      logger.info(
-        { taskGid: task.gid, decided: decision.tier, floor: floorTier },
-        'delivery_tier_diff_floor_held',
-      );
-      return outcome;
-    }
 
     // Phase 1 — record the decision before touching the field. `confirmedTier`
     // stays at the previously confirmed tier so a crash here is recoverable. This
@@ -300,7 +279,6 @@ export class TierPoller {
       facts,
       tier: decision.tier,
       confirmedTier: prevConfirmed,
-      diffFloorTier: floorTier,
       liftedByUnclear: decision.liftedByUnclear,
       calibrationMismatch: decision.calibrationMismatch,
       stage: 'provisional',
@@ -330,7 +308,6 @@ export class TierPoller {
       facts,
       tier: decision.tier,
       confirmedTier: decision.tier,
-      diffFloorTier: floorTier,
       liftedByUnclear: decision.liftedByUnclear,
       calibrationMismatch: decision.calibrationMismatch,
       stage: 'provisional',
@@ -369,7 +346,6 @@ export class TierPoller {
       facts: record.facts,
       tier: record.tier,
       confirmedTier: record.tier,
-      diffFloorTier: record.diffFloorTier,
       liftedByUnclear: record.liftedByUnclear,
       calibrationMismatch: record.calibrationMismatch,
       stage: record.stage,
@@ -404,7 +380,6 @@ export class TierPoller {
       facts: record.facts,
       tier: record.tier,
       confirmedTier: record.tier,
-      diffFloorTier: record.diffFloorTier,
       liftedByUnclear: record.liftedByUnclear,
       calibrationMismatch: record.calibrationMismatch,
       stage: record.stage,

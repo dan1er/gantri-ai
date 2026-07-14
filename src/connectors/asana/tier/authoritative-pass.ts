@@ -220,20 +220,38 @@ export class AuthoritativePass {
     const authTier = decision.tier;
 
     // Re-read the field fresh (close the read → LLM → write TOCTOU) and decide
-    // ownership against it: a human may have set the field during the extraction.
+    // ownership against it: a human may have SET or CLEARED the field during the
+    // extraction.
     const fresh = await this.deps.client.getTask(task.gid, OPT_FIELDS_TASK);
     const freshGid = currentTierOptionGid(fresh);
-    const freshTier: DeliveryTier =
-      optionGidToTier(freshGid) ?? record?.confirmedTier ?? record?.tier ?? authTier;
-    const botOwns = freshGid === null || (record ? botKnownGids(record).has(freshGid) : false);
+    const currentTier = optionGidToTier(freshGid);
+
+    // Ownership, mirroring the poller. A non-empty field holding a tier the bot
+    // never wrote is a human override. An EMPTY field whose record shows
+    // `confirmedTier === tier` can only be a human CLEAR — a crashed write always
+    // leaves `confirmedTier` below `tier` (or null), never equal — so it is sacred:
+    // record the override and never overwrite it.
+    const humanCleared = freshGid === null && record != null && record.confirmedTier === record.tier;
+    const botOwns =
+      !humanCleared && (freshGid === null || (record ? botKnownGids(record).has(freshGid) : false));
     if (!botOwns) {
+      if (humanCleared) {
+        await this.deps.classifications.markOverride(task.gid, null);
+        logger.info({ taskGid: task.gid, botTier: record?.tier }, 'delivery_tier_authoritative_human_cleared');
+      }
       await this.record(link, task.gid, 'human_owned', authTier, false);
       return 'humanOwned';
     }
 
-    const changed = authTier !== freshTier;
+    // `changed` is driven by the ACTUAL field value: an empty field (currentTier
+    // null) always needs the write, so the tier the bot computed is never silently
+    // dropped with a false "holds" comment. `fromTier` is the prior tier shown on
+    // the field, or the provisional guess when the field is empty, or null on a
+    // first-ever write.
+    const fromTier: DeliveryTier | null = currentTier ?? record?.confirmedTier ?? record?.tier ?? null;
+    const changed = authTier !== currentTier;
     const comment = renderAuthoritativeComment({
-      fromTier: freshTier,
+      fromTier,
       toTier: authTier,
       source: link ? 'diff' : 'description',
       prNumber: link?.pr.number,
@@ -251,7 +269,6 @@ export class AuthoritativePass {
       promptVersion: this.deps.promptVersion,
       facts,
       tier: authTier,
-      diffFloorTier: record?.diffFloorTier ?? null,
       liftedByUnclear: decision.liftedByUnclear,
       calibrationMismatch: decision.calibrationMismatch,
       stage: 'authoritative' as const,
@@ -275,7 +292,7 @@ export class AuthoritativePass {
 
     await this.record(link, task.gid, changed ? 'superseded' : 'confirmed', authTier, true);
     logger.info(
-      { taskGid: task.gid, from: freshTier, to: authTier, source: link ? 'diff' : 'description' },
+      { taskGid: task.gid, from: fromTier, to: authTier, source: link ? 'diff' : 'description' },
       changed ? 'delivery_tier_authoritative_superseded' : 'delivery_tier_authoritative_confirmed',
     );
     return changed ? 'superseded' : 'confirmed';

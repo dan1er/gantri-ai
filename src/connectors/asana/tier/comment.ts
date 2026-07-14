@@ -155,10 +155,11 @@ export function renderTierComment(
  * the authoritative risk source, so this SUPERSEDES a bot-provisional tier in
  * EITHER direction (raise or lower — finalizing the bot's own early guess is not
  * "lowering a decision"). When the diff is unavailable it re-confirms from the now-
- * mature description. `fromTier === toTier` means the provisional guess held.
+ * mature description. `fromTier === toTier` means the provisional guess held; a
+ * null `fromTier` means the field was empty and this is the first tier written.
  */
 export function renderAuthoritativeComment(args: {
-  fromTier: DeliveryTier;
+  fromTier: DeliveryTier | null;
   toTier: DeliveryTier;
   source: 'diff' | 'description';
   prNumber?: number;
@@ -169,7 +170,9 @@ export function renderAuthoritativeComment(args: {
   const { fromTier, toTier, source, prNumber, decision, facts, promptVersion } = args;
   const from = source === 'diff' ? `the PR diff${prNumber ? ` (#${prNumber})` : ''}` : 'the ticket description';
   const lines: string[] = [];
-  if (fromTier === toTier) {
+  if (fromTier === null) {
+    lines.push(`🤖 Set at Code Review from ${from}: ${toTier}.`);
+  } else if (fromTier === toTier) {
     lines.push(`🤖 Confirmed at Code Review from ${from}: ${toTier} holds.`);
   } else {
     lines.push(`🤖 Confirmed at Code Review from ${from}: ${fromTier} → ${toTier}.`);

@@ -301,30 +301,49 @@ describe('TierPoller.runOnce — crash recovery & TOCTOU (never freeze on a part
   });
 });
 
-describe('TierPoller.runOnce — diff-derived floor (never lower a PR-raised tier)', () => {
-  it('holds the diff floor when a notes edit reclassifies lower', async () => {
-    // A v2 PR re-check raised this ticket to T2 from the diff and stored a T2 floor.
-    // The author then edited the description; the poll re-classifies from text and
-    // decides T0 (the mock always returns T0). The field must NOT be lowered: the
-    // record stays T2, no field write, no comment — just the hash is refreshed.
+describe('TierPoller.runOnce — authoritative rows are not provisionally downgraded', () => {
+  it('a notes edit after the Code-Review authoritative pass never re-runs the text classifier', async () => {
+    // The authoritative pass finalized this ticket at T2 from the PR diff (stage
+    // 'authoritative', field T2). The author then edited the description, changing
+    // the input hash. The provisional text classifier (mock always returns T0) must
+    // NOT run: no field write, no comment, no downgrade. The tier only moves again
+    // when a new head_sha re-runs the authoritative pass.
     const t = task({ gid: 'f1', tierOptionGid: tierToOptionGid('T2') });
     const record: Partial<TierClassificationRecord> = {
       taskGid: 'f1',
       tier: 'T2',
       confirmedTier: 'T2',
-      diffFloorTier: 'T2',
+      stage: 'authoritative',
       decidedBy: 'bot',
       inputHash: 'stale-hash-from-old-notes',
       commentGid: 'story-old',
     };
-    const { poller, client, repo } = buildPoller([t], { get: vi.fn().mockResolvedValue(record) });
+    const { poller, client, repo, claude } = buildPoller([t], { get: vi.fn().mockResolvedValue(record) });
     const res = await poller.runOnce();
-    expect(res.reclassified).toBe(1);
+    expect(res.skipped).toBe(1);
+    expect(res.reclassified).toBe(0);
+    expect(claude.messages.create).not.toHaveBeenCalled();
     expect(client.setEnumCustomField).not.toHaveBeenCalled();
     expect(client.createStory).not.toHaveBeenCalled();
-    const upserts = (repo.upsertBot as ReturnType<typeof vi.fn>).mock.calls;
-    expect(upserts.length).toBe(1);
-    expect(upserts[0][0]).toMatchObject({ tier: 'T2', confirmedTier: 'T2', diffFloorTier: 'T2' });
+    expect(repo.upsertBot).not.toHaveBeenCalled();
+  });
+
+  it('a provisional row IS re-classified on a notes edit (the gate is stage-specific)', async () => {
+    // Same setup but stage 'provisional' → the text classifier runs and updates.
+    const t = task({ gid: 'p1', tierOptionGid: tierToOptionGid('T1') });
+    const record: Partial<TierClassificationRecord> = {
+      taskGid: 'p1',
+      tier: 'T1',
+      confirmedTier: 'T1',
+      stage: 'provisional',
+      decidedBy: 'bot',
+      inputHash: 'stale-hash-from-old-notes',
+      commentGid: 'story-old',
+    };
+    const { poller, client } = buildPoller([t], { get: vi.fn().mockResolvedValue(record) });
+    const res = await poller.runOnce();
+    expect(res.reclassified).toBe(1);
+    expect(client.setEnumCustomField).toHaveBeenCalled();
   });
 });
 
@@ -340,7 +359,6 @@ describe('TierPoller.runOnce — override sweep over non-candidates', () => {
       facts: {} as any,
       tier: 'T1',
       confirmedTier: 'T1',
-      diffFloorTier: null,
       liftedByUnclear: false,
       calibrationMismatch: false,
       stage: 'provisional',
@@ -372,7 +390,6 @@ describe('TierPoller.runOnce — override sweep over non-candidates', () => {
       facts: {} as any,
       tier: 'T1',
       confirmedTier: 'T1',
-      diffFloorTier: null,
       liftedByUnclear: false,
       calibrationMismatch: false,
       stage: 'provisional',
@@ -453,5 +470,28 @@ describe('TierPoller.runOnce — Code-Review authoritative pass wiring', () => {
     const { poller } = buildPoller([task({ gid: 'x', inCodeReview: true })], {});
     const res = await poller.runOnce();
     expect(res.authoritative).toBeNull();
+  });
+
+  it('applies the candidate gate before the authoritative pass (no backfill / Type-excluded)', async () => {
+    // Only the eligible candidate reaches the authoritative pass. A pre-rollout
+    // ticket, an excluded Type, and a thin-notes ticket — all sitting in Code Review
+    // — must never be classified, commented, or field-written by the pass.
+    const reviewCodeReviewTasks = vi.fn().mockResolvedValue({
+      considered: 1,
+      confirmed: 1,
+      superseded: 0,
+      humanOwned: 0,
+      skipped: 0,
+      failed: 0,
+    });
+    const authoritative = { reviewCodeReviewTasks } as unknown as AuthoritativePass;
+    const eligible = task({ gid: 'ok', inCodeReview: true });
+    const preRollout = task({ gid: 'old', inCodeReview: true, createdAt: '2026-07-01T00:00:00Z' });
+    const excludedType = task({ gid: 'research', inCodeReview: true, typeName: 'Research' });
+    const thinNotes = task({ gid: 'thin', inCodeReview: true, notes: 'short' });
+    const { poller } = buildPoller([eligible, preRollout, excludedType, thinNotes], {}, undefined, authoritative);
+    await poller.runOnce();
+    const handed = reviewCodeReviewTasks.mock.calls[0][0] as AsanaTask[];
+    expect(handed.map((t) => t.gid)).toEqual(['ok']);
   });
 });

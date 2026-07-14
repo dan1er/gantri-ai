@@ -71,7 +71,6 @@ function record(over: Partial<TierClassificationRecord>): TierClassificationReco
     facts: {} as any,
     tier: 'T1',
     confirmedTier: 'T1',
-    diffFloorTier: null,
     liftedByUnclear: false,
     calibrationMismatch: false,
     stage: 'provisional',
@@ -126,6 +125,7 @@ function build(o: BuildOpts = {}) {
   const classifications = {
     get: vi.fn().mockResolvedValue(o.record === undefined ? record({}) : o.record),
     upsertBot: vi.fn().mockResolvedValue(undefined),
+    markOverride: vi.fn().mockResolvedValue(undefined),
   } as unknown as TierClassificationsRepo;
   const prChecks = {
     exists: vi.fn().mockResolvedValue(o.exists ?? false),
@@ -247,6 +247,41 @@ describe('AuthoritativePass — human ownership & dedupe', () => {
     expect(res.humanOwned).toBe(1);
     expect(client.setEnumCustomField).not.toHaveBeenCalled();
     expect(classifications.upsertBot).not.toHaveBeenCalled();
+  });
+
+  it('writes the field when it is empty with no prior record (never a phantom "holds")', async () => {
+    // A ticket entered Code Review with a linked PR before the provisional poller
+    // ever classified it: no record, empty Delivery Tier field. The authoritative
+    // pass classifies the diff as T2 and MUST write the field (not skip it with a
+    // false "confirmed … holds" comment).
+    const { pass, client, prChecks } = build({
+      fieldTier: null,
+      diffTier: 'T2',
+      record: null,
+    });
+    const res = await pass.reviewCodeReviewTasks([task(GID, null)]);
+    expect(res.superseded).toBe(1);
+    expect(client.setEnumCustomField).toHaveBeenCalledWith(GID, DELIVERY_TIER_FIELD_GID, tierToOptionGid('T2'));
+    expect(client.createStory).toHaveBeenCalledWith(GID, expect.stringContaining('Set at Code Review'));
+    expect(prChecks.insert).toHaveBeenCalledWith(expect.objectContaining({ verdict: 'superseded' }));
+  });
+
+  it('treats an empty field whose record is fully confirmed as a human CLEAR (sacred)', async () => {
+    // The board scan snapshotted the field as T1; a human cleared it mid-tick to
+    // signal disagreement. The fresh re-read shows empty and the record is fully
+    // confirmed (confirmedTier === tier), which can only be a human clear — the
+    // authoritative pass records the override and never overwrites it.
+    const { pass, client, classifications, prChecks } = build({
+      fieldTier: 'T1',
+      freshFieldTier: null,
+      diffTier: 'T2',
+      record: record({ tier: 'T1', confirmedTier: 'T1' }),
+    });
+    const res = await pass.reviewCodeReviewTasks([task(GID, tierToOptionGid('T1'))]);
+    expect(res.humanOwned).toBe(1);
+    expect(classifications.markOverride).toHaveBeenCalledWith(GID, null);
+    expect(client.setEnumCustomField).not.toHaveBeenCalled();
+    expect(prChecks.insert).toHaveBeenCalledWith(expect.objectContaining({ verdict: 'human_owned' }));
   });
 
   it('skips a PR already reviewed at this head sha (dedupe)', async () => {

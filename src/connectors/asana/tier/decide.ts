@@ -6,7 +6,7 @@ import { TIER_RANK, maxTier, type DeliveryTier } from '../board-config.js';
  * them into the authoritative tier. Same facts → same tier, always.
  *
  * This encodes the FINAL rubric — the public "Delivery Tier Classifier" Notion
- * page (Version 2), transcribed verbatim into
+ * page (Version 3), transcribed verbatim into
  * `src/prompts/delivery-tier-standard.md`. It is a DOMAIN-BASE model: the
  * functional domain sets a base tier and the actual change raises or lowers it.
  *
@@ -17,7 +17,11 @@ import { TIER_RANK, maxTier, type DeliveryTier } from '../board-config.js';
  *   3. Risk downgrade: no behaviour change → cosmetic → T0, else visible-but-
  *      behaviour-preserving → min(base, T1); behaviour change → keep base.
  *   4. Hard-trigger escalation: behaviour change AND (money · irreversible for a
- *      real customer · data/inventory integrity · access/security) → T2.
+ *      real customer · data/inventory integrity · access/security) → T2 — UNLESS
+ *      it is a restore of already-approved behaviour (Version 3 restore carve-out):
+ *      a fix that lets existing money / order / state logic run again decides no
+ *      new amount and opens no new path, so the trigger does not fire and the tier
+ *      is capped at min(base, T1).
  *   5. Uncertainty floor: any decision-relevant unclear or domain unknown →
  *      at least T1 (a definite T2 stays T2; a step-1 terminal T0 is unaffected
  *      unless `ui_testable` itself is unclear).
@@ -89,7 +93,7 @@ export type Domain = (typeof DOMAIN_ENUM)[number];
 
 /**
  * DOMAIN_BASE_TIER — the base tier each functional domain starts at, transcribed
- * verbatim from the Notion rubric page (Version 2, hand-calibrated). The change
+ * verbatim from the Notion rubric page (Version 3, hand-calibrated). The change
  * (Step 3/4) raises or lowers it. Six domains sit at T2 base: the inherently
  * dangerous ones (auth, inventory, production) plus the customer money / order
  * surfaces (checkout, order management, orders / notifications), where a base
@@ -146,6 +150,15 @@ export interface Facts {
   behavior_change: FactValue;
   /** Copy / text / styling / spacing / layout only — no behavior change? */
   cosmetic_only: FactValue;
+  /** Step 3 restore carve-out: is this a fix that RESTORES already-shipped,
+   *  already-approved behaviour (a guard / null check, a UI-option or mapping fix,
+   *  a config entry, or wiring an already-reviewed primitive into its call site)
+   *  with the money / order / state logic itself untouched? `yes` = a restore that
+   *  merely lets existing approved logic run again (decides no new amount, opens no
+   *  new money / inventory / order path); `no` = genuinely new logic; `unclear` =
+   *  can't tell. When `yes`, the hard trigger does NOT fire — the tier is capped at
+   *  min(base, T1). */
+  restores_approved_behavior: FactValue;
   /** An amount actually paid or charged changes — a charge, refund, payout, price,
    *  tax, shipping, discount, credit, gift-card, or quote value. Internal
    *  bookkeeping (marking a statement Paid, stamping status dates) does NOT fire. */
@@ -175,6 +188,7 @@ export type FiredRule =
   | 'not_ui_testable'
   | 'cosmetic'
   | 'behavior_preserving'
+  | 'restore_approved'
   | 't2_risk_trigger'
   | 'behavior_at_base'
   | 'inconclusive';
@@ -280,9 +294,22 @@ export function decideTier(facts: Facts): Decision {
       if (facts.cosmetic_only.value === 'unclear') relevantUnclear = true;
     }
   } else if (bc === 'yes') {
-    // Step 4 — hard-trigger escalation.
+    // Step 3 restore carve-out (Version 3) — a fix that RESTORES already-shipped,
+    // already-approved behaviour, with the money / order / state logic untouched,
+    // merely lets existing approved logic run again. The page says the hard trigger
+    // "fires only when the change decides a new amount, or creates a new way for
+    // money, inventory, or order state to move — not when it lets existing approved
+    // logic run again." So a definite restore (`yes`) caps at min(base, T1) and the
+    // trigger does NOT fire. `unclear` is NOT a definite restore: it falls through
+    // to the normal trigger / base handling and feeds the uncertainty floor.
+    const restores = facts.restores_approved_behavior.value === 'yes';
     const trigger = T2_TRIGGERS.find((k) => facts[k].value === 'yes');
-    if (trigger) {
+    if (restores) {
+      tier = minTier(base, 'T1');
+      firedRule = 'restore_approved';
+      evidenceFact = 'restores_approved_behavior';
+    } else if (trigger) {
+      // Step 4 — hard-trigger escalation.
       tier = 'T2';
       firedRule = 't2_risk_trigger';
       evidenceFact = trigger;
@@ -291,6 +318,7 @@ export function decideTier(facts: Facts): Decision {
       firedRule = 'behavior_at_base';
       evidenceFact = 'behavior_change';
       if (T2_TRIGGERS.some((k) => facts[k].value === 'unclear')) relevantUnclear = true;
+      if (facts.restores_approved_behavior.value === 'unclear') relevantUnclear = true;
     }
   } else {
     // behavior_change unclear → keep the base and let the floor decide.

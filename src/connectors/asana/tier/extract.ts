@@ -34,6 +34,10 @@ const FactsSchema = z.object({
   ui_testable: FactValueSchema,
   behavior_change: FactValueSchema,
   cosmetic_only: FactValueSchema,
+  // Tolerant: older / degraded outputs may omit the Version 3 restore signal — a
+  // missing value degrades to `no` (the conservative default: no restore discount)
+  // rather than failing the whole extraction.
+  restores_approved_behavior: FactValueSchema.default({ value: 'no', evidence: '' }),
   money: FactValueSchema,
   irreversible_external: FactValueSchema,
   data_integrity: FactValueSchema,

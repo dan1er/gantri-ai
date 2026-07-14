@@ -3,11 +3,12 @@ import { decideTier, DOMAIN_BASE_TIER, type Domain, type Facts, type Ternary } f
 import type { DeliveryTier } from '../../../../../src/connectors/asana/board-config.js';
 
 /**
- * The Notion "Delivery Tier Classifier" rubric page (Version 2, domain-base model),
+ * The Notion "Delivery Tier Classifier" rubric page (Version 3, domain-base model),
  * encoded as fixtures so the code is provably aligned with the public doc. The
- * functional domain sets a BASE tier; the change (Step 3/4) raises or lowers it;
- * uncertainty floors to T1; a definite T2 stays T2. Finally the LLM's own tier is
- * cross-checked against the code tier.
+ * functional domain sets a BASE tier; the change (Step 3/4) raises or lowers it; a
+ * restore of already-approved behaviour caps at min(base, T1); uncertainty floors
+ * to T1; a definite T2 stays T2. Finally the LLM's own tier is cross-checked against
+ * the code tier.
  */
 
 /** Build a fact set from partial overrides; signals default to `no`, domain to a
@@ -23,6 +24,7 @@ function facts(
     ui_testable: v(overrides.ui_testable ?? 'yes'),
     behavior_change: v(overrides.behavior_change),
     cosmetic_only: v(overrides.cosmetic_only),
+    restores_approved_behavior: v(overrides.restores_approved_behavior),
     money: v(overrides.money),
     irreversible_external: v(overrides.irreversible_external),
     data_integrity: v(overrides.data_integrity),
@@ -235,10 +237,10 @@ describe('decideTier — Step 4 (hard triggers) & Step 2 (keep base)', () => {
     expect(d.baseTier).toBe('T1');
   });
 
-  it('internal admin report (Grafana) → production_monitoring base T1', () => {
-    // Page Version 2 folds internal admin reports (incl. Grafana) into
-    // production_monitoring (T1 base). A behaviour change there with no hard trigger
-    // stays T1 — read-only reporting never escalates on its own.
+  it('editable internal admin surface (Grafana panel) → production_monitoring base T1', () => {
+    // Page Version 3: internal admin surfaces that EDIT data (e.g. editable Grafana
+    // panels) sit in production_monitoring (T1 base) — a read-only Grafana report is
+    // reporting_analytics (T0). A behaviour change here with no hard trigger stays T1.
     expect(DOMAIN_BASE_TIER.production_monitoring).toBe('T1');
     const d = decideTier(facts({ behavior_change: 'yes', domain: 'production_monitoring' }));
     expect(d.tier).toBe('T1');
@@ -263,6 +265,95 @@ describe('decideTier — Step 4 (hard triggers) & Step 2 (keep base)', () => {
     const d = decideTier(facts({ behavior_change: 'yes', access_security: 'yes', domain: 'auth_accounts' }));
     expect(d.tier).toBe('T2');
     expect(d.evidenceFact).toBe('access_security');
+  });
+});
+
+describe('decideTier — Step 3 restore carve-out (Version 3)', () => {
+  it('a restore of approved behaviour in a T2 domain caps at T1 even with a hard trigger', () => {
+    // "Unable to place an order" style regression fix: it commits an order again
+    // (irreversible trigger would fire), but it only lets already-approved order
+    // logic run — it decides no new amount and opens no new path — so the trigger
+    // does not fire and it caps at min(T2, T1) = T1.
+    const d = decideTier(
+      facts({
+        behavior_change: 'yes',
+        irreversible_external: 'yes',
+        restores_approved_behavior: 'yes',
+        domain: 'order_management',
+      }),
+    );
+    expect(d.tier).toBe('T1');
+    expect(d.firedRule).toBe('restore_approved');
+    expect(d.evidenceFact).toBe('restores_approved_behavior');
+    expect(d.baseTier).toBe('T2');
+  });
+
+  it('a restore that also trips the money signal still caps at T1 (logic untouched)', () => {
+    // A restore leaves the money / order / state logic untouched, so a money=yes
+    // from the extractor is subordinate to the restore carve-out: the change lets
+    // existing approved logic run again rather than deciding a new amount.
+    const d = decideTier(
+      facts({
+        behavior_change: 'yes',
+        money: 'yes',
+        restores_approved_behavior: 'yes',
+        domain: 'shopping_checkout',
+      }),
+    );
+    expect(d.tier).toBe('T1');
+    expect(d.firedRule).toBe('restore_approved');
+  });
+
+  it('a restore in a T1 domain stays T1', () => {
+    const d = decideTier(
+      facts({ behavior_change: 'yes', restores_approved_behavior: 'yes', domain: 'product_discovery' }),
+    );
+    expect(d.tier).toBe('T1');
+    expect(d.firedRule).toBe('restore_approved');
+  });
+
+  it('a restore in an unknown domain caps at T1', () => {
+    const d = decideTier(
+      facts({ behavior_change: 'yes', irreversible_external: 'yes', restores_approved_behavior: 'yes', domain: 'unknown' }),
+    );
+    expect(d.tier).toBe('T1');
+    expect(d.firedRule).toBe('restore_approved');
+  });
+
+  it('restores=unclear does NOT grant the carve-out: a hard trigger still escalates to T2', () => {
+    // Version 3 clarifier: `unclear` is not a definite restore — it falls through to
+    // the normal trigger / base handling, so a real money trigger keeps its T2.
+    const d = decideTier(
+      facts({
+        behavior_change: 'yes',
+        money: 'yes',
+        restores_approved_behavior: 'unclear',
+        domain: 'shopping_checkout',
+      }),
+    );
+    expect(d.tier).toBe('T2');
+    expect(d.firedRule).toBe('t2_risk_trigger');
+  });
+
+  it('restores=no leaves the hard trigger in force (new logic → T2)', () => {
+    const d = decideTier(
+      facts({
+        behavior_change: 'yes',
+        money: 'yes',
+        restores_approved_behavior: 'no',
+        domain: 'order_management',
+      }),
+    );
+    expect(d.tier).toBe('T2');
+    expect(d.firedRule).toBe('t2_risk_trigger');
+  });
+
+  it('a genuine new-logic behaviour change (restores=no, no trigger) keeps the base tier', () => {
+    const d = decideTier(
+      facts({ behavior_change: 'yes', restores_approved_behavior: 'no', domain: 'inventory_materials' }),
+    );
+    expect(d.tier).toBe('T2');
+    expect(d.firedRule).toBe('behavior_at_base');
   });
 });
 

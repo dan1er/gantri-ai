@@ -65,6 +65,7 @@ const FACT_PHRASE: Record<FactKey, string> = {
   ui_testable: 'whether this is testable through the UI',
   behavior_change: 'whether this changes how the feature works',
   cosmetic_only: 'whether this is a purely cosmetic change',
+  restores_approved_behavior: 'whether this restores already-approved behavior or is genuinely new logic',
   money: 'whether this changes money the customer is charged',
   irreversible_external: 'whether this takes an irreversible action for a real customer',
   data_integrity: 'whether this can corrupt orders, inventory, or stored records',
@@ -84,6 +85,8 @@ function whyLine(decision: Decision): string {
       return 'it is a purely cosmetic change — copy, styling, or layout only, with no change to how the feature works (rubric Step 3).';
     case 'behavior_preserving':
       return 'it changes the look but not how the feature works, so its domain base is capped at T1 (rubric Step 3) — ship, then QA validates after release.';
+    case 'restore_approved':
+      return 'it restores already-shipped, already-approved behavior — the money / order / state logic is untouched, so it decides no new amount and opens no new path, and its base is capped at T1 (rubric Step 3).';
     case 't2_risk_trigger':
       switch (decision.evidenceFact) {
         case 'money':

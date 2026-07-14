@@ -19,6 +19,7 @@ function facts(
     ui_testable: f(o.ui_testable ?? { v: 'yes' }),
     behavior_change: f(o.behavior_change),
     cosmetic_only: f(o.cosmetic_only),
+    restores_approved_behavior: f(o.restores_approved_behavior),
     money: f(o.money),
     irreversible_external: f(o.irreversible_external),
     data_integrity: f(o.data_integrity),

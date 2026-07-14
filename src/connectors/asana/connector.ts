@@ -22,6 +22,9 @@ import {
   classifyBouncedFeatures,
   type BouncedFeatureInput,
 } from './qa-classifier.js';
+import { extractFacts, type ExtractInput } from './tier/extract.js';
+import { decideTier } from './tier/decide.js';
+import { TYPE_FIELD_GID } from './board-config.js';
 
 /**
  * Asana connector — one read-only tool, `asana.feature_qa_stats`. It computes QA
@@ -47,6 +50,24 @@ export interface AsanaConnectorDeps {
   client: AsanaApiClient;
   /** Shared Anthropic client for the batched QA classifier. */
   claude: Pick<Anthropic, 'messages'>;
+  /** The delivery-tier rubric prompt + its parsed version. When provided, the
+   *  read-only `asana.delivery_tier_preview` tool is registered (it reuses the
+   *  same extract+decide pipeline as the poller, with NO writes). */
+  tierPrompt?: string;
+  tierPromptVersion?: number;
+}
+
+/** opt_fields the preview tool reads to classify one task. */
+const OPT_FIELDS_TIER_PREVIEW =
+  'name,notes,custom_fields.gid,custom_fields.enum_value.name';
+
+/** Extract the Asana task gid from a URL or bare gid. Asana task URLs put the
+ *  gid as a long numeric path segment; we take the last such run. */
+export function parseAsanaTaskGid(input: string): string | null {
+  const trimmed = input.trim();
+  if (/^\d{6,}$/.test(trimmed)) return trimmed;
+  const matches = trimmed.match(/\d{6,}/g);
+  return matches && matches.length > 0 ? matches[matches.length - 1] : null;
 }
 
 type Outcome = 'real_bug' | 'process_bounce' | 'clean_pass' | 'unclassified';
@@ -63,10 +84,14 @@ export class AsanaConnector implements Connector {
   readonly tools: readonly ToolDef[];
   private readonly client: AsanaApiClient;
   private readonly claude: Pick<Anthropic, 'messages'>;
+  private readonly tierPrompt?: string;
+  private readonly tierPromptVersion?: number;
 
   constructor(deps: AsanaConnectorDeps) {
     this.client = deps.client;
     this.claude = deps.claude;
+    this.tierPrompt = deps.tierPrompt;
+    this.tierPromptVersion = deps.tierPromptVersion;
     this.tools = this.buildTools();
   }
 
@@ -106,7 +131,85 @@ export class AsanaConnector implements Connector {
       execute: (args) => this.runFeatureQaStats(args),
     };
 
-    return [tool];
+    const tools: ToolDef[] = [tool as ToolDef];
+    if (this.tierPrompt && this.tierPromptVersion !== undefined) {
+      tools.push(this.buildTierPreviewTool(this.tierPrompt, this.tierPromptVersion));
+    }
+    return tools;
+  }
+
+  /** Read-only "what tier would this get and why" tool. Reuses the exact
+   *  extract + decide pipeline the poller uses; it NEVER writes to Asana. */
+  private buildTierPreviewTool(prompt: string, promptVersion: number): ToolDef {
+    const Args = z.object({
+      task: z
+        .string()
+        .optional()
+        .describe('An Asana task URL or gid to classify. The ticket name + description are read from Asana.'),
+      text: z
+        .string()
+        .optional()
+        .describe('Free-text description to classify instead of a real task (used when no ticket exists yet).'),
+    });
+    type Args = z.infer<typeof Args>;
+
+    const tool: ToolDef<Args> = {
+      name: 'asana.delivery_tier_preview',
+      description: [
+        'Preview the Delivery Tier (T0/T1/T2) a Software Board ticket would get under the risk-based rubric,',
+        'with the rule that fired, the extracted facts, the flags, and the domain. READ-ONLY — it never writes',
+        'the Asana field or posts a comment. Pass EITHER `task` (an Asana task URL or gid) OR `text` (a free-text',
+        'description). Use for "what tier would this be", "why did the bot pick T2", "preview the tier for this ticket".',
+      ].join(' '),
+      schema: Args as z.ZodType<Args>,
+      jsonSchema: zodToJsonSchema(Args),
+      execute: (args) => this.runTierPreview(args, prompt, promptVersion),
+    };
+    return tool as ToolDef;
+  }
+
+  private async runTierPreview(
+    args: { task?: string; text?: string },
+    prompt: string,
+    promptVersion: number,
+  ) {
+    let input: ExtractInput;
+    let source: { kind: 'task'; gid: string } | { kind: 'text' };
+    if (args.task && args.task.trim()) {
+      const gid = parseAsanaTaskGid(args.task);
+      if (!gid) {
+        return { ok: false, error: `could not parse an Asana task gid from "${args.task}"` };
+      }
+      const task = await this.client.getTask(gid, OPT_FIELDS_TIER_PREVIEW);
+      const type = (task.custom_fields ?? []).find((f) => f.gid === TYPE_FIELD_GID);
+      input = { name: task.name ?? '', notes: task.notes ?? '', typeName: type?.enum_value?.name ?? '' };
+      source = { kind: 'task', gid };
+    } else if (args.text && args.text.trim()) {
+      input = { name: '', notes: args.text, typeName: '' };
+      source = { kind: 'text' };
+    } else {
+      return { ok: false, error: 'provide either `task` (URL/gid) or `text`' };
+    }
+
+    const facts = await extractFacts(input, { claude: this.claude, prompt });
+    const decision = decideTier(facts);
+    const evidence =
+      decision.evidenceFact && decision.firedRule !== 'inconclusive_lift'
+        ? facts[decision.evidenceFact].evidence
+        : '';
+
+    return {
+      ok: true,
+      source,
+      rubricVersion: promptVersion,
+      tier: decision.tier,
+      firedRule: decision.firedRule,
+      liftedByUnclear: decision.liftedByUnclear,
+      flags: decision.flags,
+      domain: facts.domain,
+      evidence,
+      facts,
+    };
   }
 
   private async runFeatureQaStats(args: { dateRange: DateRangeArg; includeFeatures?: boolean }) {

@@ -27,6 +27,12 @@ const envSchema = z.object({
   // comments). Read from the Supabase vault in index.ts; optional so the bot
   // still boots without it (the command is simply not registered).
   NOTION_API_TOKEN: z.string().optional(),
+  // Delivery-tier auto-classifier: only tasks created at or after this date are
+  // classified (no backfill spam). ISO date; defaults to the rollout day.
+  ROLLOUT_DATE: z.string().default('2026-07-14'),
+  // Fallback Slack user id for the Monday delivery-tier report DM when Danny's
+  // row cannot be resolved from `authorized_users`.
+  DANNY_SLACK_USER_ID: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

@@ -49,6 +49,12 @@ import { PipedriveApiClient } from './connectors/pipedrive/client.js';
 import { PipedriveWritesRepo } from './storage/repositories/pipedrive-writes.js';
 import { AsanaConnector } from './connectors/asana/connector.js';
 import { AsanaApiClient } from './connectors/asana/client.js';
+import { loadTierStandard, parseTierPromptVersion } from './connectors/asana/tier/extract.js';
+import { TierPoller } from './connectors/asana/tier/poller.js';
+import { WeeklyTierReporter } from './connectors/asana/tier/weekly-report.js';
+import { TierRunner } from './connectors/asana/tier/tier-runner.js';
+import { TierClassificationsRepo } from './storage/repositories/tier-classifications.js';
+import { TierWeeklyReportsRepo } from './storage/repositories/tier-weekly-reports.js';
 import { SendgridConnector } from './connectors/sendgrid/connector.js';
 import { SendgridApiClient } from './connectors/sendgrid/client.js';
 import { buildSearchConsoleConnector } from './connectors/gsc/connector.js';
@@ -406,13 +412,23 @@ async function main() {
 
   // Asana connector — QA quality stats for Feature tickets on the Software
   // Board. Registered here (after `claude`) because its batched classifier
-  // needs the shared Anthropic client.
+  // needs the shared Anthropic client. When configured it also loads the public
+  // delivery-tier rubric prompt (used by the read-only preview tool AND, further
+  // down, by the auto-classifier poller).
+  let asanaClient: AsanaApiClient | undefined;
+  let tierPrompt: string | undefined;
+  let tierPromptVersion: number | undefined;
   if (asanaAccessToken) {
+    asanaClient = new AsanaApiClient({ accessToken: asanaAccessToken });
+    tierPrompt = loadTierStandard();
+    tierPromptVersion = parseTierPromptVersion(tierPrompt);
     registry.register(new AsanaConnector({
-      client: new AsanaApiClient({ accessToken: asanaAccessToken }),
+      client: asanaClient,
       claude,
+      tierPrompt,
+      tierPromptVersion,
     }));
-    logger.info('asana connector registered');
+    logger.info({ tierPromptVersion }, 'asana connector registered');
   } else {
     logger.warn('asana not configured (ASANA_ACCESS_TOKEN missing) — skipping registration');
   }
@@ -692,6 +708,60 @@ async function main() {
     res.json({ ok: true, result });
   });
 
+  // Delivery-tier auto-classifier. Runs only when Asana is configured (the same
+  // gate as the connector). The runner polls the Software Board every 5 minutes,
+  // classifies tasks that need a tier, and — on the same tick — sends the
+  // idempotent Monday report. `POST /internal/run-tier-poll` forces a tick for
+  // smoke tests and manual runs.
+  let tierRunner: TierRunner | undefined;
+  if (asanaClient && tierPrompt && tierPromptVersion !== undefined) {
+    const rolloutDateMs = Date.parse(env.ROLLOUT_DATE);
+    if (Number.isNaN(rolloutDateMs)) {
+      throw new Error(`ROLLOUT_DATE is not a valid date: ${env.ROLLOUT_DATE}`);
+    }
+    const tierClassificationsRepo = new TierClassificationsRepo(supabase);
+    const tierWeeklyRepo = new TierWeeklyReportsRepo(supabase);
+    const tierPoller = new TierPoller({
+      client: asanaClient,
+      repo: tierClassificationsRepo,
+      extract: { claude, prompt: tierPrompt },
+      promptVersion: tierPromptVersion,
+      rolloutDateMs,
+    });
+    // Resolve Danny's Slack id from the authorized_users table (by either known
+    // email), falling back to the env override.
+    const resolveDannySlackId = async (): Promise<string | null> => {
+      try {
+        const users = await usersRepo.listAll();
+        const danny = users.find(
+          (u) => u.email === 'danny@gantri.com' || u.email === 'danier.estevez@gmail.com',
+        );
+        if (danny) return danny.slackUserId;
+      } catch (err) {
+        logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'resolve danny slack id failed');
+      }
+      return env.DANNY_SLACK_USER_ID ?? null;
+    };
+    const tierReporter = new WeeklyTierReporter({
+      classifications: tierClassificationsRepo,
+      weeklyRepo: tierWeeklyRepo,
+      client: asanaClient,
+      slack: app.client,
+      resolveDannySlackId,
+      opsChannelId: env.OPS_CHANNEL_ID,
+    });
+    tierRunner = new TierRunner({ poller: tierPoller, reporter: tierReporter });
+
+    receiver.router.post('/internal/run-tier-poll', async (req, res) => {
+      const auth = req.header('x-internal-secret');
+      if (!process.env.INTERNAL_SHARED_SECRET || auth !== process.env.INTERNAL_SHARED_SECRET) {
+        return res.status(403).json({ ok: false, error: 'forbidden' });
+      }
+      const result = await tierRunner!.tick();
+      res.json({ ok: true, result });
+    });
+  }
+
   // POST /internal/recompile-report — admin-only endpoint to recompile a report spec.
   // Body: { slug: string; intent: string; actorSlackId?: string }
   // Header: x-internal-secret
@@ -734,6 +804,11 @@ async function main() {
   logger.info({ port: env.PORT }, 'gantri-ai-bot listening');
 
   reportsRunner.start();
+
+  if (tierRunner) {
+    tierRunner.start();
+    logger.info('delivery tier runner started');
+  }
 
   if (devopsEnabled && gh) {
     const jobsRunner = new JobsRunner({

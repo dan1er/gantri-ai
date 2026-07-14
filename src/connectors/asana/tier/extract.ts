@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { callClaudeWithResilience } from '../../../llm/resilient-claude.js';
 import { logger } from '../../../logger.js';
 import { DOMAIN_ENUM, type Facts } from './decide.js';
+import type { DeliveryTier } from '../board-config.js';
 
 /**
  * ONE small Haiku call extracts the fixed fact set from a single ticket. The LLM
@@ -162,15 +163,25 @@ function tryParse(raw: string): Facts | null {
   }
   if (json === null || typeof json !== 'object') return null;
   // The rubric page asks for `{ tier, domain, why, evidence, signals }`. The bot
-  // recomputes the tier from `signals` (the deterministic contract), so we read the
-  // signals object + the domain tag and ignore the model's own tier/why/evidence.
-  // Tolerate a bare signals object at the top level too (older / degraded outputs).
+  // recomputes the tier from `signals` (the deterministic contract) — but it ALSO
+  // keeps the model's own `tier` for the calibration cross-check: if the LLM tier
+  // disagrees with the code-computed tier, the result is floored to T1 and the
+  // miss is counted in the Monday report. Tolerate a bare signals object at the
+  // top level too (older / degraded outputs).
   const obj = json as Record<string, unknown>;
   const signals = obj.signals && typeof obj.signals === 'object' ? obj.signals : obj;
   const domain = (obj as { domain?: unknown }).domain ?? (signals as { domain?: unknown }).domain;
   const parsed = FactsSchema.safeParse({ ...(signals as Record<string, unknown>), domain });
   if (!parsed.success) return null;
-  return parsed.data as Facts;
+  const llmTier = normalizeLlmTier((obj as { tier?: unknown }).tier);
+  return { ...(parsed.data as Omit<Facts, 'llmTier'>), llmTier } as Facts;
+}
+
+/** Read the model's own `tier` field, or null if it is missing / not one of the
+ *  three tiers. Used only for the calibration cross-check, never as the tier. */
+function normalizeLlmTier(raw: unknown): DeliveryTier | null {
+  if (raw === 'T0' || raw === 'T1' || raw === 'T2') return raw;
+  return null;
 }
 
 function extractText(response: Anthropic.Message): string {

@@ -1,40 +1,53 @@
 import { describe, it, expect } from 'vitest';
 import { loadTierStandard, parseTierPromptVersion } from '../../../../../src/connectors/asana/tier/extract.js';
+import { DOMAIN_BASE_TIER, type Domain } from '../../../../../src/connectors/asana/tier/decide.js';
 
 /**
  * The public rubric prompt must stay verbatim-equivalent to the Notion "Delivery
- * Tier Classifier" page (the change-based model) plus the two bot-only additive
- * sections (diff mode + the machine-appendix signals). These guards keep the four
- * rubric steps and the signals contract intact so page ↔ code ↔ prompt agree.
+ * Tier Classifier" page (Version 2, the domain-base model) plus the clearly-marked
+ * bot-only machine appendix (signals contract + diff-mode carve-out). These guards
+ * keep the four rubric steps, the domain→base-tier table, and the signals contract
+ * in sync so page ↔ code ↔ prompt agree.
  */
 describe('delivery-tier rubric prompt', () => {
   const prompt = loadTierStandard();
 
-  it('has a parseable version header', () => {
-    expect(parseTierPromptVersion(prompt)).toBeGreaterThanOrEqual(1);
+  it('is Version 2', () => {
+    expect(parseTierPromptVersion(prompt)).toBe(2);
   });
 
-  it('carries the four change-based steps in order', () => {
-    const s1 = prompt.indexOf('## Step 1 — No UI surface → T0');
-    const s2 = prompt.indexOf('## Step 2 — Doesn');
-    const s3 = prompt.indexOf('## Step 3 — T2 test');
-    const s4 = prompt.indexOf('## Step 4 — Everything else → T1');
+  it('carries the four domain-base steps in order', () => {
+    const s1 = prompt.indexOf('## Step 1 — Can QA test it through the UI?');
+    const s2 = prompt.indexOf('## Step 2 — Functional domain → base tier');
+    const s3 = prompt.indexOf('## Step 3 — Risk check');
+    const s4 = prompt.indexOf('## Step 4 — Uncertainty floor');
     expect(s1).toBeGreaterThanOrEqual(0);
     expect(s2).toBeGreaterThan(s1);
     expect(s3).toBeGreaterThan(s2);
     expect(s4).toBeGreaterThan(s3);
   });
 
-  it('Step 3 keeps the four T2 triggers (money, irreversible, integrity, access)', () => {
+  it('Step 3 keeps the four hard-trigger cases (money, irreversible, integrity, access)', () => {
     const section = prompt.slice(prompt.indexOf('## Step 3'), prompt.indexOf('## Step 4'));
-    expect(section).toMatch(/\*\*Money\*\*/);
-    expect(section).toMatch(/Irreversible for a real customer/i);
-    expect(section).toMatch(/Data or inventory integrity/i);
-    expect(section).toMatch(/Access or security/i);
+    expect(section).toMatch(/\*\*money\*\*/i);
+    expect(section).toMatch(/irreversible for a real customer/i);
+    expect(section).toMatch(/data \/ inventory integrity/i);
+    expect(section).toMatch(/access \/ security/i);
   });
 
-  it('requires the machine-appendix signals object the code recomputes from', () => {
-    const section = prompt.slice(prompt.indexOf('## Machine appendix'));
+  it('the domain→base-tier table lists every code domain with a matching base tier', () => {
+    const table = prompt.slice(prompt.indexOf('| Domain |'), prompt.indexOf('## Step 3'));
+    for (const [domain, base] of Object.entries(DOMAIN_BASE_TIER) as [Domain, string][]) {
+      // Each domain appears as a table row `| <domain> | ... | <base> |`.
+      const row = new RegExp(`\\|\\s*${domain}\\s*\\|[^\\n]*\\|\\s*${base}\\s*\\|`);
+      expect(table, `${domain} → ${base}`).toMatch(row);
+    }
+  });
+
+  it('marks the machine appendix as not-on-the-Notion-page and requires the signals object', () => {
+    const idx = prompt.indexOf('--- MACHINE APPENDIX (not on the Notion page) ---');
+    expect(idx).toBeGreaterThan(0);
+    const section = prompt.slice(idx);
     for (const signal of [
       'ui_testable',
       'behavior_change',
@@ -49,12 +62,9 @@ describe('delivery-tier rubric prompt', () => {
     }
   });
 
-  it('carves out diff mode: the diff is authoritative and evidence may come from it', () => {
-    // The v2 PR re-check sends this same file as the system prompt while asking the
-    // model to judge from the diff. Without a carve-out, the ticket-text ground rules
-    // would fight the diff instruction.
-    const diffSection = prompt.slice(prompt.indexOf('## Diff mode'), prompt.indexOf('## Output'));
-    expect(diffSection).toMatch(/diff is\*?\*? authoritative/i);
-    expect(diffSection).toMatch(/verbatim from the \*?\*?diff/i);
+  it('carves out diff mode inside the machine appendix: the diff is authoritative', () => {
+    const section = prompt.slice(prompt.indexOf('--- MACHINE APPENDIX'));
+    expect(section).toMatch(/diff is\*?\*? authoritative/i);
+    expect(section).toMatch(/verbatim from the \*?\*?diff/i);
   });
 });

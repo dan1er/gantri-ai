@@ -81,42 +81,39 @@ function whyLine(decision: Decision): string {
     case 'not_ui_testable':
       return 'nothing can be tested through the product UI, so QA cannot gate it (rubric Step 1).';
     case 'cosmetic':
-      return 'it is a purely cosmetic change — copy, styling, or layout only, with no change to how the feature works (rubric Step 2).';
-    case 'no_behavior_change':
-      return 'it changes the UI but not how the feature works (rubric Step 2) — ship, then QA validates after release.';
+      return 'it is a purely cosmetic change — copy, styling, or layout only, with no change to how the feature works (rubric Step 3).';
+    case 'behavior_preserving':
+      return 'it changes the look but not how the feature works, so its domain base is capped at T1 (rubric Step 3) — ship, then QA validates after release.';
     case 't2_risk_trigger':
       switch (decision.evidenceFact) {
         case 'money':
-          return 'it changes money — a charge, refund, payout, price, tax, shipping, discount, credit, or gift-card value (rubric Step 3).';
+          return 'it changes money — a charge, refund, payout, price, tax, shipping, discount, credit, or gift-card value (rubric Step 4).';
         case 'irreversible_external':
-          return 'it takes an irreversible action for a real customer — a committed/cancelled order, a customer email/SMS/push, or a hard-delete (rubric Step 3).';
+          return 'it takes an irreversible action for a real customer — a committed/cancelled order, a customer email/SMS/push, or a hard-delete (rubric Step 4).';
         case 'data_integrity':
-          return 'it can corrupt orders, inventory, or stored records in a way that is hard to undo (rubric Step 3).';
+          return 'it can corrupt orders, inventory, or stored records in a way that is hard to undo (rubric Step 4).';
         case 'access_security':
-          return 'it changes authentication, access, or permissions in a way that could lock customers out or expose data (rubric Step 3).';
+          return 'it changes authentication, access, or permissions in a way that could lock customers out or expose data (rubric Step 4).';
         default:
-          return 'it changes behavior in a way that is hard to recover from or costly (rubric Step 3).';
+          return 'it changes behavior in a way that is hard to recover from or costly (rubric Step 4).';
       }
-    case 'behavior_recoverable':
-      return 'it changes customer-facing behavior but is quickly recoverable (rubric Step 4) — ship, then QA validates after release.';
+    case 'behavior_at_base':
+      return `it changes behavior but carries none of the money / irreversible / data-integrity / access risks, so it keeps the ${decision.baseTier} base for its domain (rubric Step 2).`;
     case 'inconclusive': {
       const fact = decision.evidenceFact ?? 'behavior_change';
-      return `couldn't determine ${FACT_PHRASE[fact]} from the ticket → defaulting to T1 (rubric Step 4: unsure → T1). Add detail to the description and the bot will re-classify.`;
+      return `couldn't determine ${FACT_PHRASE[fact]} from the ticket → defaulting to T1 (rubric Step 5: unsure → T1). Add detail to the description and the bot will re-classify.`;
     }
   }
 }
 
-/**
- * Render the full comment body. Prefixed with 🤖 so bot authorship is obvious
- * even though the write uses Danny's PAT.
- */
-export function renderTierComment(decision: Decision, facts: Facts, promptVersion: number): string {
-  const lines: string[] = [];
-  lines.push(`🤖 Delivery Tier: ${TIER_HEADLINE[decision.tier]}`);
-  lines.push(`Why: ${whyLine(decision)}`);
+/** The provisional-pass note: the tier is an early guess and will be re-checked
+ *  from the real PR diff once the ticket reaches Code Review. */
+export const PROVISIONAL_LINE = 'Provisional — will be confirmed when the ticket reaches Code Review.';
 
-  // Evidence quote, only when there is a real quote to show (skip for inconclusive
-  // and low-risk, where there is nothing meaningful to cite).
+/** Shared tail (evidence + flags + calibration note + domain + rubric footer). */
+function appendTail(lines: string[], decision: Decision, facts: Facts, promptVersion: number): void {
+  // Evidence quote, only when there is a real quote to show (skip for inconclusive,
+  // where there is nothing meaningful to cite).
   if (decision.evidenceFact && decision.firedRule !== 'inconclusive') {
     const evidence = facts[decision.evidenceFact].evidence.trim();
     if (evidence) lines.push(`Evidence: "${evidence}"`);
@@ -126,39 +123,58 @@ export function renderTierComment(decision: Decision, facts: Facts, promptVersio
     lines.push(`Flags: ${decision.flags.map((f) => FLAG_TEXT[f]).join(' ')}`);
   }
 
+  if (decision.calibrationMismatch) {
+    lines.push('Note: the model and the rubric disagreed on the tier — floored to T1 for safety and logged for review.');
+  }
+
   lines.push(`Domain: ${DOMAIN_LABEL[facts.domain]}`);
   lines.push(`Rubric v${promptVersion} · ${RUBRIC_URL} · ${DISPUTE_LINE}`);
+}
+
+/**
+ * Render the full comment body. Prefixed with 🤖 so bot authorship is obvious
+ * even though the write uses Danny's PAT. `provisional` appends the note that the
+ * tier will be confirmed from the PR diff at Code Review.
+ */
+export function renderTierComment(
+  decision: Decision,
+  facts: Facts,
+  promptVersion: number,
+  opts: { provisional?: boolean } = {},
+): string {
+  const lines: string[] = [];
+  lines.push(`🤖 Delivery Tier: ${TIER_HEADLINE[decision.tier]}`);
+  lines.push(`Why: ${whyLine(decision)}`);
+  appendTail(lines, decision, facts, promptVersion);
+  if (opts.provisional) lines.push(PROVISIONAL_LINE);
   return lines.join('\n');
 }
 
 /**
- * Render the comment posted when a PR diff re-check RAISES a ticket's tier. The
- * diff is the authoritative source, so the "Why" cites the diff-derived decision.
- * Raise-only: this is never emitted for a lower or equal diff tier.
+ * Render the comment posted by the authoritative Code-Review pass. The PR diff is
+ * the authoritative risk source, so this SUPERSEDES a bot-provisional tier in
+ * EITHER direction (raise or lower — finalizing the bot's own early guess is not
+ * "lowering a decision"). When the diff is unavailable it re-confirms from the now-
+ * mature description. `fromTier === toTier` means the provisional guess held.
  */
-export function renderTierRaiseComment(args: {
-  prNumber: number;
+export function renderAuthoritativeComment(args: {
   fromTier: DeliveryTier;
   toTier: DeliveryTier;
+  source: 'diff' | 'description';
+  prNumber?: number;
   decision: Decision;
   facts: Facts;
   promptVersion: number;
 }): string {
-  const { prNumber, fromTier, toTier, decision, facts, promptVersion } = args;
+  const { fromTier, toTier, source, prNumber, decision, facts, promptVersion } = args;
+  const from = source === 'diff' ? `the PR diff${prNumber ? ` (#${prNumber})` : ''}` : 'the ticket description';
   const lines: string[] = [];
-  lines.push(`🤖 Tier raised ${fromTier} → ${toTier} after PR #${prNumber} diff review.`);
+  if (fromTier === toTier) {
+    lines.push(`🤖 Confirmed at Code Review from ${from}: ${toTier} holds.`);
+  } else {
+    lines.push(`🤖 Confirmed at Code Review from ${from}: ${fromTier} → ${toTier}.`);
+  }
   lines.push(`Why: ${whyLine(decision)}`);
-
-  if (decision.evidenceFact && decision.firedRule !== 'inconclusive') {
-    const evidence = facts[decision.evidenceFact].evidence.trim();
-    if (evidence) lines.push(`Evidence: "${evidence}"`);
-  }
-
-  if (decision.flags.length > 0) {
-    lines.push(`Flags: ${decision.flags.map((f) => FLAG_TEXT[f]).join(' ')}`);
-  }
-
-  lines.push(`Domain: ${DOMAIN_LABEL[facts.domain]}`);
-  lines.push(`Rubric v${promptVersion} · ${RUBRIC_URL} · ${DISPUTE_LINE}`);
+  appendTail(lines, decision, facts, promptVersion);
   return lines.join('\n');
 }

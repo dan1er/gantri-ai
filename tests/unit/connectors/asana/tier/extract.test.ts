@@ -45,6 +45,14 @@ describe('extractFacts', () => {
     expect(facts.ui_testable).toEqual({ value: 'yes', evidence: 'user can place an order' });
     expect(facts.money.evidence).toBe('refunds issued automatically');
     expect(facts.domain).toBe('shopping_checkout');
+    // The model's own tier is captured for the calibration cross-check.
+    expect(facts.llmTier).toBe('T2');
+  });
+
+  it('captures a null llmTier when the model omits an unrecognized tier', async () => {
+    const claude = claudeReturning(JSON.stringify({ ...FULL_FACTS, tier: 'T9' }));
+    const facts = await extractFacts(INPUT, { claude, prompt: PROMPT });
+    expect(facts.llmTier).toBeNull();
   });
 
   it('extracts the JSON object even when the model wraps it in prose / a fence', async () => {

@@ -4,7 +4,7 @@ import { DOMAIN_BASE_TIER, type Domain } from '../../../../../src/connectors/asa
 
 /**
  * The public rubric prompt must stay verbatim-equivalent to the Notion "Delivery
- * Tier Classifier" page (Version 2, the domain-base model) plus the clearly-marked
+ * Tier Classifier" page (Version 3, the domain-base model) plus the clearly-marked
  * bot-only machine appendix (signals contract + diff-mode carve-out). These guards
  * keep the four rubric steps, the domain→base-tier table, and the signals contract
  * in sync so page ↔ code ↔ prompt agree.
@@ -12,8 +12,14 @@ import { DOMAIN_BASE_TIER, type Domain } from '../../../../../src/connectors/asa
 describe('delivery-tier rubric prompt', () => {
   const prompt = loadTierStandard();
 
-  it('is Version 2 (matches the Notion page header)', () => {
-    expect(parseTierPromptVersion(prompt)).toBe(2);
+  it('is Version 3 (matches the Notion page header)', () => {
+    expect(parseTierPromptVersion(prompt)).toBe(3);
+  });
+
+  it('Step 3 carries the Version 3 restore-vs-rework carve-out', () => {
+    const section = prompt.slice(prompt.indexOf('## Step 3'), prompt.indexOf('## Step 4'));
+    expect(section).toMatch(/restores already-shipped, already-approved behavior/i);
+    expect(section).toMatch(/decides a new amount, or creates a new way for money, inventory, or order state to move/i);
   });
 
   it('carries the four domain-base steps in order', () => {
@@ -67,6 +73,7 @@ describe('delivery-tier rubric prompt', () => {
       'ui_testable',
       'behavior_change',
       'cosmetic_only',
+      'restores_approved_behavior',
       'money',
       'irreversible_external',
       'data_integrity',

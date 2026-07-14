@@ -1,4 +1,4 @@
-Version: 2
+Version: 3
 
 # Delivery Tier Classifier
 
@@ -36,7 +36,7 @@ Identify the ticket's functional domain — pick exactly one — and take its **
 | creators_referral | designer / creator profiles, referrals, affiliates | T1 |
 | product_catalog_design | products, designs, designers, product reviews | T1 |
 | machines_fleet | machines, fleet management | T1 |
-| production_monitoring | dashboards, TV dashboards, internal admin reports (incl. Grafana) | T1 |
+| production_monitoring | dashboards, TV dashboards; internal admin surfaces that EDIT data (e.g. editable Grafana panels) | T1 |
 | factory_administration | internal users, settings, cron jobs | T1 |
 | design_workflow | designs, submissions, revisions | T1 |
 | customer_operations | support, communications | T1 |
@@ -51,7 +51,7 @@ Identify the ticket's functional domain — pick exactly one — and take its **
 | porter_catalog_products | products, assets, designs, versions (backend) | T1 |
 | design_system | gantri-components shared library | T1 |
 | unknown | cannot tell which domain | T1 |
-| reporting_analytics | read-only reports, dashboards | T0 |
+| reporting_analytics | read-only reports & dashboards — a Grafana report is ALWAYS here | T0 |
 | platform_infra | CI/CD, tooling, cron, observability | T0 |
 
 ## Step 3 — Risk check: confirm, raise, or lower the base
@@ -61,6 +61,7 @@ The domain positions the ticket; the actual change decides:
 - The change does **not** alter how the feature works — a label, copy, or styling change only → **T0**, whatever the base. (Showing **wrong data** is not cosmetic — that is a behavior bug.)
 - A visible change that **preserves the behavior** — layout, restyle, reorder, with the money / order / data / auth logic intact → at most **T1** (the lower of the base and T1).
 - The change **does alter behavior** and hits one of — **money** (charge / refund / payout / price / tax / discount / credit / gift-card / quote amount — an amount actually paid or charged changes; internal bookkeeping such as marking a statement Paid or stamping status dates does **not** fire) · **irreversible for a real customer** (commits or cancels an order, sends a customer email / SMS, hard-deletes data) · **data / inventory integrity** (hard to undo) · **access / security** (lock-out or exposure) → **T2**, whatever the base. *(These are the framework's Verification-lane cases — they always verify before production.)*
+- **A fix that restores already-shipped, already-approved behavior** — a localized guard or null / empty check, a UI-option or mapping fix, a config entry, or wiring an already-reviewed primitive into its intended call site, with the money / order / state logic itself untouched → at most **T1** (the lower of the base and T1). The trigger above fires only when the change **decides a new amount, or creates a new way for money, inventory, or order state to move** — not when it lets existing approved logic run again. If the ticket can't answer which one it is, hold at **T1** — the Code-Review diff pass settles it.
 - Otherwise → keep the **base tier**.
 
 ## Step 4 — Uncertainty floor
@@ -83,9 +84,10 @@ This appendix is bot-only and additive. It does not change any tier above; it on
 
 In ADDITION to the four keys above (`tier`, `domain`, `why`, `evidence`), include a `signals` object. Each signal is `{ "value": "yes" | "no" | "unclear", "evidence": "<short verbatim quote, or empty string>" }`, answered strictly by the boundaries the steps above already define:
 
-- `ui_testable` — Step 1: can QA meaningfully validate this through the product UI? Backend-only / infra / CI / migration / logging / internal job → `no`.
-- `behavior_change` — Step 3: does the change alter how the feature actually works (not just its look)?
+- `ui_testable` — Step 1: can QA meaningfully validate this through the product UI? Answer `no` when the change itself is implemented in **backend / server code only** — an API, service, worker, cron, migration, or backfill — even if its EFFECT is later observable somewhere in the product UI. QA gates only changes that expose a **frontend surface a tester can exercise**; a backend-only change offers nothing to click, so it is `no`. Data migrations and one-off backfills are **always** `no`; so are CI, infra, logging, background cron jobs, and pure server-to-server sync / webhook handlers that no screen drives. The line is **drive vs. observe**: answer `yes` when a tester can reach an existing product / admin screen and *drive* it to exercise the corrected behavior — place an order, advance or unstick a job, complete a return, configure an admin setting, hit a button — even though the fix lives in backend code, because that interactive screen is the frontend surface QA exercises. Answer `no` only when the change merely makes a stored value come out right that a tester would passively *observe* (a corrected date, count, or report number produced by a job / migration) with no interactive step to reproduce the fix.
+- `behavior_change` — Step 3: does the change alter how the feature actually works (not just its look)? A fix that makes a broken feature work again still counts as a behavior change (`yes`) — then use `restores_approved_behavior` to say whether it is a *restore* of already-approved behavior or genuinely *new* logic.
 - `cosmetic_only` — Step 3: label / copy / text / styling / spacing / color / image / layout / element-order only, with no behavior change. Showing **wrong data** is NOT cosmetic — that is a behavior bug (`behavior_change` → `yes`, `cosmetic_only` → `no`).
+- `restores_approved_behavior` — Step 3 restore carve-out: is this a fix that **restores already-shipped, already-approved behavior** rather than deciding something new? Answer `yes` when the change is a localized guard or null / empty check, a UI-option or mapping fix, a config entry, wiring an already-reviewed primitive into its intended call site, or simply unblocking a broken flow (a checkout / save / confirm / place-order path that used to work now throws or no-ops) — and the money / order / state **math itself is left untouched**, so it merely lets existing approved logic run again. Releasing or applying an amount that existing approved logic **already computed** (e.g. releasing an already-accrued charge when a return expires) is letting existing logic run → `yes`. Answer `no` when the change **decides or recomputes a money AMOUNT** — a refund, charge, payout, price, or credit that now comes out to a *different number* (that is the money trigger, not a restore) — or otherwise **creates a new way for money, inventory, or order state to move** (genuinely new logic). Answer `unclear` when the ticket can't tell you which one it is.
 - `money` — Step 3 trigger: an amount actually paid or charged changes — a charge, refund, payout, price, tax, shipping, discount, credit, gift-card, or quote amount. Internal bookkeeping (marking a statement Paid, stamping status dates) does **not** fire this → `no`.
 - `irreversible_external` — Step 3 trigger: commits or cancels a real order, sends a customer email / SMS / push, or hard-deletes customer data.
 - `data_integrity` — Step 3 trigger: can corrupt orders, inventory, or stored records in a way that is hard to undo.
@@ -105,14 +107,15 @@ Full example with the appendix:
   "why": "Step 3: changes how much the customer is charged",
   "evidence": "auto-refund the difference when the price drops",
   "signals": {
-    "ui_testable":          { "value": "yes",     "evidence": "shows the refund in the order page" },
-    "behavior_change":      { "value": "yes",     "evidence": "auto-refund the difference" },
-    "cosmetic_only":        { "value": "no",      "evidence": "" },
-    "money":                { "value": "yes",     "evidence": "auto-refund the difference when the price drops" },
-    "irreversible_external":{ "value": "no",      "evidence": "" },
-    "data_integrity":       { "value": "no",      "evidence": "" },
-    "access_security":      { "value": "no",      "evidence": "" },
-    "visual_blast_radius":  { "value": "no",      "evidence": "" }
+    "ui_testable":              { "value": "yes",     "evidence": "shows the refund in the order page" },
+    "behavior_change":          { "value": "yes",     "evidence": "auto-refund the difference" },
+    "cosmetic_only":            { "value": "no",      "evidence": "" },
+    "restores_approved_behavior": { "value": "no",    "evidence": "" },
+    "money":                    { "value": "yes",     "evidence": "auto-refund the difference when the price drops" },
+    "irreversible_external":    { "value": "no",      "evidence": "" },
+    "data_integrity":           { "value": "no",      "evidence": "" },
+    "access_security":          { "value": "no",      "evidence": "" },
+    "visual_blast_radius":      { "value": "no",      "evidence": "" }
   }
 }
 ```

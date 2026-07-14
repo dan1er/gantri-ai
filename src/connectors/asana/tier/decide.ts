@@ -6,7 +6,7 @@ import { TIER_RANK, maxTier, type DeliveryTier } from '../board-config.js';
  * them into the authoritative tier. Same facts → same tier, always.
  *
  * This encodes the FINAL rubric — the public "Delivery Tier Classifier" Notion
- * page (Version 1), transcribed verbatim into
+ * page (Version 2), transcribed verbatim into
  * `src/prompts/delivery-tier-standard.md`. It is a DOMAIN-BASE model: the
  * functional domain sets a base tier and the actual change raises or lowers it.
  *
@@ -89,21 +89,21 @@ export type Domain = (typeof DOMAIN_ENUM)[number];
 
 /**
  * DOMAIN_BASE_TIER — the base tier each functional domain starts at, transcribed
- * verbatim from the Notion rubric page (Version 1). The change (Step 3/4) raises
- * or lowers it. Only the domains where a base defect is dangerous regardless of
- * money sit at T2 (auth, inventory, production, and the customer money/order
- * surfaces — checkout, orders, order management, payouts / statements / quotes);
- * read-only reporting and pure infra sit at T0; everything else, and `unknown`,
- * is T1.
+ * verbatim from the Notion rubric page (Version 2). The change (Step 3/4) raises
+ * or lowers it. Only the three domains where a base defect is dangerous
+ * regardless of money sit at T2 (auth, inventory, production); the money-adjacent
+ * customer surfaces (checkout, orders, order management, payouts / statements /
+ * quotes) sit at T1 and reach T2 only via Step 3's money trigger; read-only
+ * reporting and pure infra sit at T0; everything else, and `unknown`, is T1.
  */
 export const DOMAIN_BASE_TIER: Record<Domain, DeliveryTier> = {
   auth_accounts: 'T2',
   inventory_materials: 'T2',
   production_workflow: 'T2',
-  shopping_checkout: 'T2',
-  orders_notifications: 'T2',
-  order_management: 'T2',
-  payouts_statements: 'T2',
+  shopping_checkout: 'T1',
+  orders_notifications: 'T1',
+  order_management: 'T1',
+  payouts_statements: 'T1',
   made_order_management: 'T1',
   made_quoting_billing: 'T1',
   gift_cards: 'T1',

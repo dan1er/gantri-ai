@@ -3,7 +3,7 @@ import { decideTier, DOMAIN_BASE_TIER, type Domain, type Facts, type Ternary } f
 import type { DeliveryTier } from '../../../../../src/connectors/asana/board-config.js';
 
 /**
- * The Notion "Delivery Tier Classifier" rubric page (Version 1, domain-base model),
+ * The Notion "Delivery Tier Classifier" rubric page (Version 2, domain-base model),
  * encoded as fixtures so the code is provably aligned with the public doc. The
  * functional domain sets a BASE tier; the change (Step 3/4) raises or lowers it;
  * uncertainty floors to T1; a definite T2 stays T2. Finally the LLM's own tier is
@@ -37,23 +37,20 @@ describe('DOMAIN_BASE_TIER — transcribed from the Notion page', () => {
   it('has exactly 36 domains', () => {
     expect(Object.keys(DOMAIN_BASE_TIER)).toHaveLength(36);
   });
-  it('T2 base only for the inherently-dangerous domains + customer money/order surfaces', () => {
+  it('T2 base only for the three inherently-dangerous domains', () => {
     const t2 = Object.entries(DOMAIN_BASE_TIER)
       .filter(([, t]) => t === 'T2')
       .map(([d]) => d)
       .sort();
-    // Seven T2 base domains, matching the Notion page table: the three inherently
-    // dangerous ones (auth, inventory, production) plus the four customer money/order
-    // surfaces (checkout, orders, order management, payouts / statements / quotes).
+    // Exactly three T2 base domains, matching the Notion page (Version 2) table:
+    // the inherently dangerous ones (auth, inventory, production). The money-adjacent
+    // customer surfaces (checkout, orders, order management, payouts / statements /
+    // quotes) sit at T1 base and reach T2 only via Step 3's money trigger.
     expect(t2).toEqual(
       [
         'auth_accounts',
         'inventory_materials',
-        'order_management',
-        'orders_notifications',
-        'payouts_statements',
         'production_workflow',
-        'shopping_checkout',
       ].sort(),
     );
   });
@@ -68,21 +65,33 @@ describe('DOMAIN_BASE_TIER — transcribed from the Notion page', () => {
   });
 
   it('pins the money-adjacent domains by name (page-table parity)', () => {
-    // payouts_statements is a customer money surface → T2 base (page table). The
-    // MadeOS money-adjacent domains stay T1 base and only reach T2 via Step 3's
-    // money trigger. These are the invariants the final model depends on.
-    expect(DOMAIN_BASE_TIER.payouts_statements).toBe('T2');
+    // Every money-adjacent domain sits at T1 base (page Version 2) and only reaches
+    // T2 via Step 3's money trigger — the customer money/order surfaces alongside the
+    // MadeOS ones. These are the invariants the final model depends on.
+    expect(DOMAIN_BASE_TIER.shopping_checkout).toBe('T1');
+    expect(DOMAIN_BASE_TIER.orders_notifications).toBe('T1');
+    expect(DOMAIN_BASE_TIER.order_management).toBe('T1');
+    expect(DOMAIN_BASE_TIER.payouts_statements).toBe('T1');
     expect(DOMAIN_BASE_TIER.made_quoting_billing).toBe('T1');
     expect(DOMAIN_BASE_TIER.made_order_management).toBe('T1');
   });
 });
 
 describe('decideTier — money-adjacent domain invariants', () => {
-  it('payouts/statements behaviour change with no hard trigger keeps the T2 base', () => {
+  it('payouts/statements behaviour change with no hard trigger keeps the T1 base', () => {
+    // A behaviour-changing payouts ticket with no money/irreversible/integrity/access
+    // trigger is T1 — matching a human applying page Version 2 (money-adjacent = T1
+    // base). It only reaches T2 when a hard trigger fires.
     const d = decideTier(facts({ behavior_change: 'yes', domain: 'payouts_statements' }));
-    expect(d.tier).toBe('T2');
-    expect(d.baseTier).toBe('T2');
+    expect(d.tier).toBe('T1');
+    expect(d.baseTier).toBe('T1');
     expect(d.firedRule).toBe('behavior_at_base');
+  });
+
+  it('payouts/statements behaviour change that touches money escalates to T2', () => {
+    const d = decideTier(facts({ behavior_change: 'yes', money: 'yes', domain: 'payouts_statements' }));
+    expect(d.tier).toBe('T2');
+    expect(d.firedRule).toBe('t2_risk_trigger');
   });
 
   it('made_quoting_billing keeps T1 for a recoverable change, escalates to T2 on money', () => {
@@ -141,7 +150,7 @@ describe('decideTier — Step 3 (risk downgrade)', () => {
     );
     expect(d.tier).toBe('T0');
     expect(d.firedRule).toBe('cosmetic');
-    expect(d.baseTier).toBe('T2');
+    expect(d.baseTier).toBe('T1');
   });
 
   it('checkout restyle, logic intact → T1 (behaviour-preserving cap min(base, T1))', () => {
@@ -150,7 +159,7 @@ describe('decideTier — Step 3 (risk downgrade)', () => {
     );
     expect(d.tier).toBe('T1');
     expect(d.firedRule).toBe('behavior_preserving');
-    expect(d.baseTier).toBe('T2');
+    expect(d.baseTier).toBe('T1');
   });
 
   it('reporting dashboard cosmetic tweak → T0', () => {

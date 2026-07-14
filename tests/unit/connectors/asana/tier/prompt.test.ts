@@ -4,7 +4,7 @@ import { DOMAIN_BASE_TIER, type Domain } from '../../../../../src/connectors/asa
 
 /**
  * The public rubric prompt must stay verbatim-equivalent to the Notion "Delivery
- * Tier Classifier" page (Version 1, the domain-base model) plus the clearly-marked
+ * Tier Classifier" page (Version 2, the domain-base model) plus the clearly-marked
  * bot-only machine appendix (signals contract + diff-mode carve-out). These guards
  * keep the four rubric steps, the domain→base-tier table, and the signals contract
  * in sync so page ↔ code ↔ prompt agree.
@@ -12,8 +12,8 @@ import { DOMAIN_BASE_TIER, type Domain } from '../../../../../src/connectors/asa
 describe('delivery-tier rubric prompt', () => {
   const prompt = loadTierStandard();
 
-  it('is Version 1 (matches the Notion page header)', () => {
-    expect(parseTierPromptVersion(prompt)).toBe(1);
+  it('is Version 2 (matches the Notion page header)', () => {
+    expect(parseTierPromptVersion(prompt)).toBe(2);
   });
 
   it('carries the four domain-base steps in order', () => {
@@ -44,16 +44,15 @@ describe('delivery-tier rubric prompt', () => {
     }
   });
 
-  it('the Step 2 prose does not contradict the base-tier table (money-adjacent are T2)', () => {
+  it('the Step 2 prose agrees with the base-tier table (money-adjacent are T1)', () => {
     const step2 = prompt.slice(prompt.indexOf('## Step 2'), prompt.indexOf('## Step 3'));
-    // The table places checkout / orders / order management / payouts at T2. The
-    // prose above it must not tell the model they "sit at T1" — that self-contradiction
-    // steered the LLM tier away from the code-computed tier and inflated calibration
-    // misses. Only the porter_* bullet may say those backend domains sit at T1.
-    expect(step2).not.toMatch(/Money-adjacent[^\n]*sit at\s+\*?\*?T1/i);
+    // Page Version 2: the money-adjacent domains sit at T1 base and reach T2 only via
+    // Step 3's money trigger. The prose bullet must say they "sit at T1", and the four
+    // rows must be T1 — prose and table must agree so page ↔ code ↔ prompt line up.
+    expect(step2).toMatch(/Money-adjacent[^\n]*sit at\s+T1/i);
     for (const domain of ['shopping_checkout', 'orders_notifications', 'order_management', 'payouts_statements']) {
-      const row = new RegExp(`\\|\\s*${domain}\\s*\\|[^\\n]*\\|\\s*T2\\s*\\|`);
-      expect(step2, `${domain} → T2`).toMatch(row);
+      const row = new RegExp(`\\|\\s*${domain}\\s*\\|[^\\n]*\\|\\s*T1\\s*\\|`);
+      expect(step2, `${domain} → T1`).toMatch(row);
     }
   });
 

@@ -1,4 +1,4 @@
-Version: 1
+Version: 2
 
 # Delivery Tier Classifier
 
@@ -13,17 +13,17 @@ The change is backend-only / infrastructure / CI / a data migration / logging / 
 Identify the ticket's functional domain — pick exactly one — and take its **base tier** from the table.
 
 - Backend (`porter_*`) domains sit at T1, not T2: QA validates through the UI only, so backend risk is engineering's Non-UI Lane gate (Step 1); their base applies only when a ticket in these domains still has a UI surface.
-- Money-adjacent customer surfaces (checkout, orders, order management, payouts / statements / quotes) sit at **T2**: a defect there can lose money or commit a customer irreversibly, so they verify before production by default. Step 3 still downgrades a purely cosmetic or behavior-preserving change on these surfaces the same as any other domain (a restyle of the checkout page is not a T2).
+- Money-adjacent domains (checkout, orders, quotes / payouts) also sit at T1: they become **T2 exactly when the change affects pricing / money** — that is Step 3's money trigger, matching the framework's "Orders, if there is a chance of money loss."
 
 | Domain | Covers | Base tier |
 | --- | --- | --- |
-| auth_accounts | login, signup, password, profiles, permissions | T2 |
-| inventory_materials | inventory, stock, parts, purchasing, locations | T2 |
+| auth_accounts | login, signup, password, permissions | T2 |
+| inventory_materials | inventory, purchasing | T2 |
 | production_workflow | jobs, manufacturing steps (the Jobs subsystem) | T2 |
-| shopping_checkout | cart, checkout, payments, tax, shipping, discounts | T2 |
-| orders_notifications | orders, confirmations, customer emails / SMS | T2 |
-| order_management | orders, refunds / returns, replacements (Factory OS) | T2 |
-| payouts_statements | statements, payouts, quotes | T2 |
+| shopping_checkout | cart, checkout, payments, tax, shipping, discounts | T1 |
+| orders_notifications | orders, confirmations, customer emails / SMS | T1 |
+| order_management | orders, refunds / returns, replacements (Factory OS) | T1 |
+| payouts_statements | statements, payouts, quotes | T1 |
 | made_order_management | orders (MadeOS) | T1 |
 | made_quoting_billing | quotes, estimates, invoices | T1 |
 | gift_cards | purchase / redeem gift cards | T1 |
@@ -65,7 +65,7 @@ The domain positions the ticket; the actual change decides:
 
 ## Step 4 — Uncertainty floor
 
-If you cannot confidently determine the domain or the risk answers, the tier is **at least T1** — never leave an uncertain ticket at T0. A ticket that is already T2 stays T2.
+If you cannot confidently determine the domain or the risk answers, the tier is **at T1** — never leave an uncertain ticket at T0. A ticket that is already T2 stays T2.
 
 ## Output
 

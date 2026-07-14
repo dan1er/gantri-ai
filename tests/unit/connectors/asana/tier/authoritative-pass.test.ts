@@ -20,7 +20,7 @@ const GID = '9999999999';
 const ASANA_LINK = `See https://app.asana.com/0/1111111111/${GID} for details.`;
 
 /** A `{ tier, domain, signals }` envelope that decides to a given tier (domain
- *  shopping_checkout, base T2). llmTier is set to the target so the calibration
+ *  shopping_checkout, base T1). llmTier is set to the target so the calibration
  *  cross-check never fires. */
 function factsFor(tier: DeliveryTier): Record<string, unknown> {
   const signals = {
@@ -34,7 +34,7 @@ function factsFor(tier: DeliveryTier): Record<string, unknown> {
     visual_blast_radius: { value: 'no', evidence: '' },
   };
   if (tier === 'T0') signals.cosmetic_only = { value: 'yes', evidence: 'label' };
-  if (tier === 'T1') signals.cosmetic_only = { value: 'no', evidence: '' }; // behaviour-preserving → min(T2,T1)
+  if (tier === 'T1') signals.cosmetic_only = { value: 'no', evidence: '' }; // behaviour-preserving → min(T1,T1)
   if (tier === 'T2') {
     signals.behavior_change = { value: 'yes', evidence: 'charges differently' };
     signals.money = { value: 'yes', evidence: 'charge amount' };

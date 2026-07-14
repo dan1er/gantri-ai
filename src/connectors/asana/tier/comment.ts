@@ -104,3 +104,35 @@ export function renderTierComment(decision: Decision, facts: Facts, promptVersio
   lines.push(`Rubric v${promptVersion} · ${RUBRIC_URL} · ${DISPUTE_LINE}`);
   return lines.join('\n');
 }
+
+/**
+ * Render the comment posted when a PR diff re-check RAISES a ticket's tier. The
+ * diff is the authoritative source, so the "Why" cites the diff-derived decision.
+ * Raise-only: this is never emitted for a lower or equal diff tier.
+ */
+export function renderTierRaiseComment(args: {
+  prNumber: number;
+  fromTier: DeliveryTier;
+  toTier: DeliveryTier;
+  decision: Decision;
+  facts: Facts;
+  promptVersion: number;
+}): string {
+  const { prNumber, fromTier, toTier, decision, facts, promptVersion } = args;
+  const lines: string[] = [];
+  lines.push(`🤖 Tier raised ${fromTier} → ${toTier} after PR #${prNumber} diff review.`);
+  lines.push(`Why: ${whyLine(decision)}`);
+
+  if (decision.evidenceFact && decision.firedRule !== 'inconclusive_lift') {
+    const evidence = facts[decision.evidenceFact].evidence.trim();
+    if (evidence) lines.push(`Evidence: "${evidence}"`);
+  }
+
+  if (decision.flags.length > 0) {
+    lines.push(`Flags: ${decision.flags.map((f) => FLAG_TEXT[f]).join(' ')}`);
+  }
+
+  lines.push(`Domain: ${DOMAIN_LABEL[facts.domain]}`);
+  lines.push(`Rubric v${promptVersion} · ${RUBRIC_URL} · ${DISPUTE_LINE}`);
+  return lines.join('\n');
+}

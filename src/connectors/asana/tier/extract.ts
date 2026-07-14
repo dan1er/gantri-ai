@@ -105,6 +105,39 @@ function buildUserContent(input: ExtractInput): string {
   ].join('\n');
 }
 
+/** The ticket text PLUS the real PR diff — the diff is the authoritative source
+ *  for a re-check, the ticket description is context only. */
+export interface ExtractDiffInput extends ExtractInput {
+  diff: string;
+  /** True when the diff was truncated to a size limit (classify conservatively). */
+  truncated: boolean;
+}
+
+function buildDiffUserContent(input: ExtractDiffInput): string {
+  const lines = [
+    'Re-classify this ticket using the actual PR DIFF as the AUTHORITATIVE source.',
+    'The diff is what the code really does; the ticket description is context only.',
+    'Judge each rubric fact by what the diff changes, not by what the ticket claims,',
+    'and return ONLY the JSON object.',
+  ];
+  if (input.truncated) {
+    lines.push(
+      'NOTE: the diff was truncated to a size limit — classify from what is shown and treat unseen changes conservatively.',
+    );
+  }
+  lines.push(
+    '',
+    `Type: ${input.typeName || '(none)'}`,
+    `Name: ${input.name}`,
+    'Ticket description (context):',
+    input.notes || '(none)',
+    '',
+    'PR diff (authoritative):',
+    input.diff,
+  );
+  return lines.join('\n');
+}
+
 /** Extract the outermost {...} object, tolerating code fences / stray prose. */
 function stripToJsonObject(raw: string): string | null {
   if (!raw) return null;
@@ -158,12 +191,11 @@ async function callModel(deps: ExtractDeps, userContent: string): Promise<string
 }
 
 /**
- * Extract the fact set for one ticket. Retries the parse ONCE on a malformed
- * response with a "JSON only" nudge, then throws `TierExtractError`.
+ * Run one extraction from a prepared user prompt. Retries the parse ONCE on a
+ * malformed response with a "JSON only" nudge, then throws `TierExtractError`.
+ * Shared by ticket-text extraction and PR-diff re-extraction.
  */
-export async function extractFacts(input: ExtractInput, deps: ExtractDeps): Promise<Facts> {
-  const userContent = buildUserContent(input);
-
+async function runExtraction(userContent: string, deps: ExtractDeps): Promise<Facts> {
   let raw = await callModel(deps, userContent);
   const first = tryParse(raw);
   if (first) return first;
@@ -177,4 +209,18 @@ Your previous response could not be parsed. Return ONLY the JSON object describe
   if (second) return second;
 
   throw new TierExtractError('delivery-tier facts could not be parsed after one retry', raw);
+}
+
+/** Extract the fact set for one ticket from its text (name + description + type). */
+export async function extractFacts(input: ExtractInput, deps: ExtractDeps): Promise<Facts> {
+  return runExtraction(buildUserContent(input), deps);
+}
+
+/**
+ * Re-extract the fact set from the real PR diff (the authoritative source per the
+ * framework). Same rubric prompt file, same JSON contract — only the user block
+ * changes to point the model at the diff instead of the ticket text.
+ */
+export async function extractFactsFromDiff(input: ExtractDiffInput, deps: ExtractDeps): Promise<Facts> {
+  return runExtraction(buildDiffUserContent(input), deps);
 }

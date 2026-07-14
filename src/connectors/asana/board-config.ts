@@ -66,6 +66,15 @@ export function optionGidToTier(optionGid: string | null | undefined): DeliveryT
   return null;
 }
 
+/** Ordering of the three tiers, low → high. Used by the PR re-check to decide
+ *  whether a diff-derived tier is strictly higher than the current one (raise). */
+export const TIER_RANK: Record<DeliveryTier, number> = { T0: 0, T1: 1, T2: 2 };
+
+/** True when tier `a` is strictly higher than tier `b` (T2 > T1 > T0). */
+export function isHigherTier(a: DeliveryTier, b: DeliveryTier): boolean {
+  return TIER_RANK[a] > TIER_RANK[b];
+}
+
 /** True when a Type option display name is excluded from tier classification. */
 export function isTierExcludedType(typeName: string | null | undefined): boolean {
   if (!typeName) return false;

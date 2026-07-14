@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   extractFacts,
+  extractFactsFromDiff,
   parseTierPromptVersion,
   tierInputHash,
   TierExtractError,
@@ -77,6 +78,32 @@ describe('extractFacts', () => {
     expect(params.temperature).toBe(0);
     expect(params.system[0].text).toBe(PROMPT);
     expect(params.system[0].cache_control).toEqual({ type: 'ephemeral' });
+  });
+});
+
+describe('extractFactsFromDiff', () => {
+  it('reuses the rubric prompt as the cached system block and puts the diff in the user turn', async () => {
+    const claude = claudeReturning(JSON.stringify(FULL_FACTS));
+    const facts = await extractFactsFromDiff(
+      { ...INPUT, diff: 'diff --git a/pay.ts b/pay.ts\n+chargeCustomer()', truncated: false },
+      { claude, prompt: PROMPT },
+    );
+    expect(facts.domain).toBe('shopping_checkout');
+    const params = claude.messages.create.mock.calls[0][0];
+    // Same public rubric file drives the extraction (cache-primed system block).
+    expect(params.system[0].text).toBe(PROMPT);
+    expect(params.system[0].cache_control).toEqual({ type: 'ephemeral' });
+    const userText = params.messages[0].content as string;
+    expect(userText).toContain('AUTHORITATIVE');
+    expect(userText).toContain('chargeCustomer()');
+    expect(userText).not.toContain('NOTE: the diff was truncated');
+  });
+
+  it('adds a conservative note when the diff was truncated', async () => {
+    const claude = claudeReturning(JSON.stringify(FULL_FACTS));
+    await extractFactsFromDiff({ ...INPUT, diff: 'partial diff', truncated: true }, { claude, prompt: PROMPT });
+    const userText = claude.messages.create.mock.calls[0][0].messages[0].content as string;
+    expect(userText).toContain('NOTE: the diff was truncated');
   });
 });
 

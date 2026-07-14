@@ -9,6 +9,7 @@ import {
   validateRubricBody,
   assemblePromptText,
   sha256,
+  fetchFailureSignature,
   type Rubric,
 } from '../../../../../src/connectors/asana/tier/rubric-source.js';
 
@@ -215,10 +216,66 @@ describe('RubricSource — refresh + adoption', () => {
     expect(src.getRubric()).toEqual(FALLBACK);
   });
 
+  it('posts ONE ops notice on a PERSISTENT fetch failure (404 = page not shared) and dedupes per tick', async () => {
+    // The page not being shared with the "FLC Reviewer" integration is a 404. Without
+    // an ops notice the whole live-rubric feature deploys silently inert: edits never
+    // recalibrate and no channel message says why. One notice per distinct signature,
+    // and never a boot-time post (init warms with notify:false so it can't touch an
+    // unwired Slack app).
+    const err = Object.assign(new Error('object_not_found'), { status: 404, name: 'NotionApiError' });
+    const notion = { getPageMarkdown: vi.fn().mockRejectedValue(err) };
+    const ops = fakeOps();
+    const src = makeSource({ notion, ops });
+    await src.init(); // warm fetch fails (notify:false) → no post at boot
+    expect(ops.post).not.toHaveBeenCalled();
+
+    await src.refresh(); // a real tick → one visible, actionable notice
+    expect(ops.post).toHaveBeenCalledTimes(1);
+    const msg = ops.post.mock.calls[0][0] as string;
+    expect(msg).toMatch(/could NOT be read/i);
+    expect(msg).toContain('notion-404');
+    expect(msg).toMatch(/FLC Reviewer/); // the one-click fix hint
+
+    await src.refresh(); // same failure → not re-posted every tick
+    expect(ops.post).toHaveBeenCalledTimes(1);
+    // Classification is never blocked by the outage.
+    expect(src.getRubric()).toEqual(FALLBACK);
+  });
+
+  it('does NOT consume the single ops notice when the post itself fails (Slack down / appRef unwired at boot)', async () => {
+    // reportInvalid must mark a failing hash reported ONLY after a confirmed delivery,
+    // or a boot-time post (appRef still undefined) / a transient Slack error would burn
+    // the one allowed notice and ops would never learn the page is broken.
+    const invalid = VALID_BODY.replace('## Step 4', '## Broken 4');
+    const notion = notionReturning(invalid);
+    const ops = { post: vi.fn().mockRejectedValueOnce(new Error('slack down')).mockResolvedValue(undefined) };
+    const src = makeSource({ notion, ops });
+    await src.init(); // warm fetch → reportInvalid → post throws → NOT marked reported
+    expect(ops.post).toHaveBeenCalledTimes(1);
+    expect(src.getRubric()).toEqual(FALLBACK);
+
+    await src.refresh(); // retried; this delivery succeeds → now marked reported
+    expect(ops.post).toHaveBeenCalledTimes(2);
+
+    await src.refresh(); // already delivered → no third attempt
+    expect(ops.post).toHaveBeenCalledTimes(2);
+  });
+
   it('fallback-only mode (no notion) is inert: refresh returns the current rubric', async () => {
     const src = makeSource();
     const r = await src.refresh();
     expect(r).toEqual(FALLBACK);
+  });
+});
+
+describe('fetchFailureSignature', () => {
+  it('keys on the HTTP status when present (stable per persistent 404/403)', () => {
+    expect(fetchFailureSignature(Object.assign(new Error('object_not_found'), { status: 404 }))).toBe('notion-404');
+    expect(fetchFailureSignature(Object.assign(new Error('unauthorized'), { status: 403 }))).toBe('notion-403');
+  });
+  it('falls back to the error name (then a generic key) when there is no status', () => {
+    expect(fetchFailureSignature(Object.assign(new Error('x'), { name: 'TimeoutError' }))).toBe('notion-TimeoutError');
+    expect(fetchFailureSignature('a bare string')).toBe('notion-error');
   });
 });
 

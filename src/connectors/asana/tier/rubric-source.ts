@@ -240,6 +240,9 @@ export class RubricSource {
   /** Failing-fetch hashes already reported, so we post ONE ops notice per distinct
    *  broken page revision instead of every tick. */
   private readonly reportedFailures = new Set<string>();
+  /** Fetch/access-failure signatures already reported (e.g. `notion-404`), so a
+   *  persistent unreadable page posts ONE ops notice instead of one per tick. */
+  private readonly reportedFetchFailures = new Set<string>();
 
   constructor(private readonly deps: RubricSourceDeps) {
     this.current = deps.fallback;
@@ -308,6 +311,12 @@ export class RubricSource {
         { err: err instanceof Error ? err.message : String(err) },
         'delivery_tier_rubric_fetch_failed',
       );
+      // A PERSISTENT fetch failure (most commonly a 404: the page was never shared
+      // with the "FLC Reviewer" integration) would otherwise deploy the whole live
+      // rubric feature silently inert — the poller keeps the fallback forever and no
+      // channel notice ever explains why an edit didn't recalibrate. Post one ops
+      // notice per distinct failure signature so it is visible and actionable.
+      if (notify) await this.reportFetchFailure(err);
       return this.current;
     }
 
@@ -355,19 +364,43 @@ export class RubricSource {
     };
   }
 
-  /** Log + post ONE ops notice per distinct failing page hash. */
+  /** Log + post ONE ops notice per distinct failing page hash. The hash is marked
+   *  reported ONLY after the ops post succeeds, so a Slack outage — or ops not yet
+   *  being wired at boot — never silently consumes the single allowed notice; a
+   *  later tick retries it. */
   private async reportInvalid(body: string, reason: string): Promise<void> {
     const failHash = sha256(body);
     logger.warn({ reason, hash: failHash.slice(0, 8) }, 'delivery_tier_rubric_rejected');
     if (this.reportedFailures.has(failHash)) return;
-    this.reportedFailures.add(failHash);
+    // Nothing to deliver without an ops channel — don't dedupe on a notice that can
+    // never be posted (a later tick with ops wired should still get its one shot).
+    if (!this.deps.ops) return;
     const text = `:warning: Delivery Tier rubric page REJECTED (kept last-known-good Version ${this.current.version}): ${reason}. Fix the Notion page — the bot is still classifying on the previous rubric.`;
-    if (this.deps.ops) {
-      try {
-        await this.deps.ops.post(text);
-      } catch (err) {
-        logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'delivery_tier_rubric_ops_notice_failed');
-      }
+    try {
+      await this.deps.ops.post(text);
+      this.reportedFailures.add(failHash); // only after a confirmed delivery
+    } catch (err) {
+      logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'delivery_tier_rubric_ops_notice_failed');
+    }
+  }
+
+  /** Log + post ONE ops notice per distinct fetch/access-failure signature. Marked
+   *  reported only after a successful post (same discipline as `reportInvalid`), so a
+   *  transient Slack failure never consumes the single allowed notice. */
+  private async reportFetchFailure(err: unknown): Promise<void> {
+    const sig = fetchFailureSignature(err);
+    if (this.reportedFetchFailures.has(sig)) return;
+    if (!this.deps.ops) return;
+    const is404 = sig.endsWith('404');
+    const hint = is404
+      ? ' This is almost always the page not being shared with the "FLC Reviewer" integration — share it (one click) to re-enable live recalibration.'
+      : '';
+    const text = `:warning: Delivery Tier rubric page could NOT be read from Notion (${sig}). The bot is still classifying on the last-known-good Version ${this.current.version}, and editing the page will NOT recalibrate it until this is fixed.${hint}`;
+    try {
+      await this.deps.ops.post(text);
+      this.reportedFetchFailures.add(sig); // only after a confirmed delivery
+    } catch (postErr) {
+      logger.warn({ err: postErr instanceof Error ? postErr.message : String(postErr) }, 'delivery_tier_rubric_ops_notice_failed');
     }
   }
 
@@ -388,6 +421,20 @@ export class RubricSource {
       }
     }
   }
+}
+
+/**
+ * A stable dedupe key for a fetch/access failure. Keyed on the error's HTTP status
+ * (NotionApiError carries `.status`) or its class name — NOT the full message, which
+ * can vary per request (request ids), so a persistent 404/403 posts exactly one ops
+ * notice, not one per tick.
+ */
+export function fetchFailureSignature(err: unknown): string {
+  const e = err as { status?: unknown; name?: unknown } | null;
+  const status = e && typeof e.status === 'number' ? e.status : undefined;
+  if (status !== undefined) return `notion-${status}`;
+  const name = e && typeof e.name === 'string' && e.name ? e.name : 'error';
+  return `notion-${name}`;
 }
 
 /** Human-readable list of domains whose base tier changed between two maps. */

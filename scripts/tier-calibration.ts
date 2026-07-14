@@ -11,9 +11,17 @@
  *
  * Run: `npx tsx scripts/tier-calibration.ts`
  *
+ * Flags:
+ *   --tasks <file>   classify EXACTLY the task gids listed in <file> (one gid per
+ *                    line, blank lines and `#` comments ignored), in file order,
+ *                    instead of scanning + diversity-sampling the board. Use this to
+ *                    re-run against the identical ticket set from a prior run.
+ *   --label <name>   suffix the output basenames (`…-<name>.md/.json`) so a re-run
+ *                    does not clobber a prior golden set.
+ *
  * Outputs (to the scratchpad dir, NOT committed):
- *   - tier-calibration-results.md   summary + human-readable table
- *   - tier-calibration-results.json machine-readable facts per ticket (golden set)
+ *   - tier-calibration-results[-<label>].md   summary + human-readable table
+ *   - tier-calibration-results[-<label>].json machine-readable facts per ticket
  */
 
 import fs from 'node:fs';
@@ -80,8 +88,28 @@ const EVIDENCE_MAX = 80;
 const OUT_DIR =
   process.env.TIER_CALIB_OUT_DIR ??
   '/private/tmp/claude-501/-Users-danierestevez-Documents-work-gantri/b3660c2b-e86f-4c83-8a36-77fd2ee47cf9/scratchpad';
-const OUT_MD = path.join(OUT_DIR, 'tier-calibration-results.md');
-const OUT_JSON = path.join(OUT_DIR, 'tier-calibration-results.json');
+
+/** Minimal CLI parse: `--tasks <file>` fixes the ticket set; `--label <name>`
+ *  suffixes the output basenames so a re-run does not clobber a prior golden set. */
+function parseArgs(argv: string[]): { tasksFile: string | null; label: string } {
+  let tasksFile: string | null = null;
+  let label = '';
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--tasks') tasksFile = argv[++i] ?? null;
+    else if (argv[i] === '--label') label = argv[++i] ?? '';
+  }
+  return { tasksFile, label };
+}
+
+/** Read a `--tasks` file into an ordered list of task gids (blank lines and `#`
+ *  comments ignored). Preserves order so the re-run keeps the prior indices. */
+function readTaskGids(file: string): string[] {
+  return fs
+    .readFileSync(file, 'utf8')
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0 && !l.startsWith('#'));
+}
 
 /** opt_fields required to gate + classify a task and read its section/type. */
 const OPT_FIELDS = [
@@ -305,6 +333,11 @@ interface StabilityResult {
 // --- Main ----------------------------------------------------------------------
 
 async function main(): Promise<void> {
+  const { tasksFile, label } = parseArgs(process.argv.slice(2));
+  const suffix = label ? `-${label}` : '';
+  const outMd = path.join(OUT_DIR, `tier-calibration-results${suffix}.md`);
+  const outJson = path.join(OUT_DIR, `tier-calibration-results${suffix}.json`);
+
   const supabaseUrl = process.env.SUPABASE_URL;
   const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
@@ -331,27 +364,49 @@ async function main(): Promise<void> {
   const deps: ExtractDeps = { claude, prompt };
   console.log(`[calib] rubric version ${rubricVersion} loaded`);
 
-  // 1. Full-history board scan (unbounded), then the candidate gate.
-  const tasks = await asana.getProjectTasksUnbounded(SOFTWARE_BOARD_PROJECT_GID, OPT_FIELDS);
-  console.log(`[calib] scanned ${tasks.length} board tasks`);
+  // 1. Build the sample. Either replay a fixed gid list (`--tasks`, identical set
+  //    across runs) or run the full-history board scan + diversity sample.
+  let tasksScanned: number;
+  let candidateCount: number;
+  let sample: Candidate[];
 
-  const cutoffMs = Date.now() - WINDOW_DAYS * 24 * 60 * 60 * 1000;
-  const candidates: Candidate[] = tasks
-    .filter((t) => {
-      if (isFeatureTemplateTask(t)) return false; // exclude the template artifact
-      const createdMs = t.created_at ? Date.parse(t.created_at) : Number.NEGATIVE_INFINITY;
-      if (!(createdMs >= cutoffMs)) return false; // last ~60 days
-      if ((t.notes ?? '').trim().length < MIN_NOTES_CHARS) return false; // substantive
-      if (isTierExcludedType(typeName(t))) return false; // Not a Bug / Qa Work / Research
-      return true; // completed AND incomplete both kept
-    })
-    // Deterministic order for a reproducible sample.
-    .sort((a, b) => a.gid.localeCompare(b.gid))
-    .map((t) => ({ task: t, typeName: typeName(t) || '(none)', section: sectionName(t) }));
+  if (tasksFile) {
+    const gids = readTaskGids(tasksFile);
+    console.log(`[calib] fixed task set: ${gids.length} gids from ${tasksFile}`);
+    // Fetch each task by gid with the same opt_fields, preserving file order so the
+    // per-ticket indices line up with the prior run. Read-only GETs.
+    const fetched = await mapWithConcurrency(gids, CLASSIFY_CONCURRENCY, (gid) =>
+      asana.getTask(gid, OPT_FIELDS),
+    );
+    sample = fetched.map((t) => ({ task: t, typeName: typeName(t) || '(none)', section: sectionName(t) }));
+    tasksScanned = fetched.length;
+    candidateCount = gids.length;
+    console.log(`[calib] fetched ${sample.length} tickets by gid (no board scan / sampling)`);
+  } else {
+    // Full-history board scan (unbounded), then the candidate gate.
+    const tasks = await asana.getProjectTasksUnbounded(SOFTWARE_BOARD_PROJECT_GID, OPT_FIELDS);
+    console.log(`[calib] scanned ${tasks.length} board tasks`);
 
-  console.log(`[calib] ${candidates.length} candidates in the last ${WINDOW_DAYS} days`);
-  const sample = diverseSample(candidates, SAMPLE_SIZE);
-  console.log(`[calib] sampled ${sample.length} tickets across types/sections`);
+    const cutoffMs = Date.now() - WINDOW_DAYS * 24 * 60 * 60 * 1000;
+    const candidates: Candidate[] = tasks
+      .filter((t) => {
+        if (isFeatureTemplateTask(t)) return false; // exclude the template artifact
+        const createdMs = t.created_at ? Date.parse(t.created_at) : Number.NEGATIVE_INFINITY;
+        if (!(createdMs >= cutoffMs)) return false; // last ~60 days
+        if ((t.notes ?? '').trim().length < MIN_NOTES_CHARS) return false; // substantive
+        if (isTierExcludedType(typeName(t))) return false; // Not a Bug / Qa Work / Research
+        return true; // completed AND incomplete both kept
+      })
+      // Deterministic order for a reproducible sample.
+      .sort((a, b) => a.gid.localeCompare(b.gid))
+      .map((t) => ({ task: t, typeName: typeName(t) || '(none)', section: sectionName(t) }));
+
+    console.log(`[calib] ${candidates.length} candidates in the last ${WINDOW_DAYS} days`);
+    sample = diverseSample(candidates, SAMPLE_SIZE);
+    tasksScanned = tasks.length;
+    candidateCount = candidates.length;
+    console.log(`[calib] sampled ${sample.length} tickets across types/sections`);
+  }
 
   const typeSpread = tally(sample.map((c) => c.typeName));
   const sectionSpread = tally(sample.map((c) => c.section));
@@ -457,10 +512,10 @@ async function main(): Promise<void> {
 
   // 5. Emit markdown + JSON.
   fs.mkdirSync(OUT_DIR, { recursive: true });
-  fs.writeFileSync(OUT_MD, renderMarkdown({
+  fs.writeFileSync(outMd, renderMarkdown({
     rubricVersion,
-    scanned: tasks.length,
-    candidateCount: candidates.length,
+    scanned: tasksScanned,
+    candidateCount,
     sampleSize: sample.length,
     tierDist,
     mismatchCount,
@@ -471,12 +526,12 @@ async function main(): Promise<void> {
     results,
     stability,
   }));
-  fs.writeFileSync(OUT_JSON, JSON.stringify({
+  fs.writeFileSync(outJson, JSON.stringify({
     generatedAt: new Date().toISOString(),
     rubricVersion,
     windowDays: WINDOW_DAYS,
-    scanned: tasks.length,
-    candidateCount: candidates.length,
+    scanned: tasksScanned,
+    candidateCount,
     sampleSize: sample.length,
     summary: { tierDist, mismatchCount, unclearLiftCount, stabilityVerdict },
     typeSpread,
@@ -488,8 +543,8 @@ async function main(): Promise<void> {
   console.log(`\n[calib] tier distribution: T0=${tierDist.T0} T1=${tierDist.T1} T2=${tierDist.T2} ERROR=${tierDist.ERROR}`);
   console.log(`[calib] calibration mismatches: ${mismatchCount} | uncertainty-floor lifts: ${unclearLiftCount}`);
   console.log(`[calib] stability: ${stabilityVerdict}`);
-  console.log(`[calib] wrote ${OUT_MD}`);
-  console.log(`[calib] wrote ${OUT_JSON}`);
+  console.log(`[calib] wrote ${outMd}`);
+  console.log(`[calib] wrote ${outJson}`);
 }
 
 /** Count occurrences of each value, insertion-ordered. */

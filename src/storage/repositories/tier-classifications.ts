@@ -21,6 +21,12 @@ export interface TierClassificationRecord {
    *  field below this. Null when the ticket was never raised from a diff. */
   diffFloorTier: DeliveryTier | null;
   liftedByUnclear: boolean;
+  /** True when the LLM's own tier disagreed with the code-computed tier (floored
+   *  to T1). Counted in the Monday report. */
+  calibrationMismatch: boolean;
+  /** Which pass wrote this row: 'provisional' (poller, from the description) or
+   *  'authoritative' (Code-Review pass, from the PR diff / mature description). */
+  stage: 'provisional' | 'authoritative';
   flags: FlagKey[];
   domain: string | null;
   decidedBy: 'bot' | 'human_override';
@@ -41,6 +47,8 @@ function rowFromDb(r: Record<string, any>): TierClassificationRecord {
     confirmedTier: (r.confirmed_tier as DeliveryTier | null) ?? null,
     diffFloorTier: (r.diff_floor_tier as DeliveryTier | null) ?? null,
     liftedByUnclear: !!r.lifted_by_unclear,
+    calibrationMismatch: !!r.calibration_mismatch,
+    stage: (r.stage as 'provisional' | 'authoritative' | null) ?? 'provisional',
     flags: (r.flags ?? []) as FlagKey[],
     domain: (r.domain as string | null) ?? null,
     decidedBy: r.decided_by as 'bot' | 'human_override',
@@ -65,6 +73,9 @@ export interface TierUpsert {
    *  previous value forward on ordinary re-writes; set it on a diff-based raise. */
   diffFloorTier: DeliveryTier | null;
   liftedByUnclear: boolean;
+  calibrationMismatch: boolean;
+  /** Which pass is writing: 'provisional' (poller) or 'authoritative' (Code Review). */
+  stage: 'provisional' | 'authoritative';
   flags: FlagKey[];
   domain: string | null;
   commentGid: string | null;
@@ -95,6 +106,8 @@ export class TierClassificationsRepo {
         confirmed_tier: rec.confirmedTier,
         diff_floor_tier: rec.diffFloorTier,
         lifted_by_unclear: rec.liftedByUnclear,
+        calibration_mismatch: rec.calibrationMismatch,
+        stage: rec.stage,
         flags: rec.flags,
         domain: rec.domain,
         decided_by: 'bot',

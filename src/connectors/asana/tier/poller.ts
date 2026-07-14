@@ -6,6 +6,7 @@ import {
   TIER_RANK,
   TYPE_FIELD_GID,
   isFeatureTemplateTask,
+  isInCodeReview,
   isTierExcludedType,
   optionGidToTier,
   tierToOptionGid,
@@ -14,6 +15,7 @@ import type { DeliveryTier } from '../board-config.js';
 import { extractFacts, tierInputHash, type ExtractDeps } from './extract.js';
 import { decideTier } from './decide.js';
 import { renderTierComment } from './comment.js';
+import type { AuthoritativePass, AuthoritativeResult } from './authoritative-pass.js';
 import { logger } from '../../../logger.js';
 
 /**
@@ -35,6 +37,9 @@ const OPT_FIELDS_TASK = [
   'custom_fields.name',
   'custom_fields.enum_value.gid',
   'custom_fields.enum_value.name',
+  // Section membership drives the Code-Review authoritative pass.
+  'memberships.section.gid',
+  'memberships.section.name',
 ].join(',');
 
 /** Minimum description length to attempt a classification (thin tickets are noise). */
@@ -51,6 +56,10 @@ export interface TierPollerDeps {
   promptVersion: number;
   /** Only classify tasks created at or after this instant (no backfill spam). */
   rolloutDateMs: number;
+  /** The Code-Review authoritative pass. When present, tasks that have entered
+   *  the Code Review section on this scan are re-classified from their PR diff.
+   *  Optional (disabled when there is no GitHub token). */
+  authoritative?: AuthoritativePass;
 }
 
 export interface TierPollResult {
@@ -61,6 +70,8 @@ export interface TierPollResult {
   overrides: number;
   skipped: number;
   failed: number;
+  /** Outcome of the Code-Review authoritative pass this tick (null when disabled). */
+  authoritative: AuthoritativeResult | null;
 }
 
 /** Read the enum option gid of a task's Delivery Tier field, or null if empty. */
@@ -99,6 +110,7 @@ export class TierPoller {
       overrides: 0,
       skipped: 0,
       failed: 0,
+      authoritative: null,
     };
 
     await mapWithConcurrency(candidates, CLASSIFY_CONCURRENCY, async (task) => {
@@ -133,6 +145,22 @@ export class TierPoller {
         logger.warn(
           { taskGid: task.gid, err: err instanceof Error ? err.message : String(err) },
           'delivery_tier_override_sweep_failed',
+        );
+      }
+    }
+
+    // Authoritative pass: tasks now sitting in Code Review get re-classified from
+    // their PR diff, confirming or superseding the provisional tier. Driven off the
+    // board scan we already have (no extra board read). Isolated so a failure here
+    // never fails the poll.
+    if (this.deps.authoritative) {
+      const inCodeReview = tasks.filter((t) => !t.completed && isInCodeReview(t));
+      try {
+        result.authoritative = await this.deps.authoritative.reviewCodeReviewTasks(inCodeReview);
+      } catch (err) {
+        logger.warn(
+          { err: err instanceof Error ? err.message : String(err) },
+          'delivery_tier_authoritative_pass_failed',
         );
       }
     }
@@ -173,8 +201,10 @@ export class TierPoller {
 
       if (currentGid === targetGid) {
         // Field matches the bot's latest decision. Finalize the confirmed tier if a
-        // previous field write landed but its follow-up persist didn't (crash).
-        if (record.confirmedTier !== record.tier) {
+        // previous field write landed but its follow-up persist didn't (crash), OR
+        // backfill the rubric comment if the field write landed but `createStory`
+        // failed (the v1 residual: a tier with no explanation).
+        if (record.confirmedTier !== record.tier || !record.commentGid) {
           await this.finalizeConfirmed(record);
         }
         // Re-classify only if the description changed materially (hash differs).
@@ -247,6 +277,8 @@ export class TierPoller {
         confirmedTier: prev.confirmedTier,
         diffFloorTier: floorTier,
         liftedByUnclear: prev.liftedByUnclear,
+        calibrationMismatch: prev.calibrationMismatch,
+        stage: prev.stage,
         flags: prev.flags,
         domain: prev.domain,
         commentGid: prev.commentGid,
@@ -259,7 +291,8 @@ export class TierPoller {
     }
 
     // Phase 1 — record the decision before touching the field. `confirmedTier`
-    // stays at the previously confirmed tier so a crash here is recoverable.
+    // stays at the previously confirmed tier so a crash here is recoverable. This
+    // is the PROVISIONAL pass — the Code-Review pass confirms it from the diff later.
     await this.deps.repo.upsertBot({
       taskGid: task.gid,
       inputHash: hash,
@@ -269,6 +302,8 @@ export class TierPoller {
       confirmedTier: prevConfirmed,
       diffFloorTier: floorTier,
       liftedByUnclear: decision.liftedByUnclear,
+      calibrationMismatch: decision.calibrationMismatch,
+      stage: 'provisional',
       flags: decision.flags,
       domain: facts.domain,
       commentGid: prev?.commentGid ?? null,
@@ -286,7 +321,7 @@ export class TierPoller {
       DELIVERY_TIER_FIELD_GID,
       tierToOptionGid(decision.tier),
     );
-    const commentText = renderTierComment(decision, facts, this.deps.promptVersion);
+    const commentText = renderTierComment(decision, facts, this.deps.promptVersion, { provisional: true });
     const story = await this.deps.client.createStory(task.gid, commentText);
     await this.deps.repo.upsertBot({
       taskGid: task.gid,
@@ -297,6 +332,8 @@ export class TierPoller {
       confirmedTier: decision.tier,
       diffFloorTier: floorTier,
       liftedByUnclear: decision.liftedByUnclear,
+      calibrationMismatch: decision.calibrationMismatch,
+      stage: 'provisional',
       flags: decision.flags,
       domain: facts.domain,
       commentGid: story?.gid ?? null,
@@ -334,6 +371,8 @@ export class TierPoller {
       confirmedTier: record.tier,
       diffFloorTier: record.diffFloorTier,
       liftedByUnclear: record.liftedByUnclear,
+      calibrationMismatch: record.calibrationMismatch,
+      stage: record.stage,
       flags: record.flags,
       domain: record.domain,
       commentGid,
@@ -342,8 +381,22 @@ export class TierPoller {
   }
 
   /** Persist `confirmedTier = tier` for a record whose field write landed but whose
-   *  follow-up persist did not (no field write, no LLM). */
+   *  follow-up persist did not (crash between the field write and the persist).
+   *  Also BACKFILLS the rubric comment when the field write landed but the
+   *  `createStory` call failed (the v1 residual): a confirmed tier with no
+   *  `commentGid` means the ticket carries a tier but no explanation, so post it. */
   private async finalizeConfirmed(record: TierClassificationRecord): Promise<void> {
+    let commentGid = record.commentGid;
+    if (!commentGid) {
+      const decision = decideTier(record.facts);
+      const story = await this.deps.client.createStory(
+        record.taskGid,
+        renderTierComment(decision, record.facts, record.promptVersion, {
+          provisional: record.stage === 'provisional',
+        }),
+      );
+      commentGid = story?.gid ?? null;
+    }
     await this.deps.repo.upsertBot({
       taskGid: record.taskGid,
       inputHash: record.inputHash,
@@ -353,9 +406,11 @@ export class TierPoller {
       confirmedTier: record.tier,
       diffFloorTier: record.diffFloorTier,
       liftedByUnclear: record.liftedByUnclear,
+      calibrationMismatch: record.calibrationMismatch,
+      stage: record.stage,
       flags: record.flags,
       domain: record.domain,
-      commentGid: record.commentGid,
+      commentGid,
     });
   }
 

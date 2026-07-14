@@ -118,6 +118,20 @@ export const SECTION_GIDS = {
 
 export type SectionName = keyof typeof SECTION_GIDS;
 
+/** The board section that gates the QA handoff. When a task lands here the
+ *  delivery-tier classifier runs its authoritative pass: it re-classifies from
+ *  the real PR diff and confirms or supersedes the provisional tier. */
+export const CODE_REVIEW_SECTION_GID = SECTION_GIDS['Code Review'];
+
+/** True when a task currently sits in the board's Code Review section. Reads
+ *  `memberships.section.gid` in the SOFTWARE_BOARD project only (a task can also
+ *  live on other boards). */
+export function isInCodeReview(task: {
+  memberships?: { project?: { gid?: string } | null; section?: { gid?: string } | null }[];
+}): boolean {
+  return (task.memberships ?? []).some((m) => m.section?.gid === CODE_REVIEW_SECTION_GID);
+}
+
 /** The two sections that represent an active QA stage. A section move whose
  *  `from` OR `to` is one of these is a "QA-stage event". */
 export const QA_STAGE_SECTIONS: readonly string[] = ['QA Review', 'Post Release QA'];

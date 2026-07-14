@@ -53,7 +53,7 @@ import { loadTierStandard, parseTierPromptVersion } from './connectors/asana/tie
 import { TierPoller } from './connectors/asana/tier/poller.js';
 import { WeeklyTierReporter } from './connectors/asana/tier/weekly-report.js';
 import { TierRunner } from './connectors/asana/tier/tier-runner.js';
-import { PrRecheck, PrRecheckRunner } from './connectors/asana/tier/pr-recheck.js';
+import { AuthoritativePass } from './connectors/asana/tier/authoritative-pass.js';
 import { TierClassificationsRepo } from './storage/repositories/tier-classifications.js';
 import { TierWeeklyReportsRepo } from './storage/repositories/tier-weekly-reports.js';
 import { TierPrChecksRepo } from './storage/repositories/tier-pr-checks.js';
@@ -716,7 +716,6 @@ async function main() {
   // idempotent Monday report. `POST /internal/run-tier-poll` forces a tick for
   // smoke tests and manual runs.
   let tierRunner: TierRunner | undefined;
-  let prRecheckRunner: PrRecheckRunner | undefined;
   if (asanaClient && tierPrompt && tierPromptVersion !== undefined) {
     const rolloutDateMs = Date.parse(env.ROLLOUT_DATE);
     if (Number.isNaN(rolloutDateMs)) {
@@ -724,12 +723,34 @@ async function main() {
     }
     const tierClassificationsRepo = new TierClassificationsRepo(supabase);
     const tierWeeklyRepo = new TierWeeklyReportsRepo(supabase);
+    const tierPrChecksRepo = new TierPrChecksRepo(supabase);
+
+    // Code-Review authoritative pass. Needs a GitHub client to read PR diffs; reuse
+    // the devops dispatcher when it exists, otherwise build one from the token
+    // alone. Disabled (provisional-only classification) when there is no token.
+    const tierGh =
+      gh ?? (githubToken ? new GithubDispatcher({ token: githubToken, owner: env.GITHUB_OWNER }) : null);
+    const authoritative = tierGh
+      ? new AuthoritativePass({
+          gh: tierGh,
+          client: asanaClient,
+          classifications: tierClassificationsRepo,
+          prChecks: tierPrChecksRepo,
+          extract: { claude, prompt: tierPrompt },
+          promptVersion: tierPromptVersion,
+        })
+      : undefined;
+    if (!authoritative) {
+      logger.warn('delivery tier Code-Review authoritative pass disabled — no GITHUB_TOKEN configured');
+    }
+
     const tierPoller = new TierPoller({
       client: asanaClient,
       repo: tierClassificationsRepo,
       extract: { claude, prompt: tierPrompt },
       promptVersion: tierPromptVersion,
       rolloutDateMs,
+      authoritative,
     });
     // Resolve Danny's Slack id from the authorized_users table (by either known
     // email), falling back to the env override.
@@ -748,6 +769,7 @@ async function main() {
     const tierReporter = new WeeklyTierReporter({
       classifications: tierClassificationsRepo,
       weeklyRepo: tierWeeklyRepo,
+      prChecks: tierPrChecksRepo,
       client: asanaClient,
       slack: app.client,
       resolveDannySlackId,
@@ -755,6 +777,10 @@ async function main() {
     });
     tierRunner = new TierRunner({ poller: tierPoller, reporter: tierReporter });
 
+    // Forces a poll tick (provisional classification + the Code-Review
+    // authoritative pass, which is now folded into the poll) for smoke tests and
+    // manual runs. The former standalone `/internal/run-pr-recheck` sweep is gone:
+    // PR lookup is driven by tickets entering Code Review, inside this same tick.
     receiver.router.post('/internal/run-tier-poll', async (req, res) => {
       const auth = req.header('x-internal-secret');
       if (!process.env.INTERNAL_SHARED_SECRET || auth !== process.env.INTERNAL_SHARED_SECRET) {
@@ -763,33 +789,6 @@ async function main() {
       const result = await tierRunner!.tick();
       res.json({ ok: true, result });
     });
-
-    // v2 — PR re-check. Needs a GitHub client. Reuse the devops dispatcher when it
-    // exists; otherwise build one from the token alone (the re-check does not need
-    // an ops channel). Skipped entirely when there is no GitHub token.
-    const tierGh =
-      gh ?? (githubToken ? new GithubDispatcher({ token: githubToken, owner: env.GITHUB_OWNER }) : null);
-    if (tierGh) {
-      const prRecheck = new PrRecheck({
-        gh: tierGh,
-        client: asanaClient,
-        classifications: tierClassificationsRepo,
-        prChecks: new TierPrChecksRepo(supabase),
-        extract: { claude, prompt: tierPrompt },
-        promptVersion: tierPromptVersion,
-      });
-      prRecheckRunner = new PrRecheckRunner(prRecheck);
-      receiver.router.post('/internal/run-pr-recheck', async (req, res) => {
-        const auth = req.header('x-internal-secret');
-        if (!process.env.INTERNAL_SHARED_SECRET || auth !== process.env.INTERNAL_SHARED_SECRET) {
-          return res.status(403).json({ ok: false, error: 'forbidden' });
-        }
-        const result = await prRecheckRunner!.tick();
-        res.json({ ok: true, result });
-      });
-    } else {
-      logger.warn('delivery tier PR re-check disabled — no GITHUB_TOKEN configured');
-    }
   }
 
   // POST /internal/recompile-report — admin-only endpoint to recompile a report spec.
@@ -838,11 +837,6 @@ async function main() {
   if (tierRunner) {
     tierRunner.start();
     logger.info('delivery tier runner started');
-  }
-
-  if (prRecheckRunner) {
-    prRecheckRunner.start();
-    logger.info('delivery tier PR re-check runner started');
   }
 
   if (devopsEnabled && gh) {

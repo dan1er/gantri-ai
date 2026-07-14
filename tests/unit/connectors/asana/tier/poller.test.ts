@@ -3,11 +3,13 @@ import { TierPoller } from '../../../../../src/connectors/asana/tier/poller.js';
 import type { AsanaApiClient, AsanaTask } from '../../../../../src/connectors/asana/client.js';
 import type { TierClassificationsRepo, TierClassificationRecord } from '../../../../../src/storage/repositories/tier-classifications.js';
 import {
+  CODE_REVIEW_SECTION_GID,
   DELIVERY_TIER_FIELD_GID,
   TYPE_FIELD_GID,
   tierToOptionGid,
 } from '../../../../../src/connectors/asana/board-config.js';
 import { tierInputHash } from '../../../../../src/connectors/asana/tier/extract.js';
+import type { AuthoritativePass } from '../../../../../src/connectors/asana/tier/authoritative-pass.js';
 
 const PROMPT = 'Version: 1\n\nrubric';
 const PROMPT_VERSION = 1;
@@ -46,6 +48,8 @@ interface TaskOpts {
   completed?: boolean;
   typeName?: string;
   tierOptionGid?: string | null;
+  /** Put the task in the board's Code Review section (drives the authoritative pass). */
+  inCodeReview?: boolean;
 }
 
 function task(o: TaskOpts): AsanaTask {
@@ -64,6 +68,7 @@ function task(o: TaskOpts): AsanaTask {
     created_at: o.createdAt ?? '2026-07-20T00:00:00Z',
     notes: o.notes ?? 'x'.repeat(60),
     custom_fields: cf,
+    memberships: o.inCodeReview ? [{ section: { gid: CODE_REVIEW_SECTION_GID, name: 'Code Review' } }] : [],
   };
 }
 
@@ -74,6 +79,7 @@ function buildPoller(
   tasks: AsanaTask[],
   repo: Partial<TierClassificationsRepo>,
   freshByGid?: Record<string, AsanaTask>,
+  authoritative?: AuthoritativePass,
 ) {
   const client = {
     getProjectTasksUnbounded: vi.fn().mockResolvedValue(tasks),
@@ -97,6 +103,7 @@ function buildPoller(
     extract: { claude, prompt: PROMPT },
     promptVersion: PROMPT_VERSION,
     rolloutDateMs: ROLLOUT_MS,
+    authoritative,
   });
   return { poller, client, repo: fullRepo, claude };
 }
@@ -112,11 +119,15 @@ describe('TierPoller.runOnce — candidate gating', () => {
     // comment gid and the confirmed tier.
     const upserts = (repo.upsertBot as ReturnType<typeof vi.fn>).mock.calls;
     expect(upserts.length).toBe(2);
-    expect(upserts[0][0]).toMatchObject({ tier: 'T0', confirmedTier: null, commentGid: null });
+    // The poller writes the PROVISIONAL pass.
+    expect(upserts[0][0]).toMatchObject({ tier: 'T0', confirmedTier: null, commentGid: null, stage: 'provisional' });
     const final = upserts[upserts.length - 1][0];
     expect(final.tier).toBe('T0');
     expect(final.confirmedTier).toBe('T0');
     expect(final.commentGid).toBe('story-1');
+    expect(final.stage).toBe('provisional');
+    // The comment carries the provisional note.
+    expect((client.createStory as ReturnType<typeof vi.fn>).mock.calls[0][1]).toContain('Provisional — will be confirmed');
   });
 
   it('excludes tasks created before ROLLOUT_DATE, thin descriptions, completed tasks, and excluded Types', async () => {
@@ -203,7 +214,7 @@ describe('TierPoller.runOnce — human overrides & idempotency', () => {
   it('is idempotent: a bot task whose notes hash is unchanged is skipped (no re-classify)', async () => {
     const t = task({ gid: 'i1', tierOptionGid: tierToOptionGid('T0') });
     const hash = tierInputHash(PROMPT_VERSION, { name: t.name, notes: t.notes!, typeName: 'Feature' });
-    const record: Partial<TierClassificationRecord> = { taskGid: 'i1', tier: 'T0', confirmedTier: 'T0', decidedBy: 'bot', inputHash: hash };
+    const record: Partial<TierClassificationRecord> = { taskGid: 'i1', tier: 'T0', confirmedTier: 'T0', decidedBy: 'bot', inputHash: hash, commentGid: 'story-existing' };
     const { poller, client } = buildPoller([t], { get: vi.fn().mockResolvedValue(record) });
     const res = await poller.runOnce();
     expect(res.skipped).toBe(1);
@@ -219,6 +230,7 @@ describe('TierPoller.runOnce — human overrides & idempotency', () => {
       confirmedTier: 'T0',
       decidedBy: 'bot',
       inputHash: 'stale-hash-from-old-notes',
+      commentGid: 'story-old',
     };
     const { poller, client, repo } = buildPoller([t], { get: vi.fn().mockResolvedValue(record) });
     const res = await poller.runOnce();
@@ -330,6 +342,8 @@ describe('TierPoller.runOnce — override sweep over non-candidates', () => {
       confirmedTier: 'T1',
       diffFloorTier: null,
       liftedByUnclear: false,
+      calibrationMismatch: false,
+      stage: 'provisional',
       flags: [],
       domain: 'shopping_checkout',
       decidedBy: 'bot',
@@ -360,11 +374,13 @@ describe('TierPoller.runOnce — override sweep over non-candidates', () => {
       confirmedTier: 'T1',
       diffFloorTier: null,
       liftedByUnclear: false,
+      calibrationMismatch: false,
+      stage: 'provisional',
       flags: [],
       domain: 'shopping_checkout',
       decidedBy: 'bot',
       humanTier: null,
-      commentGid: null,
+      commentGid: 'story-x',
       createdAt: '2026-07-20T00:00:00Z',
       updatedAt: '2026-07-20T00:00:00Z',
     };
@@ -375,5 +391,67 @@ describe('TierPoller.runOnce — override sweep over non-candidates', () => {
     const res = await poller.runOnce();
     expect(res.overrides).toBe(0);
     expect(repo.markOverride).not.toHaveBeenCalled();
+  });
+});
+
+describe('TierPoller.runOnce — finalizeConfirmed backfills a missing comment', () => {
+  it('posts the rubric comment when the field write landed but createStory had failed', async () => {
+    // The field already holds the bot's decided tier (T0) but the record has no
+    // commentGid: the previous tick's createStory failed after the field write. The
+    // poller must backfill the comment (no LLM re-classify) and finalize.
+    const t = task({ gid: 'bf1', tierOptionGid: tierToOptionGid('T0') });
+    const hash = tierInputHash(PROMPT_VERSION, { name: t.name, notes: t.notes!, typeName: 'Feature' });
+    const record: Partial<TierClassificationRecord> = {
+      taskGid: 'bf1',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      facts: JSON.parse(JSON.stringify(T0_FACTS.signals)) as any,
+      tier: 'T0',
+      confirmedTier: 'T0',
+      decidedBy: 'bot',
+      stage: 'provisional',
+      inputHash: hash,
+      commentGid: null,
+      promptVersion: PROMPT_VERSION,
+    };
+    // The record's facts have no `domain`/`llmTier`; decideTier tolerates the missing
+    // domain via the base-table lookup returning undefined → treat as unknown at render.
+    (record.facts as Record<string, unknown>).domain = 'content_marketing';
+    (record.facts as Record<string, unknown>).llmTier = null;
+    const { poller, client } = buildPoller([t], { get: vi.fn().mockResolvedValue(record) });
+    const res = await poller.runOnce();
+    expect(res.skipped).toBe(1);
+    // No field write (already correct) and no LLM re-classification, but the comment
+    // is backfilled with the provisional note.
+    expect(client.setEnumCustomField).not.toHaveBeenCalled();
+    expect(client.createStory).toHaveBeenCalledTimes(1);
+    expect((client.createStory as ReturnType<typeof vi.fn>).mock.calls[0][1]).toContain('Provisional — will be confirmed');
+  });
+});
+
+describe('TierPoller.runOnce — Code-Review authoritative pass wiring', () => {
+  it('hands the tasks in Code Review to the authoritative pass and folds in its result', async () => {
+    const reviewCodeReviewTasks = vi.fn().mockResolvedValue({
+      considered: 1,
+      confirmed: 0,
+      superseded: 1,
+      humanOwned: 0,
+      skipped: 0,
+      failed: 0,
+    });
+    const authoritative = { reviewCodeReviewTasks } as unknown as AuthoritativePass;
+    const inReview = task({ gid: 'cr1', tierOptionGid: tierToOptionGid('T1'), inCodeReview: true });
+    const notInReview = task({ gid: 'plain' });
+    const { poller } = buildPoller([inReview, notInReview], {}, undefined, authoritative);
+    const res = await poller.runOnce();
+    expect(reviewCodeReviewTasks).toHaveBeenCalledTimes(1);
+    const handed = reviewCodeReviewTasks.mock.calls[0][0] as AsanaTask[];
+    expect(handed.map((t) => t.gid)).toEqual(['cr1']);
+    expect(res.authoritative).toMatchObject({ superseded: 1 });
+  });
+
+  it('leaves result.authoritative null when no authoritative pass is configured', async () => {
+    const { poller } = buildPoller([task({ gid: 'x', inCodeReview: true })], {});
+    const res = await poller.runOnce();
+    expect(res.authoritative).toBeNull();
   });
 });

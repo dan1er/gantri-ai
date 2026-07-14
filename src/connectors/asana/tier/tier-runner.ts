@@ -86,4 +86,5 @@ const EMPTY_POLL: TierPollResult = {
   overrides: 0,
   skipped: 0,
   failed: 0,
+  authoritative: null,
 };

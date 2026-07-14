@@ -66,6 +66,13 @@ export interface AsanaTask {
   custom_fields?: AsanaCustomFieldValue[];
   /** Only populated for subtasks (opt_fields includes created_by.name). */
   created_by?: AsanaStoryUser | null;
+  /** Section/project memberships — populated when opt_fields includes
+   *  `memberships.section.gid`. Used to detect the board section a task sits in. */
+  memberships?: AsanaMembership[];
+}
+export interface AsanaMembership {
+  project?: { gid?: string; name?: string } | null;
+  section?: { gid?: string; name?: string } | null;
 }
 export interface AsanaStoryUser {
   gid?: string;

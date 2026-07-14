@@ -53,8 +53,10 @@ import { loadTierStandard, parseTierPromptVersion } from './connectors/asana/tie
 import { TierPoller } from './connectors/asana/tier/poller.js';
 import { WeeklyTierReporter } from './connectors/asana/tier/weekly-report.js';
 import { TierRunner } from './connectors/asana/tier/tier-runner.js';
+import { PrRecheck, PrRecheckRunner } from './connectors/asana/tier/pr-recheck.js';
 import { TierClassificationsRepo } from './storage/repositories/tier-classifications.js';
 import { TierWeeklyReportsRepo } from './storage/repositories/tier-weekly-reports.js';
+import { TierPrChecksRepo } from './storage/repositories/tier-pr-checks.js';
 import { SendgridConnector } from './connectors/sendgrid/connector.js';
 import { SendgridApiClient } from './connectors/sendgrid/client.js';
 import { buildSearchConsoleConnector } from './connectors/gsc/connector.js';
@@ -714,6 +716,7 @@ async function main() {
   // idempotent Monday report. `POST /internal/run-tier-poll` forces a tick for
   // smoke tests and manual runs.
   let tierRunner: TierRunner | undefined;
+  let prRecheckRunner: PrRecheckRunner | undefined;
   if (asanaClient && tierPrompt && tierPromptVersion !== undefined) {
     const rolloutDateMs = Date.parse(env.ROLLOUT_DATE);
     if (Number.isNaN(rolloutDateMs)) {
@@ -760,6 +763,33 @@ async function main() {
       const result = await tierRunner!.tick();
       res.json({ ok: true, result });
     });
+
+    // v2 — PR re-check. Needs a GitHub client. Reuse the devops dispatcher when it
+    // exists; otherwise build one from the token alone (the re-check does not need
+    // an ops channel). Skipped entirely when there is no GitHub token.
+    const tierGh =
+      gh ?? (githubToken ? new GithubDispatcher({ token: githubToken, owner: env.GITHUB_OWNER }) : null);
+    if (tierGh) {
+      const prRecheck = new PrRecheck({
+        gh: tierGh,
+        client: asanaClient,
+        classifications: tierClassificationsRepo,
+        prChecks: new TierPrChecksRepo(supabase),
+        extract: { claude, prompt: tierPrompt },
+        promptVersion: tierPromptVersion,
+      });
+      prRecheckRunner = new PrRecheckRunner(prRecheck);
+      receiver.router.post('/internal/run-pr-recheck', async (req, res) => {
+        const auth = req.header('x-internal-secret');
+        if (!process.env.INTERNAL_SHARED_SECRET || auth !== process.env.INTERNAL_SHARED_SECRET) {
+          return res.status(403).json({ ok: false, error: 'forbidden' });
+        }
+        const result = await prRecheckRunner!.tick();
+        res.json({ ok: true, result });
+      });
+    } else {
+      logger.warn('delivery tier PR re-check disabled — no GITHUB_TOKEN configured');
+    }
   }
 
   // POST /internal/recompile-report — admin-only endpoint to recompile a report spec.
@@ -808,6 +838,11 @@ async function main() {
   if (tierRunner) {
     tierRunner.start();
     logger.info('delivery tier runner started');
+  }
+
+  if (prRecheckRunner) {
+    prRecheckRunner.start();
+    logger.info('delivery tier PR re-check runner started');
   }
 
   if (devopsEnabled && gh) {

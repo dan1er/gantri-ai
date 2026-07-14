@@ -16,8 +16,24 @@
  *                    line, blank lines and `#` comments ignored), in file order,
  *                    instead of scanning + diversity-sampling the board. Use this to
  *                    re-run against the identical ticket set from a prior run.
+ *   --golden <file>  GOLDEN-EVAL mode: read the committed golden set (JSON array of
+ *                    `{ row, taskGid, name, expected: ["T1"] | ["T0","T1"] }`),
+ *                    classify each gid with the live extract+decide pipeline, and
+ *                    score each row (PASS = computed tier ∈ `expected`). Prints a
+ *                    per-row PASS/FAIL table + the total score and EXITS 1 if any row
+ *                    FAILS. This is the regression gate for the classifier.
  *   --label <name>   suffix the output basenames (`…-<name>.md/.json`) so a re-run
  *                    does not clobber a prior golden set.
+ *
+ * ⚠️  REGRESSION GATE — RUN THE GOLDEN EVAL BEFORE MERGING any change to the rubric
+ *     prompt (`src/prompts/delivery-tier-standard.md`) or to `DOMAIN_BASE_TIER` /
+ *     the `decideTier` logic in `src/connectors/asana/tier/decide.ts`:
+ *
+ *         npx tsx scripts/tier-calibration.ts --golden tests/golden/tier-golden.json --label v3
+ *
+ *     A non-zero exit means the change moved a calibrated ticket off its expected
+ *     tier — reconcile the golden set (with a labelled diff-review) or fix the
+ *     regression before merging. Do NOT merge on a red golden eval.
  *
  * Outputs (to the scratchpad dir, NOT committed):
  *   - tier-calibration-results[-<label>].md   summary + human-readable table
@@ -89,16 +105,19 @@ const OUT_DIR =
   process.env.TIER_CALIB_OUT_DIR ??
   '/private/tmp/claude-501/-Users-danierestevez-Documents-work-gantri/b3660c2b-e86f-4c83-8a36-77fd2ee47cf9/scratchpad';
 
-/** Minimal CLI parse: `--tasks <file>` fixes the ticket set; `--label <name>`
- *  suffixes the output basenames so a re-run does not clobber a prior golden set. */
-function parseArgs(argv: string[]): { tasksFile: string | null; label: string } {
+/** Minimal CLI parse: `--tasks <file>` fixes the ticket set; `--golden <file>`
+ *  switches to golden-eval mode; `--label <name>` suffixes the output basenames so a
+ *  re-run does not clobber a prior golden set. */
+function parseArgs(argv: string[]): { tasksFile: string | null; goldenFile: string | null; label: string } {
   let tasksFile: string | null = null;
+  let goldenFile: string | null = null;
   let label = '';
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--tasks') tasksFile = argv[++i] ?? null;
+    else if (argv[i] === '--golden') goldenFile = argv[++i] ?? null;
     else if (argv[i] === '--label') label = argv[++i] ?? '';
   }
-  return { tasksFile, label };
+  return { tasksFile, goldenFile, label };
 }
 
 /** Read a `--tasks` file into an ordered list of task gids (blank lines and `#`
@@ -163,6 +182,8 @@ function whyLine(firedRule: string, evidenceFact: FactKey | null): string {
       return 'Cosmetic only, no behaviour change -> T0';
     case 'behavior_preserving':
       return 'Visible but behaviour-preserving -> min(base,T1)';
+    case 'restore_approved':
+      return 'Restores approved behaviour (logic untouched) -> min(base,T1)';
     case 't2_risk_trigger':
       return `Behaviour change + risk trigger${fact} -> T2`;
     case 'behavior_at_base':
@@ -189,6 +210,7 @@ function signalSignature(facts: Facts, tier: string): string {
     'ui_testable',
     'behavior_change',
     'cosmetic_only',
+    'restores_approved_behavior',
     'money',
     'irreversible_external',
     'data_integrity',
@@ -330,10 +352,214 @@ interface StabilityResult {
   runs: StabilityRun[];
 }
 
+// --- Golden eval ---------------------------------------------------------------
+
+/** One committed golden expectation: a fixed ticket gid and the accepted tier(s). */
+interface GoldenEntry {
+  row: number;
+  taskGid: string;
+  name: string;
+  /** Accepted tiers — PASS when the computed tier is any of these (e.g. `["T0","T1"]`). */
+  expected: string[];
+}
+
+/** One scored golden row. */
+interface GoldenRowResult {
+  row: number;
+  taskGid: string;
+  url: string;
+  name: string;
+  expected: string[];
+  actual: string | null;
+  pass: boolean;
+  domain: string | null;
+  firedRule: string | null;
+  evidence: string;
+  reason: string;
+  error?: string;
+}
+
+/** Read + shallow-validate the golden JSON file. */
+function readGolden(file: string): GoldenEntry[] {
+  const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown;
+  if (!Array.isArray(raw)) throw new Error(`golden file ${file} must be a JSON array`);
+  return raw.map((e, i) => {
+    const g = e as Partial<GoldenEntry>;
+    if (!g.taskGid || !Array.isArray(g.expected) || g.expected.length === 0) {
+      throw new Error(`golden entry ${i} is missing taskGid or a non-empty expected[]`);
+    }
+    return {
+      row: typeof g.row === 'number' ? g.row : i + 1,
+      taskGid: String(g.taskGid),
+      name: g.name ?? '',
+      expected: g.expected.map(String),
+    };
+  });
+}
+
+/**
+ * GOLDEN-EVAL: classify each golden gid with the live extract+decide pipeline, score
+ * PASS (computed tier ∈ expected) vs FAIL, print a per-row table + total, write the
+ * md/json artifacts, and set exit code 1 if any row FAILS.
+ */
+async function runGolden(
+  goldenFile: string,
+  asana: InstanceType<typeof AsanaApiClient>,
+  deps: ExtractDeps,
+  rubricVersion: number,
+  suffix: string,
+): Promise<void> {
+  const file = path.isAbsolute(goldenFile) ? goldenFile : path.resolve(repoRoot, goldenFile);
+  const golden = readGolden(file);
+  console.log(`[golden] loaded ${golden.length} golden rows from ${file}`);
+
+  const outMd = path.join(OUT_DIR, `tier-calibration-results${suffix}.md`);
+  const outJson = path.join(OUT_DIR, `tier-calibration-results${suffix}.json`);
+
+  const rows: GoldenRowResult[] = await mapWithConcurrency(golden, CLASSIFY_CONCURRENCY, async (g) => {
+    const url = asanaTaskUrl(g.taskGid);
+    try {
+      const t = await asana.getTask(g.taskGid, OPT_FIELDS);
+      const tName = typeName(t);
+      const input: ExtractInput = { name: t.name ?? '', notes: t.notes ?? '', typeName: tName };
+      const facts = await extractFacts(input, deps);
+      const decision = decideTier(facts);
+      const actual = decision.tier;
+      const pass = g.expected.includes(actual);
+      const reason = `${whyLine(decision.firedRule, decision.evidenceFact)}${decision.flags.length ? ` [${decision.flags.join(',')}]` : ''}`;
+      console.log(
+        `[golden] #${g.row} ${g.taskGid} -> ${actual} exp[${g.expected.join('|')}] ${pass ? 'PASS' : 'FAIL'} (${decision.firedRule})`,
+      );
+      return {
+        row: g.row,
+        taskGid: g.taskGid,
+        url,
+        name: t.name ?? g.name,
+        expected: g.expected,
+        actual,
+        pass,
+        domain: facts.domain,
+        firedRule: decision.firedRule,
+        evidence: evidenceFor(facts, decision),
+        reason,
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[golden] #${g.row} ${g.taskGid} ERROR: ${message}`);
+      return {
+        row: g.row,
+        taskGid: g.taskGid,
+        url,
+        name: g.name,
+        expected: g.expected,
+        actual: null,
+        pass: false,
+        domain: null,
+        firedRule: null,
+        evidence: '',
+        reason: `ERROR: ${message}`,
+        error: message,
+      };
+    }
+  });
+
+  const passCount = rows.filter((r) => r.pass).length;
+  const failing = rows.filter((r) => !r.pass);
+  const dist = { T0: 0, T1: 0, T2: 0, ERROR: 0 };
+  for (const r of rows) {
+    if (r.actual === 'T0' || r.actual === 'T1' || r.actual === 'T2') dist[r.actual]++;
+    else dist.ERROR++;
+  }
+
+  fs.mkdirSync(OUT_DIR, { recursive: true });
+  fs.writeFileSync(outMd, renderGoldenMarkdown({ rubricVersion, file, rows, passCount, dist }));
+  fs.writeFileSync(
+    outJson,
+    JSON.stringify(
+      {
+        generatedAt: new Date().toISOString(),
+        mode: 'golden',
+        rubricVersion,
+        goldenFile: file,
+        score: { pass: passCount, total: rows.length },
+        distribution: dist,
+        failing: failing.map((r) => ({ row: r.row, taskGid: r.taskGid, expected: r.expected, actual: r.actual, reason: r.reason })),
+        rows,
+      },
+      null,
+      2,
+    ),
+  );
+
+  console.log(`\n[golden] score: ${passCount}/${rows.length}`);
+  console.log(`[golden] distribution: T0=${dist.T0} T1=${dist.T1} T2=${dist.T2}${dist.ERROR ? ` ERROR=${dist.ERROR}` : ''}`);
+  if (failing.length) {
+    console.log(`[golden] FAILING rows (${failing.length}):`);
+    for (const r of failing) {
+      console.log(`  #${r.row} ${r.taskGid} got ${r.actual ?? 'ERROR'} expected [${r.expected.join('|')}] — ${r.reason}`);
+    }
+  }
+  console.log(`[golden] wrote ${outMd}`);
+  console.log(`[golden] wrote ${outJson}`);
+
+  // The regression gate: any FAIL is a non-zero exit so CI / a merge check catches it.
+  if (failing.length) process.exitCode = 1;
+}
+
+interface GoldenRenderArgs {
+  rubricVersion: number;
+  file: string;
+  rows: GoldenRowResult[];
+  passCount: number;
+  dist: { T0: number; T1: number; T2: number; ERROR: number };
+}
+
+function renderGoldenMarkdown(a: GoldenRenderArgs): string {
+  const lines: string[] = [];
+  lines.push('# Delivery Tier Classifier — Golden Eval');
+  lines.push('');
+  lines.push(`Live extract+decide pipeline scored against the committed golden set. Rubric version ${a.rubricVersion}.`);
+  lines.push(`Golden set: \`${a.file}\`.`);
+  lines.push(`Generated ${new Date().toISOString()}.`);
+  lines.push('');
+  lines.push('## Score');
+  lines.push('');
+  lines.push(`- **${a.passCount}/${a.rows.length} PASS** (${a.rows.length - a.passCount} FAIL)`);
+  lines.push(`- Distribution: T0=${a.dist.T0}, T1=${a.dist.T1}, T2=${a.dist.T2}${a.dist.ERROR ? `, ERROR=${a.dist.ERROR}` : ''}`);
+  const failing = a.rows.filter((r) => !r.pass);
+  if (failing.length) {
+    lines.push('');
+    lines.push('### Failing rows');
+    lines.push('');
+    for (const r of failing) {
+      lines.push(`- **#${r.row}** [${cell(truncate(r.name, 60))}](${r.url}) — got \`${r.actual ?? 'ERROR'}\`, expected \`[${r.expected.join('|')}]\`. ${cell(r.reason)}`);
+    }
+  }
+  lines.push('');
+  lines.push('## Per-row');
+  lines.push('');
+  lines.push('| # | Ticket | Domain | Expected | Actual | Result | Why (fired rule) | Evidence |');
+  lines.push('| - | ------ | ------ | -------- | ------ | ------ | ---------------- | -------- |');
+  for (const r of a.rows) {
+    lines.push(
+      `| ${r.row} ` +
+        `| [${cell(truncate(r.name, 55))}](${r.url}) ` +
+        `| ${cell(r.domain ?? '')} ` +
+        `| ${r.expected.join(' / ')} ` +
+        `| ${r.actual ?? 'ERROR'} ` +
+        `| ${r.pass ? 'PASS' : 'FAIL'} ` +
+        `| ${cell(r.reason)} ` +
+        `| ${cell(truncate(r.evidence, EVIDENCE_MAX))} |`,
+    );
+  }
+  lines.push('');
+  return lines.join('\n');
+}
+
 // --- Main ----------------------------------------------------------------------
 
 async function main(): Promise<void> {
-  const { tasksFile, label } = parseArgs(process.argv.slice(2));
+  const { tasksFile, goldenFile, label } = parseArgs(process.argv.slice(2));
   const suffix = label ? `-${label}` : '';
   const outMd = path.join(OUT_DIR, `tier-calibration-results${suffix}.md`);
   const outJson = path.join(OUT_DIR, `tier-calibration-results${suffix}.json`);
@@ -363,6 +589,13 @@ async function main(): Promise<void> {
   const rubricVersion = parseTierPromptVersion(prompt);
   const deps: ExtractDeps = { claude, prompt };
   console.log(`[calib] rubric version ${rubricVersion} loaded`);
+
+  // GOLDEN-EVAL mode: score the live classifier against the committed golden set and
+  // exit non-zero on any FAIL. This is the regression gate — no board scan / sampling.
+  if (goldenFile) {
+    await runGolden(goldenFile, asana, deps, rubricVersion, suffix);
+    return;
+  }
 
   // 1. Build the sample. Either replay a fixed gid list (`--tasks`, identical set
   //    across runs) or run the full-history board scan + diversity sample.

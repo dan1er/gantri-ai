@@ -85,6 +85,28 @@ function giftCardRow(): unknown[] {
   ];
 }
 
+function wirelessRow(): unknown[] {
+  return [
+    10500,
+    'Nova Portable',
+    'Wireless Table Light',
+    null,
+    'Studio Nova',
+    'Active',
+    'Marketplace',
+    null,
+    null,
+    47,
+    '7-8 weeks',
+    pgColorsLiteral([{ code: 'snow', name: 'Snow', defaultSku: '10500-st-snow' }]),
+    { code: 'st', name: 'Standard' },
+    { price: 19800, bulb: 'LED PANEL, 130mm' },
+    null,
+    null,
+    null,
+  ];
+}
+
 function makeConnector(runSqlImpl: () => Promise<{ fields: string[]; rows: unknown[][] }>) {
   const grafana = { runSql: vi.fn(runSqlImpl) } as unknown as GrafanaConnector;
   return { connector: new ProductExportConnector({ grafana }), grafana };
@@ -119,7 +141,10 @@ describe('products.export_catalog', () => {
     expect(headers).not.toContain('Manufacturer Price (USD)');
     expect(headers).not.toContain('Royalty (%)');
     expect(headers).toEqual(
-      expect.arrayContaining(['SKU', 'List Price (USD)', 'Product URL', 'Return Policy', 'Bulb Type', 'Certification', 'Image URL']),
+      expect.arrayContaining([
+        'SKU', 'List Price (USD)', 'Product URL', 'Return Policy', 'Bulb Type', 'Certification', 'Image URL',
+        'CRI', 'Voltage', 'Dimmer Type',
+      ]),
     );
 
     const snow = rows.find((r) => r.SKU === '10018-cm-snow')!;
@@ -154,6 +179,19 @@ describe('products.export_catalog', () => {
     expect(snow['Color Temperature']).toBe('2700K');
     expect(snow.Dimmable).toBe('Yes');
     expect(snow['Bulb Included']).toBe('Yes');
+    // Company-standard defaults apply: bulb-equipped, non-wireless product.
+    expect(snow.CRI).toBe('90');
+    expect(snow.Voltage).toBe('120V');
+    expect(snow['Dimmer Type']).toBe('Triac Dimmer');
+    // Placeholder columns exist in the template but have no data source yet.
+    expect(snow['Backplate Shape']).toBe('');
+    expect(snow['Backplate Material']).toBe('');
+    expect(snow['Canopy Dimensions']).toBe('');
+    expect(snow['Canopy Shape']).toBe('');
+    expect(snow['Canopy Material']).toBe('');
+    expect(snow['Hanging Dimensions']).toBe('');
+    expect(snow['Shipping Box Dimensions (in, L x W x H)']).toBe('');
+    expect(snow['Shipping Box Weight (lb)']).toBe('');
     // Certification derived from category (Table Light = plug-in).
     expect(snow.Certification).toBe('SGS for UL and CSA');
     // Image URL built from existing skuAssets photo (no manual Google Drive link).
@@ -172,6 +210,30 @@ describe('products.export_catalog', () => {
     const gift = rows.find((r) => r['Product Name'] === 'Gift Card')!;
     expect(gift).toBeTruthy();
     expect(gift.SKU).toBe('');
+    // No bulb code → electrical defaults do not apply.
+    expect(gift.CRI).toBe('');
+    expect(gift.Voltage).toBe('');
+    expect(gift['Dimmer Type']).toBe('');
+  });
+
+  it('keeps CRI but blanks voltage and dimmer type for wireless lights', async () => {
+    const { connector } = makeConnector(async () => ({ fields: FIELDS, rows: [wirelessRow()] }));
+    const result: any = await connector.tools[0].execute({
+      status: 'Active',
+      granularity: 'sku',
+      includeInternalCost: false,
+    });
+    const rows = parseCsv(result.attachment.content);
+    expect(rows).toHaveLength(1);
+    const row = rows[0];
+    // Integrated LED panel decodes as dimmable...
+    expect(row.Dimmable).toBe('Yes');
+    // ...and still gets the CRI default...
+    expect(row.CRI).toBe('90');
+    // ...but battery-powered wireless fixtures have no line voltage and dim
+    // via integrated touch/app control, not a wall Triac dimmer.
+    expect(row.Voltage).toBe('');
+    expect(row['Dimmer Type']).toBe('');
   });
 
   it('includes internal cost columns only when includeInternalCost is true', async () => {

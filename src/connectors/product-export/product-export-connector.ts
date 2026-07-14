@@ -47,6 +47,11 @@ export const WHOLESALE_DEFAULTS = {
   returnPolicy: 'Free returns within 30 days of delivery',
   warranty: 'Standard 3 year',
   countryOfOrigin: 'USA',
+  // Company-standard electrical defaults provided by Sales. Uniform across the
+  // catalog today; emitted only for products where they apply (see BASE_COLUMNS).
+  cri: '90',
+  voltage: '120V',
+  dimmerType: 'Triac Dimmer',
 } as const;
 
 const PRODUCT_URL_BASE = 'https://www.gantri.com/products';
@@ -243,18 +248,52 @@ const BASE_COLUMNS: ColumnDef[] = [
   { header: 'Wattage', value: (c) => c.bulb.wattage },
   { header: 'Lumens', value: (c) => c.bulb.lumens },
   { header: 'Color Temperature', value: (c) => c.bulb.colorTemp },
+  // Company-standard default: every Gantri light source is CRI 90. Applies to
+  // any product with a bulb code; blank for accessories / gift cards.
+  { header: 'CRI', value: (c) => (c.product.specs?.bulb ? WHOLESALE_DEFAULTS.cri : '') },
   { header: 'Dimmable', value: (c) => c.bulb.dimmable },
+  // Wall-dimmer compatibility. Wireless lights dim via integrated touch/app
+  // control, not a wall Triac dimmer, so they are excluded.
+  {
+    header: 'Dimmer Type',
+    value: (c) =>
+      c.bulb.dimmable === 'Yes' && !WIRELESS_CATEGORIES.has(c.product.category ?? '')
+        ? WHOLESALE_DEFAULTS.dimmerType
+        : '',
+  },
   { header: 'Bulb Included', value: (c) => c.bulb.included },
   {
     header: 'Compatible Bulbs',
     value: (c) => (c.product.specs?.compatibleWith ?? []).filter(Boolean).join('; '),
   },
   { header: 'Certification', value: (c) => certification(c.product.category) },
+  // Company-standard default: corded/hardwired lights run on 120V US mains.
+  // Wireless fixtures are battery-powered, so no line voltage applies.
+  {
+    header: 'Voltage',
+    value: (c) =>
+      c.product.specs?.bulb && !WIRELESS_CATEGORIES.has(c.product.category ?? '')
+        ? WHOLESALE_DEFAULTS.voltage
+        : '',
+  },
   { header: 'Dimensions (in, H x W x D)', value: (c) => dimsHWD(c.product.specs?.dimensions) },
   { header: 'Footprint (in, W x D)', value: (c) => footprintWD(c.product.specs?.footPrint) },
   { header: 'Backplate (in, W x H)', value: (c) => backplateWH(c.product.specs?.backplate) },
+  // No data source yet for the columns below — they exist so the CSV template
+  // matches the requested wholesale field list; they export blank until the
+  // data is captured in FactoryOS.
+  { header: 'Backplate Shape', value: () => '' },
+  { header: 'Backplate Material', value: () => '' },
+  // Pendant/hardwired-only fields, no source yet.
+  { header: 'Canopy Dimensions', value: () => '' },
+  { header: 'Canopy Shape', value: () => '' },
+  { header: 'Canopy Material', value: () => '' },
+  { header: 'Hanging Dimensions', value: () => '' },
   { header: 'Cord Length (in)', value: (c) => numOrBlank(c.product.specs?.cableLength) },
   { header: 'Weight (lb)', value: (c) => numOrBlank(c.product.specs?.weight) },
+  // No source anywhere yet for shipping-box specs.
+  { header: 'Shipping Box Dimensions (in, L x W x H)', value: () => '' },
+  { header: 'Shipping Box Weight (lb)', value: () => '' },
   { header: 'Return Policy', value: () => WHOLESALE_DEFAULTS.returnPolicy },
   { header: 'Warranty', value: () => WHOLESALE_DEFAULTS.warranty },
   { header: 'Country of Origin', value: () => WHOLESALE_DEFAULTS.countryOfOrigin },
@@ -297,7 +336,7 @@ export class ProductExportConnector implements Connector {
         '',
         'PARTNER-SAFE BY DEFAULT: internal cost fields (manufacturer price, royalty) are EXCLUDED. Only set `includeInternalCost:true` for an internal pull, never for a partner-facing export.',
         '',
-        'Source: Porter prod read-replica (current/live data). Structured per-bulb specs (wattage/lumens/CRI/color temperature), dimmable, UL/ADA ratings, canopy dims and a Google-Drive photo link are not yet stored in Porter and are therefore omitted until that data lands; the recommended/compatible bulb strings already carry much of the bulb info.',
+        'Source: Porter prod read-replica (current/live data). CRI, voltage and dimmer type emit company-standard defaults (90 / 120V / Triac Dimmer), gated to the products they apply to (bulb-equipped, non-wireless where relevant). Canopy dimensions/shape/material, backplate shape/material, hanging dimensions and shipping-box dimensions/weight columns exist in the CSV but export blank until that data is captured in FactoryOS.',
         '',
         'Triggers: "export the product catalog as CSV", "give me a product price list", "wholesale product data for a partner", "dame el catálogo de productos en CSV", "exporta los SKUs de las lámparas de mesa".',
       ].join('\n'),

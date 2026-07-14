@@ -102,6 +102,10 @@ export interface WeeklyReportInputs {
   escapeTasksLast30d: EscapeTask[];
   /** Human-override rows from the last 7 days. */
   overridesLast7d: TierClassificationRecord[];
+  /** Gids of Software Board tasks that are currently COMPLETED. Move-down only
+   *  counts tickets that actually shipped and cleared QA — an open ticket has
+   *  trivially had zero escapes and must not lower a domain's tier. */
+  completedTaskGids: string[];
 }
 
 export interface MoveUpRec {
@@ -164,12 +168,16 @@ export function computeWeeklyReport(inputs: WeeklyReportInputs, now: Date): Week
   }
   moveUp.sort((a, b) => b.escapes - a.escapes || a.domain.localeCompare(b.domain));
 
-  // 2. Move down: domains with ≥ MOVE_DOWN_MIN_T2 T2 tickets in 30d and zero
-  //    escape-typed tasks → recommend T2→T1. Same shape for T1→T0.
+  // 2. Move down: domains with ≥ MOVE_DOWN_MIN_T2 COMPLETED T2 tickets in 30d and
+  //    zero escape-typed tasks → recommend T2→T1. Same shape for T1→T0. Only
+  //    completed tickets count: an open ticket hasn't been through QA yet, so its
+  //    zero escapes are meaningless and must not lower a domain's tier.
+  const completed = new Set(inputs.completedTaskGids);
   const moveDown: MoveDownRec[] = [];
   const byDomain = new Map<string, TierClassificationRecord[]>();
   for (const c of inputs.classificationsLast30d) {
     if (c.decidedBy !== 'bot') continue;
+    if (!completed.has(c.taskGid)) continue;
     const list = byDomain.get(domainOf(c)) ?? [];
     list.push(c);
     byDomain.set(domainOf(c), list);
@@ -284,8 +292,9 @@ export function renderWeeklyReport(payload: WeeklyReportPayload): string {
 
 // --- Orchestration (I/O) ----------------------------------------------------
 
-const OPT_FIELDS_ESCAPE = [
+const OPT_FIELDS_BOARD = [
   'created_at',
+  'completed',
   'custom_fields.gid',
   'custom_fields.enum_value.gid',
 ].join(',');
@@ -302,26 +311,30 @@ export interface WeeklyReporterDeps {
   now?: () => Date;
 }
 
-/** Read escape-typed Software Board tasks created in the last 30d and map each to
- *  a domain via its own classification (unknown when not classified). */
-async function fetchEscapeTasks(
+/** One full-history board scan producing both the escape tasks (last 30d, mapped
+ *  to a domain via their own classification) and the set of currently-completed
+ *  task gids (for the move-down "completed only" rule). Unbounded so the newest
+ *  tasks are never dropped once the board grows past the 50-page cap. */
+async function fetchBoardSignals(
   deps: WeeklyReporterDeps,
   nowMs: number,
-): Promise<EscapeTask[]> {
+): Promise<{ escapeTasks: EscapeTask[]; completedTaskGids: string[] }> {
   const cutoff = nowMs - THIRTY_DAYS_MS;
-  const tasks = await deps.client.getProjectTasks(SOFTWARE_BOARD_PROJECT_GID, OPT_FIELDS_ESCAPE);
+  const tasks = await deps.client.getProjectTasksUnbounded(SOFTWARE_BOARD_PROJECT_GID, OPT_FIELDS_BOARD);
   const escapeOptions = new Set([TYPE_QA_ESCAPE_OPTION_GID, TYPE_ESCAPES_OPTION_GID]);
-  const escapes: EscapeTask[] = [];
+  const escapeTasks: EscapeTask[] = [];
+  const completedTaskGids: string[] = [];
   for (const t of tasks) {
+    if (t.completed) completedTaskGids.push(t.gid);
     const createdMs = t.created_at ? Date.parse(t.created_at) : 0;
     if (createdMs < cutoff) continue;
     const type = (t.custom_fields ?? []).find((f) => f.gid === TYPE_FIELD_GID);
     const optGid = type?.enum_value?.gid;
     if (!optGid || !escapeOptions.has(optGid)) continue;
     const cls = await deps.classifications.get(t.gid);
-    escapes.push({ gid: t.gid, domain: cls?.domain ?? 'unknown' });
+    escapeTasks.push({ gid: t.gid, domain: cls?.domain ?? 'unknown' });
   }
-  return escapes;
+  return { escapeTasks, completedTaskGids };
 }
 
 export class WeeklyTierReporter {
@@ -341,14 +354,19 @@ export class WeeklyTierReporter {
     if (existing) return { sent: false, reason: 'already_sent', weekStart };
 
     const nowMs = now.getTime();
-    const [classificationsLast30d, overridesLast7d, escapeTasksLast30d] = await Promise.all([
+    const [classificationsLast30d, overridesLast7d, boardSignals] = await Promise.all([
       this.deps.classifications.listSince(new Date(nowMs - THIRTY_DAYS_MS).toISOString()),
       this.deps.classifications.listOverridesSince(new Date(nowMs - SEVEN_DAYS_MS).toISOString()),
-      fetchEscapeTasks(this.deps, nowMs),
+      fetchBoardSignals(this.deps, nowMs),
     ]);
 
     const payload = computeWeeklyReport(
-      { classificationsLast30d, overridesLast7d, escapeTasksLast30d },
+      {
+        classificationsLast30d,
+        overridesLast7d,
+        escapeTasksLast30d: boardSignals.escapeTasks,
+        completedTaskGids: boardSignals.completedTaskGids,
+      },
       now,
     );
     const text = renderWeeklyReport(payload);

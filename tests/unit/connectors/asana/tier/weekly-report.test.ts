@@ -22,6 +22,7 @@ function rec(o: Partial<TierClassificationRecord>): TierClassificationRecord {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     facts: {} as any,
     tier: o.tier ?? 'T0',
+    confirmedTier: o.confirmedTier ?? o.tier ?? 'T0',
     liftedByUnclear: o.liftedByUnclear ?? false,
     flags: [],
     domain: o.domain ?? 'unknown',
@@ -59,6 +60,8 @@ describe('computeWeeklyReport', () => {
     ],
     escapeTasksLast30d: [{ gid: 'e1', domain: 'shopping_checkout' }],
     overridesLast7d: [rec({ taskGid: 'ov1', domain: 'shopping_checkout', tier: 'T0', humanTier: 'T2', decidedBy: 'human_override' })],
+    // The three content_marketing T2 tickets have shipped → they count toward move-down.
+    completedTaskGids: ['c1', 'c2', 'c3'],
   };
 
   const payload = computeWeeklyReport(inputs, NOW);
@@ -71,8 +74,13 @@ describe('computeWeeklyReport', () => {
     expect(payload.moveUp).toEqual([{ domain: 'shopping_checkout', escapes: 1, ticketsBelowT2: 1 }]);
   });
 
-  it('Move down: a domain with ≥3 clean T2 tickets and zero escapes', () => {
+  it('Move down: a domain with ≥3 clean COMPLETED T2 tickets and zero escapes', () => {
     expect(payload.moveDown).toEqual([{ domain: 'content_marketing', from: 'T2', to: 'T1', cleanTickets: 3 }]);
+  });
+
+  it('Move down: does NOT fire when the T2 tickets are still open (never QA-cleared)', () => {
+    const openPayload = computeWeeklyReport({ ...inputs, completedTaskGids: [] }, NOW);
+    expect(openPayload.moveDown).toEqual([]);
   });
 
   it('Disagreements: last-7d human overrides', () => {
@@ -113,7 +121,7 @@ describe('WeeklyTierReporter.maybeSend — scheduling & idempotency', () => {
       get: vi.fn().mockResolvedValue(null),
     } as unknown as TierClassificationsRepo;
     const client = {
-      getProjectTasks: vi.fn().mockResolvedValue([]),
+      getProjectTasksUnbounded: vi.fn().mockResolvedValue([]),
     } as unknown as AsanaApiClient;
     const chatPost = vi.fn().mockResolvedValue({ ok: true });
     const slack = {

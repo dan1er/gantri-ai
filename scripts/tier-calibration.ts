@@ -1,0 +1,595 @@
+/**
+ * Read-only retro-calibration of the Delivery Tier classifier against real
+ * Software Board tickets.
+ *
+ * STRICTLY READ-ONLY: it GETs tasks from Asana and SELECTs the ASANA_ACCESS_TOKEN
+ * vault secret, then runs the exact same `extractFacts` (ticket-text mode) +
+ * `decideTier` pipeline the read-only `asana.delivery_tier_preview` tool uses. It
+ * NEVER writes an Asana field/comment and NEVER inserts/updates a Supabase row.
+ * Real Anthropic (Haiku) calls are expected (~55: 40 sampled tickets + 3×5 for the
+ * stability check).
+ *
+ * Run: `npx tsx scripts/tier-calibration.ts`
+ *
+ * Outputs (to the scratchpad dir, NOT committed):
+ *   - tier-calibration-results.md   summary + human-readable table
+ *   - tier-calibration-results.json machine-readable facts per ticket (golden set)
+ */
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import Anthropic from '@anthropic-ai/sdk';
+import { createClient } from '@supabase/supabase-js';
+// Type-only imports are erased at compile time and never trigger runtime module
+// evaluation — safe to keep static (they do NOT pull in the bot's logger/env).
+import type { AsanaTask } from '../src/connectors/asana/client.js';
+import type { ExtractDeps, ExtractInput } from '../src/connectors/asana/tier/extract.js';
+import type { Decision, Facts, FactKey } from '../src/connectors/asana/tier/decide.js';
+
+// Load .env at the very top (native dotenv equivalent, built into Node >=20.12)
+// BEFORE any bot source module is evaluated. Every src module transitively imports
+// `logger.ts`, whose top-level `loadEnv()` validates the FULL env schema on import —
+// so the src modules below are pulled in via DYNAMIC import AFTER this runs, and the
+// two Slack fields the schema requires (but this read-only script never uses) get
+// inert placeholders. dotenv is not a project dependency; process.loadEnvFile is the
+// zero-dependency stand-in.
+const scriptDir = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(scriptDir, '..');
+try {
+  process.loadEnvFile(path.join(repoRoot, '.env'));
+} catch {
+  // Fall back to a .env in cwd; if neither exists we rely on already-set env.
+  try {
+    process.loadEnvFile();
+  } catch {
+    /* env may already be populated by the shell */
+  }
+}
+// Inert placeholders so `loadEnv`'s schema passes; never sent anywhere.
+process.env.SLACK_BOT_TOKEN ??= 'calibration-unused';
+process.env.SLACK_SIGNING_SECRET ??= 'calibration-unused';
+
+// Runtime symbols from the bot's source, imported only AFTER env is populated so
+// the transitive logger/env boot does not blow up.
+const { readVaultSecret } = await import('../src/storage/supabase.js');
+const { AsanaApiClient } = await import('../src/connectors/asana/client.js');
+const { extractFacts, loadTierStandard, parseTierPromptVersion } = await import(
+  '../src/connectors/asana/tier/extract.js'
+);
+const { decideTier } = await import('../src/connectors/asana/tier/decide.js');
+const { SOFTWARE_BOARD_PROJECT_GID, TYPE_FIELD_GID, isFeatureTemplateTask, isTierExcludedType } =
+  await import('../src/connectors/asana/board-config.js');
+
+// --- Tunables ------------------------------------------------------------------
+
+/** Only sample tickets created within this window (days). */
+const WINDOW_DAYS = 60;
+/** Target sample size. */
+const SAMPLE_SIZE = 40;
+/** Minimum description length to classify (matches the poller's gate). */
+const MIN_NOTES_CHARS = 40;
+/** How many main classifications to run in parallel. */
+const CLASSIFY_CONCURRENCY = 3;
+/** Stability check: first N tickets, classified this many times each. */
+const STABILITY_TICKETS = 3;
+const STABILITY_RUNS = 5;
+/** Max evidence quote length in the markdown table. */
+const EVIDENCE_MAX = 80;
+
+const OUT_DIR =
+  process.env.TIER_CALIB_OUT_DIR ??
+  '/private/tmp/claude-501/-Users-danierestevez-Documents-work-gantri/b3660c2b-e86f-4c83-8a36-77fd2ee47cf9/scratchpad';
+const OUT_MD = path.join(OUT_DIR, 'tier-calibration-results.md');
+const OUT_JSON = path.join(OUT_DIR, 'tier-calibration-results.json');
+
+/** opt_fields required to gate + classify a task and read its section/type. */
+const OPT_FIELDS = [
+  'name',
+  'notes',
+  'completed',
+  'created_at',
+  'permalink_url',
+  'custom_fields.gid',
+  'custom_fields.name',
+  'custom_fields.enum_value.gid',
+  'custom_fields.enum_value.name',
+  'memberships.project.gid',
+  'memberships.section.gid',
+  'memberships.section.name',
+].join(',');
+
+// --- Small helpers -------------------------------------------------------------
+
+/** The display name of a task's Type field option, or '' if unset. */
+function typeName(task: AsanaTask): string {
+  const cf = (task.custom_fields ?? []).find((f) => f.gid === TYPE_FIELD_GID);
+  return cf?.enum_value?.name ?? '';
+}
+
+/** The Software Board section a task currently sits in, or '(none)'. */
+function sectionName(task: AsanaTask): string {
+  const m = (task.memberships ?? []).find((mm) => mm.project?.gid === SOFTWARE_BOARD_PROJECT_GID);
+  return m?.section?.name ?? '(none)';
+}
+
+const asanaTaskUrl = (gid: string) => `https://app.asana.com/0/${SOFTWARE_BOARD_PROJECT_GID}/${gid}`;
+
+/** Escape a value for a single markdown table cell (no pipes / newlines). */
+function cell(s: string): string {
+  return s.replace(/\r?\n/g, ' ').replace(/\|/g, '\\|').trim();
+}
+
+function truncate(s: string, max: number): string {
+  const clean = s.replace(/\s+/g, ' ').trim();
+  return clean.length <= max ? clean : `${clean.slice(0, max - 1)}…`;
+}
+
+/** Human one-liner for the fired rule. */
+function whyLine(firedRule: string, evidenceFact: FactKey | null): string {
+  const fact = evidenceFact ? ` (${evidenceFact})` : '';
+  switch (firedRule) {
+    case 'not_ui_testable':
+      return 'No UI surface to test -> T0';
+    case 'cosmetic':
+      return 'Cosmetic only, no behaviour change -> T0';
+    case 'behavior_preserving':
+      return 'Visible but behaviour-preserving -> min(base,T1)';
+    case 't2_risk_trigger':
+      return `Behaviour change + risk trigger${fact} -> T2`;
+    case 'behavior_at_base':
+      return `Behaviour change at domain base tier${fact}`;
+    case 'inconclusive':
+      return 'Inconclusive (unclear signals) -> floored to T1';
+    default:
+      return firedRule;
+  }
+}
+
+/** The evidence quote the read-only preview tool would surface. */
+function evidenceFor(facts: Facts, decision: Decision): string {
+  if (decision.evidenceFact && decision.firedRule !== 'inconclusive') {
+    return facts[decision.evidenceFact].evidence ?? '';
+  }
+  return '';
+}
+
+/** Canonical signature of the extracted signals + computed tier — used to detect
+ *  drift across repeated stability runs. */
+function signalSignature(facts: Facts, tier: string): string {
+  const keys: FactKey[] = [
+    'ui_testable',
+    'behavior_change',
+    'cosmetic_only',
+    'money',
+    'irreversible_external',
+    'data_integrity',
+    'access_security',
+    'visual_blast_radius',
+  ];
+  const sig: Record<string, string> = { domain: facts.domain, tier, llmTier: facts.llmTier ?? 'null' };
+  for (const k of keys) sig[k] = facts[k].value;
+  return JSON.stringify(sig);
+}
+
+/** Run `fn` over `items` with at most `limit` in flight; results keep input order. */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) break;
+      out[i] = await fn(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
+// --- Diversity sampling --------------------------------------------------------
+
+interface Candidate {
+  task: AsanaTask;
+  typeName: string;
+  section: string;
+}
+
+/** Round-robin a list across a key, for an even spread. */
+function roundRobinBy<T>(list: T[], keyOf: (item: T) => string): T[] {
+  const groups = new Map<string, T[]>();
+  for (const item of list) {
+    const k = keyOf(item);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k)!.push(item);
+  }
+  const keys = [...groups.keys()];
+  const cursors = new Map(keys.map((k) => [k, 0]));
+  const out: T[] = [];
+  let progress = true;
+  while (out.length < list.length && progress) {
+    progress = false;
+    for (const k of keys) {
+      const arr = groups.get(k)!;
+      const i = cursors.get(k)!;
+      if (i < arr.length) {
+        out.push(arr[i]);
+        cursors.set(k, i + 1);
+        progress = true;
+      }
+    }
+  }
+  return out;
+}
+
+/** Stratified sample: spread across Types, and within each Type across sections.
+ *  Deterministic (input is gid-sorted, Maps keep insertion order) so the golden
+ *  set is reproducible. */
+function diverseSample(cands: Candidate[], target: number): Candidate[] {
+  const byType = new Map<string, Candidate[]>();
+  for (const c of cands) {
+    const k = c.typeName || '(none)';
+    if (!byType.has(k)) byType.set(k, []);
+    byType.get(k)!.push(c);
+  }
+  // Within each Type, order candidates so sections alternate.
+  const orderedByType = new Map<string, Candidate[]>();
+  for (const [t, list] of byType) {
+    orderedByType.set(t, roundRobinBy(list, (c) => c.section));
+  }
+  // Round-robin across Types.
+  const typeKeys = [...orderedByType.keys()];
+  const cursors = new Map(typeKeys.map((k) => [k, 0]));
+  const out: Candidate[] = [];
+  let progress = true;
+  while (out.length < target && progress) {
+    progress = false;
+    for (const t of typeKeys) {
+      if (out.length >= target) break;
+      const list = orderedByType.get(t)!;
+      const i = cursors.get(t)!;
+      if (i < list.length) {
+        out.push(list[i]);
+        cursors.set(t, i + 1);
+        progress = true;
+      }
+    }
+  }
+  return out;
+}
+
+// --- Result shapes -------------------------------------------------------------
+
+interface TicketResult {
+  index: number;
+  taskGid: string;
+  url: string;
+  name: string;
+  typeName: string;
+  section: string;
+  createdAt: string | undefined;
+  completed: boolean;
+  domain: string | null;
+  tier: string | null;
+  baseTier: string | null;
+  firedRule: string | null;
+  evidenceFact: FactKey | null;
+  evidence: string;
+  flags: string[];
+  liftedByUnclear: boolean | null;
+  uncertaintyFloorFired: boolean | null;
+  calibrationMismatch: boolean | null;
+  llmTier: string | null;
+  facts: Facts | null;
+  error?: string;
+}
+
+interface StabilityRun {
+  run: number;
+  signature: string;
+  drift: string | null; // null on run 1; describes the diff vs run 1 otherwise
+}
+
+interface StabilityResult {
+  index: number;
+  taskGid: string;
+  name: string;
+  stable: boolean;
+  runs: StabilityRun[];
+}
+
+// --- Main ----------------------------------------------------------------------
+
+async function main(): Promise<void> {
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const anthropicKey = process.env.ANTHROPIC_API_KEY;
+  const missing = [
+    !supabaseUrl && 'SUPABASE_URL',
+    !supabaseKey && 'SUPABASE_SERVICE_ROLE_KEY',
+    !anthropicKey && 'ANTHROPIC_API_KEY',
+  ].filter(Boolean);
+  if (missing.length) {
+    throw new Error(`Missing required env: ${missing.join(', ')} (expected in ${path.join(repoRoot, '.env')})`);
+  }
+
+  // Read-only Supabase client, purely to SELECT the vault secret. Built directly
+  // (not via getSupabase/loadEnv) because loadEnv also requires Slack tokens the
+  // calibration .env does not carry.
+  const supabase = createClient(supabaseUrl!, supabaseKey!, { auth: { persistSession: false } });
+  const asanaToken = await readVaultSecret(supabase, 'ASANA_ACCESS_TOKEN');
+  console.log('[calib] vault: ASANA_ACCESS_TOKEN read OK');
+
+  const asana = new AsanaApiClient({ accessToken: asanaToken });
+  const claude = new Anthropic({ apiKey: anthropicKey });
+  const prompt = loadTierStandard();
+  const rubricVersion = parseTierPromptVersion(prompt);
+  const deps: ExtractDeps = { claude, prompt };
+  console.log(`[calib] rubric version ${rubricVersion} loaded`);
+
+  // 1. Full-history board scan (unbounded), then the candidate gate.
+  const tasks = await asana.getProjectTasksUnbounded(SOFTWARE_BOARD_PROJECT_GID, OPT_FIELDS);
+  console.log(`[calib] scanned ${tasks.length} board tasks`);
+
+  const cutoffMs = Date.now() - WINDOW_DAYS * 24 * 60 * 60 * 1000;
+  const candidates: Candidate[] = tasks
+    .filter((t) => {
+      if (isFeatureTemplateTask(t)) return false; // exclude the template artifact
+      const createdMs = t.created_at ? Date.parse(t.created_at) : Number.NEGATIVE_INFINITY;
+      if (!(createdMs >= cutoffMs)) return false; // last ~60 days
+      if ((t.notes ?? '').trim().length < MIN_NOTES_CHARS) return false; // substantive
+      if (isTierExcludedType(typeName(t))) return false; // Not a Bug / Qa Work / Research
+      return true; // completed AND incomplete both kept
+    })
+    // Deterministic order for a reproducible sample.
+    .sort((a, b) => a.gid.localeCompare(b.gid))
+    .map((t) => ({ task: t, typeName: typeName(t) || '(none)', section: sectionName(t) }));
+
+  console.log(`[calib] ${candidates.length} candidates in the last ${WINDOW_DAYS} days`);
+  const sample = diverseSample(candidates, SAMPLE_SIZE);
+  console.log(`[calib] sampled ${sample.length} tickets across types/sections`);
+
+  const typeSpread = tally(sample.map((c) => c.typeName));
+  const sectionSpread = tally(sample.map((c) => c.section));
+  console.log('[calib] type spread:', typeSpread);
+  console.log('[calib] section spread:', sectionSpread);
+
+  // 2. Classify each sampled ticket (extract ticket-text facts -> decide). Errors
+  // are captured per ticket so one bad ticket never kills the run.
+  const results: TicketResult[] = await mapWithConcurrency(sample, CLASSIFY_CONCURRENCY, async (c, i) => {
+    const t = c.task;
+    const base: TicketResult = {
+      index: i + 1,
+      taskGid: t.gid,
+      url: asanaTaskUrl(t.gid),
+      name: t.name ?? '(unnamed)',
+      typeName: c.typeName,
+      section: c.section,
+      createdAt: t.created_at,
+      completed: Boolean(t.completed),
+      domain: null,
+      tier: null,
+      baseTier: null,
+      firedRule: null,
+      evidenceFact: null,
+      evidence: '',
+      flags: [],
+      liftedByUnclear: null,
+      uncertaintyFloorFired: null,
+      calibrationMismatch: null,
+      llmTier: null,
+      facts: null,
+    };
+    try {
+      const input: ExtractInput = { name: t.name ?? '', notes: t.notes ?? '', typeName: c.typeName === '(none)' ? '' : c.typeName };
+      const facts = await extractFacts(input, deps);
+      const decision = decideTier(facts);
+      console.log(`[calib] #${i + 1} ${t.gid} -> ${decision.tier} (${decision.firedRule})`);
+      return {
+        ...base,
+        domain: facts.domain,
+        tier: decision.tier,
+        baseTier: decision.baseTier,
+        firedRule: decision.firedRule,
+        evidenceFact: decision.evidenceFact,
+        evidence: evidenceFor(facts, decision),
+        flags: decision.flags,
+        liftedByUnclear: decision.liftedByUnclear,
+        uncertaintyFloorFired: decision.liftedByUnclear,
+        calibrationMismatch: decision.calibrationMismatch,
+        llmTier: facts.llmTier,
+        facts,
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[calib] #${i + 1} ${t.gid} ERROR: ${message}`);
+      return { ...base, error: message };
+    }
+  });
+
+  // 3. Stability check: first N tickets, classified STABILITY_RUNS times each.
+  const stability: StabilityResult[] = [];
+  for (const c of sample.slice(0, STABILITY_TICKETS)) {
+    const t = c.task;
+    const idx = sample.indexOf(c) + 1;
+    const input: ExtractInput = { name: t.name ?? '', notes: t.notes ?? '', typeName: c.typeName === '(none)' ? '' : c.typeName };
+    const runs: StabilityRun[] = [];
+    let baseline = '';
+    for (let r = 1; r <= STABILITY_RUNS; r++) {
+      try {
+        const facts = await extractFacts(input, deps);
+        const decision = decideTier(facts);
+        const signature = signalSignature(facts, decision.tier);
+        if (r === 1) baseline = signature;
+        const drift = r === 1 ? null : signature === baseline ? null : describeDrift(baseline, signature);
+        runs.push({ run: r, signature, drift });
+        console.log(`[calib] stability #${idx} run ${r} -> ${decision.tier}${drift ? ' DRIFT' : ''}`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        runs.push({ run: r, signature: `ERROR: ${message}`, drift: `ERROR: ${message}` });
+        console.error(`[calib] stability #${idx} run ${r} ERROR: ${message}`);
+      }
+    }
+    const stable = runs.every((rr) => rr.drift === null);
+    stability.push({ index: idx, taskGid: t.gid, name: t.name ?? '(unnamed)', stable, runs });
+  }
+
+  // 4. Summaries.
+  const tierDist = { T0: 0, T1: 0, T2: 0, ERROR: 0 };
+  let mismatchCount = 0;
+  let unclearLiftCount = 0;
+  for (const r of results) {
+    if (r.error) tierDist.ERROR++;
+    else if (r.tier === 'T0' || r.tier === 'T1' || r.tier === 'T2') tierDist[r.tier]++;
+    if (r.calibrationMismatch) mismatchCount++;
+    if (r.uncertaintyFloorFired) unclearLiftCount++;
+  }
+  const allStable = stability.length > 0 && stability.every((s) => s.stable);
+  const stabilityVerdict = stability.length === 0
+    ? 'not run'
+    : allStable
+      ? `STABLE (${STABILITY_TICKETS} tickets x ${STABILITY_RUNS} runs, identical signals+tier)`
+      : `DRIFT DETECTED in ${stability.filter((s) => !s.stable).length}/${stability.length} tickets`;
+
+  // 5. Emit markdown + JSON.
+  fs.mkdirSync(OUT_DIR, { recursive: true });
+  fs.writeFileSync(OUT_MD, renderMarkdown({
+    rubricVersion,
+    scanned: tasks.length,
+    candidateCount: candidates.length,
+    sampleSize: sample.length,
+    tierDist,
+    mismatchCount,
+    unclearLiftCount,
+    stabilityVerdict,
+    typeSpread,
+    sectionSpread,
+    results,
+    stability,
+  }));
+  fs.writeFileSync(OUT_JSON, JSON.stringify({
+    generatedAt: new Date().toISOString(),
+    rubricVersion,
+    windowDays: WINDOW_DAYS,
+    scanned: tasks.length,
+    candidateCount: candidates.length,
+    sampleSize: sample.length,
+    summary: { tierDist, mismatchCount, unclearLiftCount, stabilityVerdict },
+    typeSpread,
+    sectionSpread,
+    tickets: results,
+    stability,
+  }, null, 2));
+
+  console.log(`\n[calib] tier distribution: T0=${tierDist.T0} T1=${tierDist.T1} T2=${tierDist.T2} ERROR=${tierDist.ERROR}`);
+  console.log(`[calib] calibration mismatches: ${mismatchCount} | uncertainty-floor lifts: ${unclearLiftCount}`);
+  console.log(`[calib] stability: ${stabilityVerdict}`);
+  console.log(`[calib] wrote ${OUT_MD}`);
+  console.log(`[calib] wrote ${OUT_JSON}`);
+}
+
+/** Count occurrences of each value, insertion-ordered. */
+function tally(values: string[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const v of values) out[v] = (out[v] ?? 0) + 1;
+  return out;
+}
+
+/** Describe which signal fields differ between two signatures. */
+function describeDrift(baseline: string, other: string): string {
+  const a = JSON.parse(baseline) as Record<string, string>;
+  const b = JSON.parse(other) as Record<string, string>;
+  const diffs: string[] = [];
+  for (const k of Object.keys(a)) {
+    if (a[k] !== b[k]) diffs.push(`${k}: ${a[k]}->${b[k]}`);
+  }
+  return diffs.length ? diffs.join(', ') : 'signature differs';
+}
+
+interface RenderArgs {
+  rubricVersion: number;
+  scanned: number;
+  candidateCount: number;
+  sampleSize: number;
+  tierDist: { T0: number; T1: number; T2: number; ERROR: number };
+  mismatchCount: number;
+  unclearLiftCount: number;
+  stabilityVerdict: string;
+  typeSpread: Record<string, number>;
+  sectionSpread: Record<string, number>;
+  results: TicketResult[];
+  stability: StabilityResult[];
+}
+
+function renderMarkdown(a: RenderArgs): string {
+  const spread = (m: Record<string, number>) =>
+    Object.entries(m).map(([k, v]) => `${k}: ${v}`).join(', ');
+
+  const lines: string[] = [];
+  lines.push('# Delivery Tier Classifier — Retro-Calibration');
+  lines.push('');
+  lines.push(`Read-only run against real Software Board tickets. Rubric version ${a.rubricVersion}.`);
+  lines.push(`Generated ${new Date().toISOString()}.`);
+  lines.push('');
+  lines.push('## Summary');
+  lines.push('');
+  lines.push(`- Board tasks scanned: ${a.scanned}`);
+  lines.push(`- Candidates (last ${WINDOW_DAYS}d, notes>=${MIN_NOTES_CHARS}, excl template/Not-a-Bug/Qa-Work/Research): ${a.candidateCount}`);
+  lines.push(`- Sampled (diverse Types x sections): ${a.sampleSize}`);
+  lines.push(`- **Tier distribution:** T0=${a.tierDist.T0}, T1=${a.tierDist.T1}, T2=${a.tierDist.T2}${a.tierDist.ERROR ? `, ERROR=${a.tierDist.ERROR}` : ''}`);
+  lines.push(`- **Calibration mismatches (LLM tier != code tier):** ${a.mismatchCount}`);
+  lines.push(`- **Uncertainty-floor lifts (unclear -> T1):** ${a.unclearLiftCount}`);
+  lines.push(`- **Stability:** ${a.stabilityVerdict}`);
+  lines.push(`- Type spread: ${spread(a.typeSpread)}`);
+  lines.push(`- Section spread: ${spread(a.sectionSpread)}`);
+  lines.push('');
+  lines.push('## Per-ticket');
+  lines.push('');
+  lines.push('| # | Ticket | Type | Domain | Tier | Why (fired rule) | Evidence | Flags | LLM!=code? |');
+  lines.push('| - | ------ | ---- | ------ | ---- | ---------------- | -------- | ----- | ---------- |');
+  for (const r of a.results) {
+    if (r.error) {
+      lines.push(
+        `| ${r.index} | [${cell(truncate(r.name, 60))}](${r.url}) | ${cell(r.typeName)} | ERROR | ERROR | ${cell(truncate(r.error, 70))} | | | |`,
+      );
+      continue;
+    }
+    const why = r.firedRule ? whyLine(r.firedRule, r.evidenceFact) : '';
+    const llmCol = r.calibrationMismatch ? `yes (llm ${r.llmTier ?? '?'})` : 'no';
+    lines.push(
+      `| ${r.index} ` +
+        `| [${cell(truncate(r.name, 60))}](${r.url}) ` +
+        `| ${cell(r.typeName)} ` +
+        `| ${cell(r.domain ?? '')} ` +
+        `| ${r.tier ?? ''} ` +
+        `| ${cell(why)} ` +
+        `| ${cell(truncate(r.evidence, EVIDENCE_MAX))} ` +
+        `| ${cell(r.flags.join(', '))} ` +
+        `| ${llmCol} |`,
+    );
+  }
+  lines.push('');
+  lines.push('## Stability check');
+  lines.push('');
+  lines.push(`First ${a.stability.length} sampled tickets, classified ${STABILITY_RUNS}x each (temperature 0).`);
+  lines.push('');
+  for (const s of a.stability) {
+    lines.push(`### #${s.index} — ${cell(truncate(s.name, 70))} (${s.taskGid})`);
+    lines.push('');
+    lines.push(`Verdict: ${s.stable ? 'STABLE (identical signals+tier across all runs)' : 'DRIFT'}`);
+    for (const run of s.runs) {
+      if (run.drift) lines.push(`- run ${run.run}: DRIFT — ${cell(run.drift)}`);
+    }
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
+main().catch((err) => {
+  console.error('[calib] fatal:', err instanceof Error ? err.stack : err);
+  process.exitCode = 1;
+});

@@ -14,10 +14,11 @@ import {
   type DeliveryTier,
 } from '../board-config.js';
 import { extractFacts, extractFactsFromDiff, tierInputHash, type ExtractDeps } from './extract.js';
-import { decideTier, type Decision } from './decide.js';
+import { decideTier, DOMAIN_BASE_TIER, type Decision } from './decide.js';
 import { renderAuthoritativeComment } from './comment.js';
 import { MIN_NOTES_CHARS } from './poller.js';
 import type { ReviewRequestPoster, ReviewRequestPr } from './review-request.js';
+import type { RubricSource, Rubric } from './rubric-source.js';
 import { logger } from '../../../logger.js';
 
 /**
@@ -97,6 +98,11 @@ export interface AuthoritativePassDeps {
    *  task is classified here. Optional — omitted (disabled) when SOFTWARE_CHANNEL_ID
    *  is unset. */
   reviewRequest?: ReviewRequestPoster;
+  /** The runtime rubric source (shared with the poller). When present, this pass
+   *  reads the rubric adopted by the poller earlier in the same tick — prompt text,
+   *  version, domain table, and hash. Absent → the committed `extract.prompt` /
+   *  `promptVersion` / `DOMAIN_BASE_TIER` are used. */
+  rubric?: RubricSource;
   /** Override the repo list (tests). Defaults to `AUTH_PASS_REPOS`. */
   repos?: readonly string[];
 }
@@ -162,9 +168,31 @@ function botKnownGids(record: TierClassificationRecord): Set<string> {
 
 export class AuthoritativePass {
   private readonly repos: readonly string[];
+  /** The rubric resolved once per `reviewCodeReviewTasks` call (the poller has
+   *  already refreshed the shared source this tick). */
+  private activeRubric: Rubric = { promptText: '', version: 0, tableMap: DOMAIN_BASE_TIER, hash: '' };
 
   constructor(private readonly deps: AuthoritativePassDeps) {
     this.repos = deps.repos ?? AUTH_PASS_REPOS;
+  }
+
+  /** The rubric to apply this pass: the live source's current value, else the
+   *  committed prompt / version / `DOMAIN_BASE_TIER` (empty hash keeps `tierInputHash`
+   *  identical to a two-arg call). */
+  private resolveRubric(): Rubric {
+    if (this.deps.rubric) return this.deps.rubric.getRubric();
+    return {
+      promptText: this.deps.extract.prompt,
+      version: this.deps.promptVersion,
+      tableMap: DOMAIN_BASE_TIER,
+      hash: '',
+    };
+  }
+
+  /** Extract deps for this pass — the shared Anthropic client plus the active
+   *  rubric's prompt text as the cache-primed system block. */
+  private extractDeps(): ExtractDeps {
+    return { claude: this.deps.extract.claude, prompt: this.activeRubric.promptText };
   }
 
   /** Confirm/supersede the tier for every task currently in Code Review. Resolves
@@ -181,6 +209,10 @@ export class AuthoritativePass {
       failed: 0,
     };
     if (tasks.length === 0) return result;
+
+    // Resolve the rubric once for this pass (the poller refreshed the shared source
+    // at the top of the tick), then apply it to every task.
+    this.activeRubric = this.resolveRubric();
 
     // The fallback open-PR scan is expensive (one list call per configured repo),
     // so it is built lazily and reused — only when a task's PR can't be resolved
@@ -316,7 +348,7 @@ export class AuthoritativePass {
     }
 
     const input = { name: task.name ?? '', notes: task.notes ?? '', typeName: typeName(task) };
-    const textHash = tierInputHash(this.deps.promptVersion, input);
+    const textHash = tierInputHash(this.activeRubric.version, input, this.activeRubric.hash);
 
     // Dedupe. With a PR: this exact commit was already reviewed. Without a PR: the
     // task is already authoritative and its description has not changed since.
@@ -340,10 +372,10 @@ export class AuthoritativePass {
             ...input,
             ...(await this.deps.gh.prDiff(link.repo, link.pr.number)),
           },
-          this.deps.extract,
+          this.extractDeps(),
         )
-      : await extractFacts(input, this.deps.extract);
-    const decision = decideTier(facts);
+      : await extractFacts(input, this.extractDeps());
+    const decision = decideTier(facts, this.activeRubric.tableMap);
     const authTier = decision.tier;
 
     // Re-read the field fresh (close the read → LLM → write TOCTOU) and decide
@@ -384,7 +416,7 @@ export class AuthoritativePass {
       prNumber: link?.pr.number,
       decision,
       facts,
-      promptVersion: this.deps.promptVersion,
+      promptVersion: this.activeRubric.version,
     });
 
     // Crash-safe two-phase write, mirroring the poller: persist the decision with
@@ -395,7 +427,7 @@ export class AuthoritativePass {
     const base = {
       taskGid: task.gid,
       inputHash: textHash,
-      promptVersion: this.deps.promptVersion,
+      promptVersion: this.activeRubric.version,
       facts,
       tier: authTier,
       liftedByUnclear: decision.liftedByUnclear,

@@ -12,9 +12,10 @@ import {
 } from '../board-config.js';
 import type { DeliveryTier } from '../board-config.js';
 import { extractFacts, tierInputHash, type ExtractDeps } from './extract.js';
-import { decideTier } from './decide.js';
+import { decideTier, DOMAIN_BASE_TIER } from './decide.js';
 import { renderTierComment } from './comment.js';
 import type { AuthoritativePass, AuthoritativeResult } from './authoritative-pass.js';
+import type { RubricSource, Rubric } from './rubric-source.js';
 import { logger } from '../../../logger.js';
 
 /**
@@ -53,8 +54,14 @@ export interface TierPollerDeps {
   client: AsanaApiClient;
   repo: TierClassificationsRepo;
   extract: ExtractDeps;
-  /** Prompt version parsed from the rubric file (part of the content hash). */
+  /** Prompt version parsed from the rubric file (part of the content hash). Used as
+   *  the fallback when no live `rubric` source is wired (e.g. unit tests). */
   promptVersion: number;
+  /** The runtime rubric source. When present, each tick refreshes it from the live
+   *  Notion page and classifies against the freshly-adopted rubric (prompt text,
+   *  version, domain table, and hash). Absent → the committed `extract.prompt` /
+   *  `promptVersion` / `DOMAIN_BASE_TIER` are used. */
+  rubric?: RubricSource;
   /** Only classify tasks created at or after this instant (no backfill spam). */
   rolloutDateMs: number;
   /** The Code-Review authoritative pass. When present, tasks that have entered
@@ -88,11 +95,20 @@ function typeName(task: AsanaTask): string {
 }
 
 export class TierPoller {
+  /** The rubric resolved once at the start of each tick, then applied to every task
+   *  processed in that tick (`runOnce` is not reentrant — the runner serializes it). */
+  private activeRubric: Rubric = FALLBACK_RUBRIC;
+
   constructor(private readonly deps: TierPollerDeps) {}
 
   /** One full scan + classify pass. Safe to call repeatedly; each task is
    *  processed independently so one failure never blocks the batch. */
   async runOnce(): Promise<TierPollResult> {
+    // Refresh the live rubric first (adopts a validated page change + posts the ops
+    // notice at most once). Never throws — a Notion outage keeps the last-known-good.
+    if (this.deps.rubric) await this.deps.rubric.refresh();
+    this.activeRubric = this.deps.rubric ? this.deps.rubric.getRubric() : this.fallbackRubric();
+
     // Full-history scan (unbounded): the board keeps completed tasks, so a 50-page
     // cap would silently drop the newest ones once it grows past 5000.
     const tasks = await this.deps.client.getProjectTasksUnbounded(SOFTWARE_BOARD_PROJECT_GID, OPT_FIELDS_TASK);
@@ -231,7 +247,7 @@ export class TierPoller {
           await this.finalizeConfirmed(record);
         }
         // Re-classify only if the description changed materially (hash differs).
-        const hash = tierInputHash(this.deps.promptVersion, this.toInput(task));
+        const hash = tierInputHash(this.activeRubric.version, this.toInput(task), this.activeRubric.hash);
         if (hash === record.inputHash) return 'skipped';
         // An authoritative row was finalized from the PR diff at Code Review — the
         // diff is the authoritative risk source. A later notes edit must NOT trigger
@@ -271,6 +287,24 @@ export class TierPoller {
     return { name: task.name ?? '', notes: task.notes ?? '', typeName: typeName(task) };
   }
 
+  /** The rubric to apply when no live source is wired (unit tests): the committed
+   *  prompt / version, `DOMAIN_BASE_TIER`, and an empty hash (so `tierInputHash`
+   *  stays identical to a two-arg call). */
+  private fallbackRubric(): Rubric {
+    return {
+      promptText: this.deps.extract.prompt,
+      version: this.deps.promptVersion,
+      tableMap: DOMAIN_BASE_TIER,
+      hash: '',
+    };
+  }
+
+  /** Extract deps for the current tick — the shared Anthropic client plus the
+   *  active rubric's prompt text as the cache-primed system block. */
+  private extractDeps(): ExtractDeps {
+    return { claude: this.deps.extract.claude, prompt: this.activeRubric.promptText };
+  }
+
   /**
    * Extract → decide → persist a pre-write record → write field + comment →
    * finalize. The record is written BEFORE the field so a crash between the two can
@@ -283,9 +317,9 @@ export class TierPoller {
     prev: TierClassificationRecord | null,
   ): Promise<'classified' | 'reclassified' | 'overrides'> {
     const input = this.toInput(task);
-    const hash = tierInputHash(this.deps.promptVersion, input);
-    const facts = await extractFacts(input, this.deps.extract);
-    const decision = decideTier(facts);
+    const hash = tierInputHash(this.activeRubric.version, input, this.activeRubric.hash);
+    const facts = await extractFacts(input, this.extractDeps());
+    const decision = decideTier(facts, this.activeRubric.tableMap);
     const prevConfirmed = prev?.confirmedTier ?? null;
     const outcome = prev ? 'reclassified' : 'classified';
 
@@ -295,7 +329,7 @@ export class TierPoller {
     const provisional = {
       taskGid: task.gid,
       inputHash: hash,
-      promptVersion: this.deps.promptVersion,
+      promptVersion: this.activeRubric.version,
       facts,
       tier: decision.tier,
       confirmedTier: prevConfirmed,
@@ -312,7 +346,7 @@ export class TierPoller {
     // never the reverse. Persist the comment gid immediately (confirmedTier still
     // unconfirmed) so a crash before the field write cannot orphan a duplicate
     // comment on the recovery path.
-    const commentText = renderTierComment(decision, facts, this.deps.promptVersion, { provisional: true });
+    const commentText = renderTierComment(decision, facts, this.activeRubric.version, { provisional: true });
     const story = await this.deps.client.createStory(task.gid, commentText);
     await this.deps.repo.upsertBot({ ...provisional, commentGid: story?.gid ?? prev?.commentGid ?? null });
 
@@ -349,10 +383,10 @@ export class TierPoller {
     // keeps the same explanation → field-change ordering as a fresh classify.
     let commentGid = record.commentGid;
     if (!commentGid) {
-      const decision = decideTier(record.facts);
+      const decision = decideTier(record.facts, this.activeRubric.tableMap);
       const story = await this.deps.client.createStory(
         task.gid,
-        renderTierComment(decision, record.facts, this.deps.promptVersion),
+        renderTierComment(decision, record.facts, this.activeRubric.version),
       );
       commentGid = story?.gid ?? null;
     }
@@ -386,7 +420,7 @@ export class TierPoller {
   private async finalizeConfirmed(record: TierClassificationRecord): Promise<void> {
     let commentGid = record.commentGid;
     if (!commentGid) {
-      const decision = decideTier(record.facts);
+      const decision = decideTier(record.facts, this.activeRubric.tableMap);
       const story = await this.deps.client.createStory(
         record.taskGid,
         renderTierComment(decision, record.facts, record.promptVersion, {
@@ -435,6 +469,10 @@ function tierGidSet(tier: DeliveryTier, confirmed: DeliveryTier | null): Set<str
   if (confirmed) s.add(tierToOptionGid(confirmed));
   return s;
 }
+
+/** Neutral default so `activeRubric` is always defined before the first tick sets
+ *  it. Only its shape matters; `runOnce` overwrites it before any task is read. */
+const FALLBACK_RUBRIC: Rubric = { promptText: '', version: 0, tableMap: DOMAIN_BASE_TIER, hash: '' };
 
 /** Re-export so the poll runner can type a record without a deep import. */
 export type { TierClassificationRecord };

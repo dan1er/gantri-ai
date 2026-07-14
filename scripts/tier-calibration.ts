@@ -56,7 +56,7 @@ import { createClient } from '@supabase/supabase-js';
 // evaluation — safe to keep static (they do NOT pull in the bot's logger/env).
 import type { AsanaTask } from '../src/connectors/asana/client.js';
 import type { ExtractDeps, ExtractInput } from '../src/connectors/asana/tier/extract.js';
-import type { Decision, Facts, FactKey } from '../src/connectors/asana/tier/decide.js';
+import type { Decision, Facts, FactKey, DomainBaseTierMap } from '../src/connectors/asana/tier/decide.js';
 
 // Load .env at the very top (native dotenv equivalent, built into Node >=20.12)
 // BEFORE any bot source module is evaluated. Every src module transitively imports
@@ -85,10 +85,12 @@ process.env.SLACK_SIGNING_SECRET ??= 'calibration-unused';
 // the transitive logger/env boot does not blow up.
 const { readVaultSecret } = await import('../src/storage/supabase.js');
 const { AsanaApiClient } = await import('../src/connectors/asana/client.js');
-const { extractFacts, loadTierStandard, parseTierPromptVersion } = await import(
-  '../src/connectors/asana/tier/extract.js'
-);
+const { NotionApiClient } = await import('../src/connectors/notion/client.js');
+const { extractFacts, loadTierStandard } = await import('../src/connectors/asana/tier/extract.js');
 const { decideTier } = await import('../src/connectors/asana/tier/decide.js');
+const { RubricSource, splitStandard, buildFallbackRubric, DELIVERY_TIER_RUBRIC_PAGE_ID } = await import(
+  '../src/connectors/asana/tier/rubric-source.js'
+);
 const { SOFTWARE_BOARD_PROJECT_GID, TYPE_FIELD_GID, isFeatureTemplateTask, isTierExcludedType } =
   await import('../src/connectors/asana/board-config.js');
 
@@ -419,6 +421,7 @@ async function runGolden(
   asana: InstanceType<typeof AsanaApiClient>,
   deps: ExtractDeps,
   rubricVersion: number,
+  tableMap: DomainBaseTierMap,
   suffix: string,
 ): Promise<void> {
   const file = path.isAbsolute(goldenFile) ? goldenFile : path.resolve(repoRoot, goldenFile);
@@ -435,7 +438,7 @@ async function runGolden(
       const tName = typeName(t);
       const input: ExtractInput = { name: t.name ?? '', notes: t.notes ?? '', typeName: tName };
       const facts = await extractFacts(input, deps);
-      const decision = decideTier(facts);
+      const decision = decideTier(facts, tableMap);
       const actual = decision.tier;
       const pass = g.expected.includes(actual);
       const reason = `${whyLine(decision.firedRule, decision.evidenceFact)}${decision.flags.length ? ` [${decision.flags.join(',')}]` : ''}`;
@@ -607,15 +610,38 @@ async function main(): Promise<void> {
 
   const asana = new AsanaApiClient({ accessToken: asanaToken });
   const claude = new Anthropic({ apiKey: anthropicKey });
-  const prompt = loadTierStandard();
-  const rubricVersion = parseTierPromptVersion(prompt);
-  const deps: ExtractDeps = { claude, prompt };
-  console.log(`[calib] rubric version ${rubricVersion} loaded`);
+
+  // Build the runtime rubric source: it reads the LIVE Notion page (so the golden
+  // eval scores the classifier against exactly what production applies), falling back
+  // to the committed snapshot when the Notion token / page is unavailable.
+  const standardFile = loadTierStandard();
+  const { appendix } = splitStandard(standardFile);
+  const fallbackRubric = buildFallbackRubric(standardFile);
+  let notionToken: string | null = null;
+  try {
+    notionToken = await readVaultSecret(supabase, 'NOTION_API_TOKEN');
+  } catch {
+    console.warn('[calib] NOTION_API_TOKEN not readable — using committed fallback rubric');
+  }
+  const rubricSource = new RubricSource({
+    pageId: DELIVERY_TIER_RUBRIC_PAGE_ID,
+    appendix,
+    fallback: fallbackRubric,
+    notion: notionToken ? new NotionApiClient({ token: notionToken }) : undefined,
+  });
+  await rubricSource.init();
+  // Force a live pull so `--golden` evaluates against the current page, not just the
+  // boot cache.
+  await rubricSource.refresh({ notify: false });
+  const rubric = rubricSource.getRubric();
+  const rubricVersion = rubric.version;
+  const deps: ExtractDeps = { claude, prompt: rubric.promptText };
+  console.log(`[calib] rubric version ${rubricVersion} (hash ${rubric.hash.slice(0, 8)}) loaded from live page`);
 
   // GOLDEN-EVAL mode: score the live classifier against the committed golden set and
   // exit non-zero on any FAIL. This is the regression gate — no board scan / sampling.
   if (goldenFile) {
-    await runGolden(goldenFile, asana, deps, rubricVersion, suffix);
+    await runGolden(goldenFile, asana, deps, rubricVersion, rubric.tableMap, suffix);
     return;
   }
 

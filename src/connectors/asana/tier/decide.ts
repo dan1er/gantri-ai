@@ -89,20 +89,23 @@ export type Domain = (typeof DOMAIN_ENUM)[number];
 
 /**
  * DOMAIN_BASE_TIER — the base tier each functional domain starts at, transcribed
- * verbatim from the Notion rubric page (Version 2). The change (Step 3/4) raises
- * or lowers it. Only the three domains where a base defect is dangerous
- * regardless of money sit at T2 (auth, inventory, production); the money-adjacent
- * customer surfaces (checkout, orders, order management, payouts / statements /
- * quotes) sit at T1 and reach T2 only via Step 3's money trigger; read-only
- * reporting and pure infra sit at T0; everything else, and `unknown`, is T1.
+ * verbatim from the Notion rubric page (Version 2, hand-calibrated). The change
+ * (Step 3/4) raises or lowers it. Six domains sit at T2 base: the inherently
+ * dangerous ones (auth, inventory, production) plus the customer money / order
+ * surfaces (checkout, order management, orders / notifications), where a base
+ * defect ships real customer harm. Payouts / statements / quotes sit at T1 and
+ * reach T2 only via Step 3's money trigger — and that trigger fires only when an
+ * amount actually paid or charged changes, not on internal bookkeeping (marking a
+ * statement Paid, stamping status dates). Read-only reporting and pure infra sit
+ * at T0; everything else, and `unknown`, is T1.
  */
 export const DOMAIN_BASE_TIER: Record<Domain, DeliveryTier> = {
   auth_accounts: 'T2',
   inventory_materials: 'T2',
   production_workflow: 'T2',
-  shopping_checkout: 'T1',
-  orders_notifications: 'T1',
-  order_management: 'T1',
+  shopping_checkout: 'T2',
+  orders_notifications: 'T2',
+  order_management: 'T2',
   payouts_statements: 'T1',
   made_order_management: 'T1',
   made_quoting_billing: 'T1',
@@ -143,8 +146,9 @@ export interface Facts {
   behavior_change: FactValue;
   /** Copy / text / styling / spacing / layout only — no behavior change? */
   cosmetic_only: FactValue;
-  /** Creates or changes a charge, refund, payout, price, tax, shipping, discount,
-   *  credit, or gift-card value. */
+  /** An amount actually paid or charged changes — a charge, refund, payout, price,
+   *  tax, shipping, discount, credit, gift-card, or quote value. Internal
+   *  bookkeeping (marking a statement Paid, stamping status dates) does NOT fire. */
   money: FactValue;
   /** Commits or cancels a real order, sends a customer email/SMS/push, or
    *  hard-deletes customer data. */

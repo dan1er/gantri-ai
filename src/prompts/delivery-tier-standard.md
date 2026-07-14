@@ -13,16 +13,16 @@ The change is backend-only / infrastructure / CI / a data migration / logging / 
 Identify the ticket's functional domain — pick exactly one — and take its **base tier** from the table.
 
 - Backend (`porter_*`) domains sit at T1, not T2: QA validates through the UI only, so backend risk is engineering's Non-UI Lane gate (Step 1); their base applies only when a ticket in these domains still has a UI surface.
-- Money-adjacent domains (checkout, orders, quotes / payouts) also sit at T1: they become **T2 exactly when the change affects pricing / money** — that is Step 3's money trigger, matching the framework's "Orders, if there is a chance of money loss."
+- Payouts / quotes / statements sit at T1: they become **T2 exactly when the change alters an amount actually paid or charged** — that is Step 3's money trigger, matching the framework's "Orders, if there is a chance of money loss."
 
 | Domain | Covers | Base tier |
 | --- | --- | --- |
 | auth_accounts | login, signup, password, permissions | T2 |
 | inventory_materials | inventory, purchasing | T2 |
 | production_workflow | jobs, manufacturing steps (the Jobs subsystem) | T2 |
-| shopping_checkout | cart, checkout, payments, tax, shipping, discounts | T1 |
-| orders_notifications | orders, confirmations, customer emails / SMS | T1 |
-| order_management | orders, refunds / returns, replacements (Factory OS) | T1 |
+| shopping_checkout | cart, checkout, payments, tax, shipping, discounts | T2 |
+| order_management | orders, refunds / returns, replacements (Factory OS) | T2 |
+| orders_notifications | orders, confirmations, customer emails / SMS | T2 |
 | payouts_statements | statements, payouts, quotes | T1 |
 | made_order_management | orders (MadeOS) | T1 |
 | made_quoting_billing | quotes, estimates, invoices | T1 |
@@ -36,7 +36,7 @@ Identify the ticket's functional domain — pick exactly one — and take its **
 | creators_referral | designer / creator profiles, referrals, affiliates | T1 |
 | product_catalog_design | products, designs, designers, product reviews | T1 |
 | machines_fleet | machines, fleet management | T1 |
-| production_monitoring | dashboards, TV dashboards, reporting | T1 |
+| production_monitoring | dashboards, TV dashboards, internal admin reports (incl. Grafana) | T1 |
 | factory_administration | internal users, settings, cron jobs | T1 |
 | design_workflow | designs, submissions, revisions | T1 |
 | customer_operations | support, communications | T1 |
@@ -58,9 +58,9 @@ Identify the ticket's functional domain — pick exactly one — and take its **
 
 The domain positions the ticket; the actual change decides:
 
-- The change does **not** alter how the feature works — a label, copy, or styling change only → **T0**, whatever the base.
+- The change does **not** alter how the feature works — a label, copy, or styling change only → **T0**, whatever the base. (Showing **wrong data** is not cosmetic — that is a behavior bug.)
 - A visible change that **preserves the behavior** — layout, restyle, reorder, with the money / order / data / auth logic intact → at most **T1** (the lower of the base and T1).
-- The change **does alter behavior** and hits one of — **money** (charge / refund / payout / price / tax / discount / credit / gift-card / quote amount) · **irreversible for a real customer** (commits or cancels an order, sends a customer email / SMS, hard-deletes data) · **data / inventory integrity** (hard to undo) · **access / security** (lock-out or exposure) → **T2**, whatever the base. *(These are the framework's Verification-lane cases — they always verify before production.)*
+- The change **does alter behavior** and hits one of — **money** (charge / refund / payout / price / tax / discount / credit / gift-card / quote amount — an amount actually paid or charged changes; internal bookkeeping such as marking a statement Paid or stamping status dates does **not** fire) · **irreversible for a real customer** (commits or cancels an order, sends a customer email / SMS, hard-deletes data) · **data / inventory integrity** (hard to undo) · **access / security** (lock-out or exposure) → **T2**, whatever the base. *(These are the framework's Verification-lane cases — they always verify before production.)*
 - Otherwise → keep the **base tier**.
 
 ## Step 4 — Uncertainty floor
@@ -85,8 +85,8 @@ In ADDITION to the four keys above (`tier`, `domain`, `why`, `evidence`), includ
 
 - `ui_testable` — Step 1: can QA meaningfully validate this through the product UI? Backend-only / infra / CI / migration / logging / internal job → `no`.
 - `behavior_change` — Step 3: does the change alter how the feature actually works (not just its look)?
-- `cosmetic_only` — Step 3: label / copy / text / styling / spacing / color / image / layout / element-order only, with no behavior change.
-- `money` — Step 3 trigger: creates or changes a charge, refund, payout, price, tax, shipping, discount, credit, gift-card, or quote amount.
+- `cosmetic_only` — Step 3: label / copy / text / styling / spacing / color / image / layout / element-order only, with no behavior change. Showing **wrong data** is NOT cosmetic — that is a behavior bug (`behavior_change` → `yes`, `cosmetic_only` → `no`).
+- `money` — Step 3 trigger: an amount actually paid or charged changes — a charge, refund, payout, price, tax, shipping, discount, credit, gift-card, or quote amount. Internal bookkeeping (marking a statement Paid, stamping status dates) does **not** fire this → `no`.
 - `irreversible_external` — Step 3 trigger: commits or cancels a real order, sends a customer email / SMS / push, or hard-deletes customer data.
 - `data_integrity` — Step 3 trigger: can corrupt orders, inventory, or stored records in a way that is hard to undo.
 - `access_security` — Step 3 trigger: changes authentication, access, or permissions in a way that could lock customers out or expose data.

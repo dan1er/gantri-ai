@@ -45,9 +45,13 @@ interface AsanaEnvelope<T> {
 /** Only the fields the QA-stats tool reads. */
 export interface AsanaEnumValue {
   gid: string;
+  /** Display name — populated when opt_fields includes `enum_value.name`. */
+  name?: string;
 }
 export interface AsanaCustomFieldValue {
   gid: string;
+  /** Field display name — populated when opt_fields includes `custom_fields.name`. */
+  name?: string;
   enum_value?: AsanaEnumValue | null;
 }
 export interface AsanaTask {
@@ -57,9 +61,18 @@ export interface AsanaTask {
   created_at?: string;
   modified_at?: string;
   permalink_url?: string;
+  /** Task description — populated when opt_fields includes `notes`. */
+  notes?: string;
   custom_fields?: AsanaCustomFieldValue[];
   /** Only populated for subtasks (opt_fields includes created_by.name). */
   created_by?: AsanaStoryUser | null;
+  /** Section/project memberships — populated when opt_fields includes
+   *  `memberships.section.gid`. Used to detect the board section a task sits in. */
+  memberships?: AsanaMembership[];
+}
+export interface AsanaMembership {
+  project?: { gid?: string; name?: string } | null;
+  section?: { gid?: string; name?: string } | null;
 }
 export interface AsanaStoryUser {
   gid?: string;
@@ -81,6 +94,9 @@ export interface AsanaUser {
 /** Asana caps `limit` at 100. */
 const PAGE_LIMIT = 100;
 const DEFAULT_MAX_PAGES = 50;
+/** Sanity cap for full-history scans (1M tasks). A batch job that hits this is
+ *  almost certainly looping, not legitimately huge. */
+const UNBOUNDED_MAX_PAGES = 10000;
 
 export class AsanaApiClient {
   private readonly baseUrl: string;
@@ -102,6 +118,39 @@ export class AsanaApiClient {
 
   private async fetchOnce(url: string): Promise<Response> {
     return this.fetchImpl(url, { method: 'GET', headers: this.headers() });
+  }
+
+  /** POST/PUT the Asana API with the same single-retry-on-429/5xx policy as
+   *  reads. Body is wrapped as `{ data: ... }` per the Asana convention and
+   *  sent as JSON. Returns the parsed `data` of the response envelope. */
+  private async write<T>(
+    method: 'POST' | 'PUT',
+    path: string,
+    data: unknown,
+  ): Promise<T> {
+    const url = `${this.baseUrl}${path}`;
+    const init: RequestInit = {
+      method,
+      headers: { ...this.headers(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data }),
+    };
+    const t0 = Date.now();
+    let res = await this.fetchImpl(url, init);
+    if (res.status === 429 || res.status >= 500) {
+      logger.warn({ path, method, status: res.status }, 'asana transient error — retrying once');
+      await new Promise((r) => setTimeout(r, this.retryDelayMs));
+      res = await this.fetchImpl(url, init);
+    }
+    const elapsed = Date.now() - t0;
+    if (!res.ok) {
+      let body: unknown = null;
+      try { body = await res.clone().json(); } catch { body = await res.clone().text().catch(() => null); }
+      logger.warn({ path, method, status: res.status, elapsed, body }, 'asana api write error');
+      throw new AsanaApiError(`${method} ${path} -> ${res.status}`, res.status, body);
+    }
+    const parsed = (await res.clone().json()) as AsanaEnvelope<T>;
+    logger.info({ path, method, status: res.status, elapsed }, 'asana api write ok');
+    return parsed.data;
   }
 
   /** GET with one retry on 429/5xx. `path` starts with `/`. Returns the parsed
@@ -157,9 +206,44 @@ export class AsanaApiClient {
     return out;
   }
 
-  /** All tasks belonging to a project (offset-paginated). */
+  /** Like `paginate`, but with the 10K-page sanity cap instead of the 50-page
+   *  default — for batch jobs that must see FULL project history (the Software
+   *  Board keeps completed tasks, so it can exceed the 5000-task default cap).
+   *  Logs a warning if the sanity cap is ever reached (results truncated). */
+  private async paginateUnbounded<T>(
+    path: string,
+    query: Record<string, string | undefined> = {},
+  ): Promise<T[]> {
+    const out: T[] = [];
+    let offset: string | undefined;
+    let pages = 0;
+    while (pages < UNBOUNDED_MAX_PAGES) {
+      const q: Record<string, string | undefined> = { ...query, limit: String(PAGE_LIMIT) };
+      if (offset) q.offset = offset;
+      const resp = await this.request<T[]>(path, q);
+      out.push(...(resp.data ?? []));
+      pages += 1;
+      const next = resp.next_page;
+      if (!next || !next.offset) return out;
+      offset = next.offset;
+    }
+    logger.warn(
+      { path, pages, cap: UNBOUNDED_MAX_PAGES },
+      'asana paginateUnbounded hit the 10K-page sanity cap — results are truncated',
+    );
+    return out;
+  }
+
+  /** All tasks belonging to a project (offset-paginated, 50-page cap). */
   async getProjectTasks(projectGid: string, optFields: string): Promise<AsanaTask[]> {
     return this.paginate<AsanaTask>(`/projects/${projectGid}/tasks`, { opt_fields: optFields });
+  }
+
+  /** Every task on a project with no 50-page cap — for full-history batch jobs
+   *  (the delivery-tier poller and weekly report) that must not silently drop the
+   *  newest tasks once the board grows past 5000. */
+  async getProjectTasksUnbounded(projectGid: string, optFields: string): Promise<AsanaTask[]> {
+    return this.paginateUnbounded<AsanaTask>(`/projects/${projectGid}/tasks`, { opt_fields: optFields });
   }
 
   /** All stories (activity + comments) on a task (offset-paginated). */
@@ -171,6 +255,26 @@ export class AsanaApiClient {
    *  convention, so these feed bounce evidence for the classifier. */
   async getTaskSubtasks(taskGid: string, optFields: string): Promise<AsanaTask[]> {
     return this.paginate<AsanaTask>(`/tasks/${taskGid}/subtasks`, { opt_fields: optFields });
+  }
+
+  /** A single task with the requested opt_fields. */
+  async getTask(taskGid: string, optFields: string): Promise<AsanaTask> {
+    const resp = await this.request<AsanaTask>(`/tasks/${taskGid}`, { opt_fields: optFields });
+    return resp.data;
+  }
+
+  /** Set an enum custom field on a task to a specific option. Used by the
+   *  delivery-tier classifier to write the computed T0/T1/T2 tier. */
+  async setEnumCustomField(taskGid: string, fieldGid: string, optionGid: string): Promise<void> {
+    await this.write<AsanaTask>('PUT', `/tasks/${taskGid}`, {
+      custom_fields: { [fieldGid]: optionGid },
+    });
+  }
+
+  /** Post a comment (story) on a task. Returns the created story so callers can
+   *  persist its gid. */
+  async createStory(taskGid: string, text: string): Promise<AsanaStory> {
+    return this.write<AsanaStory>('POST', `/tasks/${taskGid}/stories`, { text });
   }
 
   /** The authenticated user — used for health checks and smoke reachability. */

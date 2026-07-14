@@ -28,6 +28,67 @@ export const BOARD_NAME = 'Software Board';
 export const TYPE_FIELD_GID = '1211288498996171';
 export const TYPE_FEATURE_OPTION_GID = '1211288498996175';
 
+/** Type enum options the weekly delivery-tier report treats as QA escapes — a
+ *  defect that reached production and got a dedicated ticket. Used to recommend
+ *  moving a domain UP a tier. */
+export const TYPE_QA_ESCAPE_OPTION_GID = '1216003613864064';
+export const TYPE_ESCAPES_OPTION_GID = '1216455780657179';
+
+/** Type option names excluded from delivery-tier auto-classification. Everything
+ *  else classifies (infra/backend work lands T0 naturally via `ui_testable=no`).
+ *  Matched case-insensitively against the Type enum option's display name. */
+export const TIER_EXCLUDED_TYPE_NAMES: readonly string[] = ['Not a Bug', 'Qa Work', 'Research'];
+
+/** Custom field "Delivery Tier" and its three enum options (T0/T1/T2). The
+ *  delivery-tier auto-classifier writes one of these option gids to the field.
+ *  Validated against the live board on 2026-07-14. */
+export const DELIVERY_TIER_FIELD_GID = '1216565279651993';
+export const DELIVERY_TIER_OPTION_GIDS = {
+  T0: '1216565279651994',
+  T1: '1216565279651995',
+  T2: '1216565279651996',
+} as const;
+
+export type DeliveryTier = keyof typeof DELIVERY_TIER_OPTION_GIDS;
+
+/** Map a tier label to its Asana enum option gid. */
+export function tierToOptionGid(tier: DeliveryTier): string {
+  return DELIVERY_TIER_OPTION_GIDS[tier];
+}
+
+/** Map an Asana enum option gid back to a tier label, or null if it is not one
+ *  of the three Delivery Tier options (e.g. an option the bot never sets). */
+export function optionGidToTier(optionGid: string | null | undefined): DeliveryTier | null {
+  if (!optionGid) return null;
+  for (const [tier, gid] of Object.entries(DELIVERY_TIER_OPTION_GIDS) as [DeliveryTier, string][]) {
+    if (gid === optionGid) return tier;
+  }
+  return null;
+}
+
+/** Ordering of the three tiers, low → high. Used by the PR re-check to decide
+ *  whether a diff-derived tier is strictly higher than the current one (raise). */
+export const TIER_RANK: Record<DeliveryTier, number> = { T0: 0, T1: 1, T2: 2 };
+
+/** True when tier `a` is strictly higher than tier `b` (T2 > T1 > T0). */
+export function isHigherTier(a: DeliveryTier, b: DeliveryTier): boolean {
+  return TIER_RANK[a] > TIER_RANK[b];
+}
+
+/** The higher of two tiers. A null second argument (no floor) returns `a`. Used to
+ *  clamp a text-derived tier up to a diff-derived floor (never lower it). */
+export function maxTier(a: DeliveryTier, b: DeliveryTier | null): DeliveryTier {
+  if (!b) return a;
+  return TIER_RANK[a] >= TIER_RANK[b] ? a : b;
+}
+
+/** True when a Type option display name is excluded from tier classification. */
+export function isTierExcludedType(typeName: string | null | undefined): boolean {
+  if (!typeName) return false;
+  const n = typeName.trim().toLowerCase();
+  return TIER_EXCLUDED_TYPE_NAMES.some((t) => t.toLowerCase() === n);
+}
+
 /** Asana's "new feature" template task. It is a Type=Feature artifact that lives
  *  on the board and records phantom QA section moves whenever the template is
  *  edited, which would otherwise pollute the QA-stats denominator. Excluded from
@@ -56,6 +117,20 @@ export const SECTION_GIDS = {
 } as const;
 
 export type SectionName = keyof typeof SECTION_GIDS;
+
+/** The board section that gates the QA handoff. When a task lands here the
+ *  delivery-tier classifier runs its authoritative pass: it re-classifies from
+ *  the real PR diff and confirms or supersedes the provisional tier. */
+export const CODE_REVIEW_SECTION_GID = SECTION_GIDS['Code Review'];
+
+/** True when a task currently sits in the board's Code Review section. Reads
+ *  `memberships.section.gid` in the SOFTWARE_BOARD project only (a task can also
+ *  live on other boards). */
+export function isInCodeReview(task: {
+  memberships?: { project?: { gid?: string } | null; section?: { gid?: string } | null }[];
+}): boolean {
+  return (task.memberships ?? []).some((m) => m.section?.gid === CODE_REVIEW_SECTION_GID);
+}
 
 /** The two sections that represent an active QA stage. A section move whose
  *  `from` OR `to` is one of these is a "QA-stage event". */

@@ -1,0 +1,324 @@
+[
+  {
+    "row": 1,
+    "taskGid": "1214849902794601",
+    "name": "Hot-Fix: Unable to create a replacement order",
+    "expected": [
+      "T2"
+    ]
+  },
+  {
+    "row": 2,
+    "taskGid": "1214871594932475",
+    "name": "Hot-Fix: Bug: PDP: Carbon thumbnail is too light",
+    "expected": [
+      "T0"
+    ]
+  },
+  {
+    "row": 3,
+    "taskGid": "1214910555719868",
+    "name": "Change Wireless page font color",
+    "expected": [
+      "T0"
+    ]
+  },
+  {
+    "row": 4,
+    "taskGid": "1214931707460137",
+    "name": "Feature: Add Inventory Report to the Grafana Admin Dashboard",
+    "expected": [
+      "T1"
+    ]
+  },
+  {
+    "row": 5,
+    "taskGid": "1214953232761481",
+    "name": "FLC  MADE OS Quote System",
+    "expected": [
+      "T1"
+    ]
+  },
+  {
+    "row": 6,
+    "taskGid": "1214965688699488",
+    "name": "Bug: Finish Stage last part does not show location",
+    "expected": [
+      "T1"
+    ]
+  },
+  {
+    "row": 7,
+    "taskGid": "1215141079091425",
+    "name": "Wireless Post-release updates",
+    "expected": [
+      "T1"
+    ]
+  },
+  {
+    "row": 8,
+    "taskGid": "1215558441697965",
+    "name": "[PERF] speed up the daily SKU inventory snapshot job",
+    "expected": [
+      "T0"
+    ]
+  },
+  {
+    "row": 9,
+    "taskGid": "1216359934741621",
+    "name": "Bug: Marketplace: Error occurs when trying to check out",
+    "expected": [
+      "T1"
+    ]
+  },
+  {
+    "row": 10,
+    "taskGid": "1216521457471894",
+    "name": "Enable preview environments for made-engine-api",
+    "expected": [
+      "T0"
+    ]
+  },
+  {
+    "row": 11,
+    "taskGid": "1215561170515666",
+    "name": "Hotfix: Jobs stuck in progress for days",
+    "expected": [
+      "T1"
+    ]
+  },
+  {
+    "row": 12,
+    "taskGid": "1214904856446750",
+    "name": "Hot-Fix: Typo for Pier Product",
+    "expected": [
+      "T0"
+    ]
+  },
+  {
+    "row": 13,
+    "taskGid": "1216248862261982",
+    "name": "Purchase view: record inbound shipping and tariff (duty) costs on each purchase",
+    "expected": [
+      "T2"
+    ]
+  },
+  {
+    "row": 14,
+    "taskGid": "1214968186975211",
+    "name": "Bug: Dashboard numbers are inconsistent",
+    "expected": [
+      "T1"
+    ]
+  },
+  {
+    "row": 15,
+    "taskGid": "1215692127774636",
+    "name": "Sync Porter cancellations & refunds to Northbeam (stop monthly revenue drift)",
+    "expected": [
+      "T0"
+    ]
+  },
+  {
+    "row": 16,
+    "taskGid": "1215397432349162",
+    "name": "Bug: Complete Return Displays \"Refund Amount Is Greater Than Charge Amount\" Error When All Items Are Marked Discard",
+    "expected": [
+      "T2"
+    ]
+  },
+  {
+    "row": 17,
+    "taskGid": "1215558442117555",
+    "name": "[PERF] speed up the daily product purchase-count job",
+    "expected": [
+      "T0"
+    ]
+  },
+  {
+    "row": 18,
+    "taskGid": "1216427391826591",
+    "name": "SPS Commerce shipment notice fails with \"Trade partner order items are required\" — commit-ordering race at ship time (Order 54792)",
+    "expected": [
+      "T0"
+    ]
+  },
+  {
+    "row": 19,
+    "taskGid": "1214904856446742",
+    "name": "Hot-Fix: Confirm buttons not working",
+    "expected": [
+      "T1"
+    ]
+  },
+  {
+    "row": 20,
+    "taskGid": "1214917139626565",
+    "name": "Bug: Sections Missing on PDP after wireless updates",
+    "expected": [
+      "T1"
+    ]
+  },
+  {
+    "row": 21,
+    "taskGid": "1216362041502444",
+    "name": "Feature: attach statement PDF to monthly process-statement emails + auto-mark Paid after send",
+    "expected": [
+      "T0",
+      "T1"
+    ]
+  },
+  {
+    "row": 22,
+    "taskGid": "1215129011019541",
+    "name": "Feature: Port Inventory services to TS",
+    "expected": [
+      "T0"
+    ]
+  },
+  {
+    "row": 23,
+    "taskGid": "1216078473690053",
+    "name": "Fix mantle unit-test CI (was red on master)",
+    "expected": [
+      "T0"
+    ]
+  },
+  {
+    "row": 24,
+    "taskGid": "1215692127400521",
+    "name": "Ask Northbeam to delete order 54392 (Trade order recorded as consumer Order)",
+    "expected": [
+      "T0"
+    ]
+  },
+  {
+    "row": 25,
+    "taskGid": "1215558442117570",
+    "name": "[PERF] speed up the daily part-attention (part alerts) job",
+    "expected": [
+      "T0"
+    ]
+  },
+  {
+    "row": 26,
+    "taskGid": "1216572908680413",
+    "name": "Bug: Regression: Changing an Item Does Not Save After Clicking Confirm",
+    "expected": [
+      "T1"
+    ]
+  },
+  {
+    "row": 27,
+    "taskGid": "1214908644159261",
+    "name": "Hot-Fix: Unable to place an order for a Sample Kit",
+    "expected": [
+      "T1"
+    ]
+  },
+  {
+    "row": 28,
+    "taskGid": "1215150472333996",
+    "name": "Feature: Complete Return",
+    "expected": [
+      "T2"
+    ]
+  },
+  {
+    "row": 29,
+    "taskGid": "1215297117893125",
+    "name": "Bug: PDP Displays Duplicate-Looking Product Light Renders",
+    "expected": [
+      "T0",
+      "T1"
+    ]
+  },
+  {
+    "row": 30,
+    "taskGid": "1216542607175311",
+    "name": "Complete Return: voided units inflate the order's refunded-shipping ledger (refundedShippingCents / hasRefundShipping)",
+    "expected": [
+      "T2"
+    ]
+  },
+  {
+    "row": 31,
+    "taskGid": "1216038426862701",
+    "name": "Bug: Finish Sample Kit Orders Receiving Error Message ",
+    "expected": [
+      "T2"
+    ]
+  },
+  {
+    "row": 32,
+    "taskGid": "1214950277438410",
+    "name": "Hot-Fix: Completed Date Incorrect: This effects Revenue Recognition.",
+    "expected": [
+      "T0"
+    ]
+  },
+  {
+    "row": 33,
+    "taskGid": "1216408500052468",
+    "name": "Shopify client-credentials integration to unblock new partner onboarding",
+    "expected": [
+      "T0"
+    ]
+  },
+  {
+    "row": 34,
+    "taskGid": "1215508637303598",
+    "name": "Feature Request: Add a new shipping method to admin (UPS 2nd Day Air)",
+    "expected": [
+      "T1"
+    ]
+  },
+  {
+    "row": 35,
+    "taskGid": "1216001875140160",
+    "name": "Marketing garage sale",
+    "expected": [
+      "T0"
+    ]
+  },
+  {
+    "row": 36,
+    "taskGid": "1216544989365078",
+    "name": "Shippo webhook: an invalid carrier delivery date can strand an order at Delivered with no completion date",
+    "expected": [
+      "T0"
+    ]
+  },
+  {
+    "row": 37,
+    "taskGid": "1214976799663003",
+    "name": "Hotfix-feature: Add migration for recalculating inventories",
+    "expected": [
+      "T0"
+    ]
+  },
+  {
+    "row": 38,
+    "taskGid": "1215183457138274",
+    "name": "Align ConceptCategory with Porter",
+    "expected": [
+      "T0"
+    ]
+  },
+  {
+    "row": 39,
+    "taskGid": "1215732566643165",
+    "name": "FactoryOS Feature: Bulk inventory Update (CSV) - location and qty",
+    "expected": [
+      "T2"
+    ]
+  },
+  {
+    "row": 40,
+    "taskGid": "1216545005903838",
+    "name": "Release the accrued shipping when an expired return is cancelled (same ledger leak as AS-2569, automatic path)",
+    "expected": [
+      "T1"
+    ]
+  }
+]

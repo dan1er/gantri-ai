@@ -87,6 +87,9 @@ export interface AsanaUser {
 /** Asana caps `limit` at 100. */
 const PAGE_LIMIT = 100;
 const DEFAULT_MAX_PAGES = 50;
+/** Sanity cap for full-history scans (1M tasks). A batch job that hits this is
+ *  almost certainly looping, not legitimately huge. */
+const UNBOUNDED_MAX_PAGES = 10000;
 
 export class AsanaApiClient {
   private readonly baseUrl: string;
@@ -196,9 +199,44 @@ export class AsanaApiClient {
     return out;
   }
 
-  /** All tasks belonging to a project (offset-paginated). */
+  /** Like `paginate`, but with the 10K-page sanity cap instead of the 50-page
+   *  default — for batch jobs that must see FULL project history (the Software
+   *  Board keeps completed tasks, so it can exceed the 5000-task default cap).
+   *  Logs a warning if the sanity cap is ever reached (results truncated). */
+  private async paginateUnbounded<T>(
+    path: string,
+    query: Record<string, string | undefined> = {},
+  ): Promise<T[]> {
+    const out: T[] = [];
+    let offset: string | undefined;
+    let pages = 0;
+    while (pages < UNBOUNDED_MAX_PAGES) {
+      const q: Record<string, string | undefined> = { ...query, limit: String(PAGE_LIMIT) };
+      if (offset) q.offset = offset;
+      const resp = await this.request<T[]>(path, q);
+      out.push(...(resp.data ?? []));
+      pages += 1;
+      const next = resp.next_page;
+      if (!next || !next.offset) return out;
+      offset = next.offset;
+    }
+    logger.warn(
+      { path, pages, cap: UNBOUNDED_MAX_PAGES },
+      'asana paginateUnbounded hit the 10K-page sanity cap — results are truncated',
+    );
+    return out;
+  }
+
+  /** All tasks belonging to a project (offset-paginated, 50-page cap). */
   async getProjectTasks(projectGid: string, optFields: string): Promise<AsanaTask[]> {
     return this.paginate<AsanaTask>(`/projects/${projectGid}/tasks`, { opt_fields: optFields });
+  }
+
+  /** Every task on a project with no 50-page cap — for full-history batch jobs
+   *  (the delivery-tier poller and weekly report) that must not silently drop the
+   *  newest tasks once the board grows past 5000. */
+  async getProjectTasksUnbounded(projectGid: string, optFields: string): Promise<AsanaTask[]> {
+    return this.paginateUnbounded<AsanaTask>(`/projects/${projectGid}/tasks`, { opt_fields: optFields });
   }
 
   /** All stories (activity + comments) on a task (offset-paginated). */

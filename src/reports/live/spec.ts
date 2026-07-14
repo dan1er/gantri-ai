@@ -77,6 +77,8 @@ export const WHITELISTED_TOOLS = new Set<string>([
   'pipedrive.pipeline_snapshot',
   'pipedrive.search',
   'pipedrive.user_performance',
+  // Asana engineering QA stats
+  'asana.feature_qa_stats',
 ]);
 
 const ToolName = z.string().refine((t) => WHITELISTED_TOOLS.has(t), {

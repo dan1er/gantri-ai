@@ -48,6 +48,8 @@ import type { App as SlackApp } from '@slack/bolt';
 import { PipedriveConnector } from './connectors/pipedrive/connector.js';
 import { PipedriveApiClient } from './connectors/pipedrive/client.js';
 import { PipedriveWritesRepo } from './storage/repositories/pipedrive-writes.js';
+import { AsanaConnector } from './connectors/asana/connector.js';
+import { AsanaApiClient } from './connectors/asana/client.js';
 import { SendgridConnector } from './connectors/sendgrid/connector.js';
 import { SendgridApiClient } from './connectors/sendgrid/client.js';
 import { buildSearchConsoleConnector } from './connectors/gsc/connector.js';
@@ -100,6 +102,7 @@ async function main() {
     klaviyoApiKey,
     gscOauthClientId, gscOauthClientSecret, gscOauthRefreshToken,
     pipedriveApiToken,
+    asanaAccessToken,
     sendgridApiKey,
     notionApiTokenVault,
   ] = await Promise.all([
@@ -123,6 +126,7 @@ async function main() {
     readVaultSecret(supabase, 'GSC_OAUTH_CLIENT_SECRET').catch(() => null),
     readVaultSecret(supabase, 'GSC_OAUTH_REFRESH_TOKEN').catch(() => null),
     readVaultSecret(supabase, 'PIPEDRIVE_API_TOKEN').catch(() => null),
+    readVaultSecret(supabase, 'ASANA_ACCESS_TOKEN').catch(() => null),
     readVaultSecret(supabase, 'SENDGRID_API_KEY').catch(() => null),
     readVaultSecret(supabase, 'NOTION_API_TOKEN').catch(() => null),
   ]);
@@ -403,6 +407,20 @@ async function main() {
   // klaviyoFileSharedDeps is undefined and the noop fallback (constructed below)
   // gets `claude` directly.
   if (klaviyoFileSharedDeps) klaviyoFileSharedDeps.claude = claude;
+
+  // Asana connector — QA quality stats for Feature tickets on the Software
+  // Board. Registered here (after `claude`) because its batched classifier
+  // needs the shared Anthropic client.
+  if (asanaAccessToken) {
+    registry.register(new AsanaConnector({
+      client: new AsanaApiClient({ accessToken: asanaAccessToken }),
+      claude,
+    }));
+    logger.info('asana connector registered');
+  } else {
+    logger.warn('asana not configured (ASANA_ACCESS_TOKEN missing) — skipping registration');
+  }
+
   const orchestrator = new Orchestrator({
     registry,
     claude,

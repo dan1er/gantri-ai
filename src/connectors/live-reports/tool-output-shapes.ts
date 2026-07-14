@@ -716,6 +716,40 @@ export const TOOL_OUTPUT_SHAPES: Record<string, ToolOutputSample> = {
     expectedArrayElementKeys: { rows: ['userId', 'userName', 'value', 'rank'] },
   },
 
+  // ---------- Asana engineering QA stats ----------
+  'asana.feature_qa_stats': {
+    summary: 'QA quality stats for Feature tickets on the Software Board over a period. Top-level: { period, board, degraded, totals, finders, features }. `totals` holds the counts + two rates (realBugRatePct, anyBounceRatePct — 1 decimal, out of featuresWithQaActivity). `finders` ranks who found issues (QA: Matt/Josh vs devs), sorted desc by featuresWithRealBugs. `features` lists each in-scope feature with `outcome` (real_bug|process_bounce|clean_pass|unclassified) — empty when the tool was called with includeFeatures:false. `degraded:true` means the LLM classifier failed and bounced features are counted as unclassified, NOT real bugs.',
+    example: {
+      period: { startDate: '2026-06-01', endDate: '2026-06-30' },
+      board: 'Software Board',
+      degraded: false,
+      totals: {
+        featuresWithQaActivity: 14,
+        featuresBouncedAny: 6,
+        featuresRealBugByQa: 3,
+        featuresProcessBounceOnly: 2,
+        featuresBouncedByNonQaOnly: 1,
+        featuresUnclassified: 0,
+        realBugRatePct: 21.4,
+        anyBounceRatePct: 42.9,
+      },
+      finders: [
+        { name: 'Matthew Fite', shortName: 'Matt', isQa: true, featuresWithRealBugs: 2, featuresWithAnyBounce: 4 },
+        { name: 'Joshua Nie', shortName: 'Josh', isQa: true, featuresWithRealBugs: 1, featuresWithAnyBounce: 1 },
+        { name: 'Francisco Bautista', shortName: 'Francisco', isQa: false, featuresWithRealBugs: 0, featuresWithAnyBounce: 1 },
+      ],
+      features: [
+        { gid: '1214467028143235', name: 'Normalize image handling', url: 'https://app.asana.com/0/1210754051061529/1214467028143235', outcome: 'real_bug', finders: ['Matthew Fite'], reason: 'broken image render on PDP', bounceCountInWindow: 1 },
+        { gid: '1214744716166738', name: 'Checkout express pay', url: 'https://app.asana.com/0/1210754051061529/1214744716166738', outcome: 'process_bounce', finders: ['Joshua Nie'], reason: 'unclear acceptance criteria', bounceCountInWindow: 1 },
+      ],
+    },
+    expectedTopLevelKeys: ['period', 'board', 'degraded', 'totals', 'finders', 'features'],
+    expectedArrayElementKeys: {
+      finders: ['name', 'shortName', 'isQa', 'featuresWithRealBugs', 'featuresWithAnyBounce'],
+      features: ['gid', 'name', 'url', 'outcome', 'finders', 'reason', 'bounceCountInWindow'],
+    },
+  },
+
   'grafana.sql': {
     summary: 'Run an ad-hoc SQL query against the Porter read-replica. { fields, rows }. Each `rows[]` entry is a flat object with column names as keys. Amounts on Transactions.amount are JSON in cents — divide by 100 for dollars in the SQL itself.',
     example: {

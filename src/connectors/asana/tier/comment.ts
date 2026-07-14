@@ -87,21 +87,21 @@ function whyLine(decision: Decision): string {
     case 't2_risk_trigger':
       switch (decision.evidenceFact) {
         case 'money':
-          return 'it changes money — a charge, refund, payout, price, tax, shipping, discount, credit, or gift-card value (rubric Step 4).';
+          return 'it changes money — a charge, refund, payout, price, tax, shipping, discount, credit, or gift-card value (rubric Step 3).';
         case 'irreversible_external':
-          return 'it takes an irreversible action for a real customer — a committed/cancelled order, a customer email/SMS/push, or a hard-delete (rubric Step 4).';
+          return 'it takes an irreversible action for a real customer — a committed/cancelled order, a customer email/SMS/push, or a hard-delete (rubric Step 3).';
         case 'data_integrity':
-          return 'it can corrupt orders, inventory, or stored records in a way that is hard to undo (rubric Step 4).';
+          return 'it can corrupt orders, inventory, or stored records in a way that is hard to undo (rubric Step 3).';
         case 'access_security':
-          return 'it changes authentication, access, or permissions in a way that could lock customers out or expose data (rubric Step 4).';
+          return 'it changes authentication, access, or permissions in a way that could lock customers out or expose data (rubric Step 3).';
         default:
-          return 'it changes behavior in a way that is hard to recover from or costly (rubric Step 4).';
+          return 'it changes behavior in a way that is hard to recover from or costly (rubric Step 3).';
       }
     case 'behavior_at_base':
       return `it changes behavior but carries none of the money / irreversible / data-integrity / access risks, so it keeps the ${decision.baseTier} base for its domain (rubric Step 2).`;
     case 'inconclusive': {
       const fact = decision.evidenceFact ?? 'behavior_change';
-      return `couldn't determine ${FACT_PHRASE[fact]} from the ticket → defaulting to T1 (rubric Step 5: unsure → T1). Add detail to the description and the bot will re-classify.`;
+      return `couldn't determine ${FACT_PHRASE[fact]} from the ticket → defaulting to T1 (rubric Step 4: unsure → T1). Add detail to the description and the bot will re-classify.`;
     }
   }
 }

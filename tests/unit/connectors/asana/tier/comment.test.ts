@@ -56,7 +56,7 @@ describe('renderTierComment', () => {
     const f = facts({ behavior_change: { v: 'unclear' }, domain: 'unknown' });
     const text = renderTierComment(decideTier(f), f, 2);
     expect(text).toContain('🤖 Delivery Tier: T1 — production, then QA');
-    expect(text).toContain('defaulting to T1 (rubric Step 5: unsure → T1)');
+    expect(text).toContain('defaulting to T1 (rubric Step 4: unsure → T1)');
     expect(text).not.toContain('Evidence:');
   });
 

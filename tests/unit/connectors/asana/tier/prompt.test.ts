@@ -44,15 +44,18 @@ describe('delivery-tier rubric prompt', () => {
     }
   });
 
-  it('the Step 2 prose agrees with the base-tier table (money-adjacent are T1)', () => {
+  it('the Step 2 prose agrees with the base-tier table (payouts/quotes/statements are T1)', () => {
     const step2 = prompt.slice(prompt.indexOf('## Step 2'), prompt.indexOf('## Step 3'));
-    // Page Version 2: the money-adjacent domains sit at T1 base and reach T2 only via
-    // Step 3's money trigger. The prose bullet must say they "sit at T1", and the four
-    // rows must be T1 — prose and table must agree so page ↔ code ↔ prompt line up.
-    expect(step2).toMatch(/Money-adjacent[^\n]*sit at\s+T1/i);
-    for (const domain of ['shopping_checkout', 'orders_notifications', 'order_management', 'payouts_statements']) {
-      const row = new RegExp(`\\|\\s*${domain}\\s*\\|[^\\n]*\\|\\s*T1\\s*\\|`);
-      expect(step2, `${domain} → T1`).toMatch(row);
+    // Page Version 2 (hand-calibrated): only payouts / quotes / statements sit at T1
+    // among the money surfaces; they reach T2 only via Step 3's money trigger. The
+    // customer money/order surfaces (checkout, order management, orders / notifications)
+    // sit at T2 base. Prose and table must agree so page ↔ code ↔ prompt line up.
+    expect(step2).toMatch(/Payouts \/ quotes \/ statements[^\n]*sit at\s+T1/i);
+    const t1Row = new RegExp(`\\|\\s*payouts_statements\\s*\\|[^\\n]*\\|\\s*T1\\s*\\|`);
+    expect(step2, 'payouts_statements → T1').toMatch(t1Row);
+    for (const domain of ['shopping_checkout', 'order_management', 'orders_notifications']) {
+      const row = new RegExp(`\\|\\s*${domain}\\s*\\|[^\\n]*\\|\\s*T2\\s*\\|`);
+      expect(step2, `${domain} → T2`).toMatch(row);
     }
   });
 

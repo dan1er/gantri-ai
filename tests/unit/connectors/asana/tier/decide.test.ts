@@ -37,20 +37,24 @@ describe('DOMAIN_BASE_TIER — transcribed from the Notion page', () => {
   it('has exactly 36 domains', () => {
     expect(Object.keys(DOMAIN_BASE_TIER)).toHaveLength(36);
   });
-  it('T2 base only for the three inherently-dangerous domains', () => {
+  it('T2 base for the inherently-dangerous domains plus the customer money/order surfaces', () => {
     const t2 = Object.entries(DOMAIN_BASE_TIER)
       .filter(([, t]) => t === 'T2')
       .map(([d]) => d)
       .sort();
-    // Exactly three T2 base domains, matching the Notion page (Version 2) table:
-    // the inherently dangerous ones (auth, inventory, production). The money-adjacent
-    // customer surfaces (checkout, orders, order management, payouts / statements /
-    // quotes) sit at T1 base and reach T2 only via Step 3's money trigger.
+    // Exactly six T2 base domains, matching the Notion page (Version 2, hand-
+    // calibrated) table: the inherently dangerous ones (auth, inventory, production)
+    // plus the customer money / order surfaces (checkout, order management, orders /
+    // notifications), where a base defect ships real customer harm. Payouts /
+    // statements / quotes stay at T1 and reach T2 only via Step 3's money trigger.
     expect(t2).toEqual(
       [
         'auth_accounts',
         'inventory_materials',
         'production_workflow',
+        'shopping_checkout',
+        'order_management',
+        'orders_notifications',
       ].sort(),
     );
   });
@@ -65,12 +69,13 @@ describe('DOMAIN_BASE_TIER — transcribed from the Notion page', () => {
   });
 
   it('pins the money-adjacent domains by name (page-table parity)', () => {
-    // Every money-adjacent domain sits at T1 base (page Version 2) and only reaches
-    // T2 via Step 3's money trigger — the customer money/order surfaces alongside the
-    // MadeOS ones. These are the invariants the final model depends on.
-    expect(DOMAIN_BASE_TIER.shopping_checkout).toBe('T1');
-    expect(DOMAIN_BASE_TIER.orders_notifications).toBe('T1');
-    expect(DOMAIN_BASE_TIER.order_management).toBe('T1');
+    // Page Version 2 (hand-calibrated): the customer money/order surfaces sit at T2
+    // base — a base defect there ships real customer harm. Payouts / statements /
+    // quotes (marketplace and MadeOS) stay at T1 and reach T2 only via Step 3's
+    // money trigger. These are the invariants the final model depends on.
+    expect(DOMAIN_BASE_TIER.shopping_checkout).toBe('T2');
+    expect(DOMAIN_BASE_TIER.orders_notifications).toBe('T2');
+    expect(DOMAIN_BASE_TIER.order_management).toBe('T2');
     expect(DOMAIN_BASE_TIER.payouts_statements).toBe('T1');
     expect(DOMAIN_BASE_TIER.made_quoting_billing).toBe('T1');
     expect(DOMAIN_BASE_TIER.made_order_management).toBe('T1');
@@ -80,9 +85,20 @@ describe('DOMAIN_BASE_TIER — transcribed from the Notion page', () => {
 describe('decideTier — money-adjacent domain invariants', () => {
   it('payouts/statements behaviour change with no hard trigger keeps the T1 base', () => {
     // A behaviour-changing payouts ticket with no money/irreversible/integrity/access
-    // trigger is T1 — matching a human applying page Version 2 (money-adjacent = T1
-    // base). It only reaches T2 when a hard trigger fires.
+    // trigger is T1 — matching a human applying page Version 2 (payouts / statements /
+    // quotes = T1 base). It only reaches T2 when a hard trigger fires.
     const d = decideTier(facts({ behavior_change: 'yes', domain: 'payouts_statements' }));
+    expect(d.tier).toBe('T1');
+    expect(d.baseTier).toBe('T1');
+    expect(d.firedRule).toBe('behavior_at_base');
+  });
+
+  it('payouts bookkeeping stamp (mark statement Paid, money=no) stays at the T1 base', () => {
+    // Step 3's money-trigger carve-out: internal bookkeeping such as marking a
+    // statement Paid or stamping a status date does NOT fire the money trigger even
+    // though it changes behaviour. The extractor answers money=no, so this keeps the
+    // payouts_statements T1 base instead of escalating to T2.
+    const d = decideTier(facts({ behavior_change: 'yes', money: 'no', domain: 'payouts_statements' }));
     expect(d.tier).toBe('T1');
     expect(d.baseTier).toBe('T1');
     expect(d.firedRule).toBe('behavior_at_base');
@@ -150,7 +166,7 @@ describe('decideTier — Step 3 (risk downgrade)', () => {
     );
     expect(d.tier).toBe('T0');
     expect(d.firedRule).toBe('cosmetic');
-    expect(d.baseTier).toBe('T1');
+    expect(d.baseTier).toBe('T2');
   });
 
   it('checkout restyle, logic intact → T1 (behaviour-preserving cap min(base, T1))', () => {
@@ -159,7 +175,9 @@ describe('decideTier — Step 3 (risk downgrade)', () => {
     );
     expect(d.tier).toBe('T1');
     expect(d.firedRule).toBe('behavior_preserving');
-    expect(d.baseTier).toBe('T1');
+    // Base restored to T2 (page Version 2), but a behaviour-preserving change is
+    // capped at min(base, T1) = T1.
+    expect(d.baseTier).toBe('T2');
   });
 
   it('reporting dashboard cosmetic tweak → T0', () => {
@@ -190,6 +208,41 @@ describe('decideTier — Step 4 (hard triggers) & Step 2 (keep base)', () => {
     expect(d.tier).toBe('T2');
     expect(d.firedRule).toBe('behavior_at_base');
     expect(d.baseTier).toBe('T2');
+  });
+
+  it.each(['shopping_checkout', 'order_management', 'orders_notifications'] as const)(
+    '%s behaviour change without a hard trigger → T2 (restored T2 base, page Version 2)',
+    (domain) => {
+      // Page Version 2 (hand-calibrated) restores these customer money/order surfaces
+      // to a T2 base: a behaviour change with no money/irreversible/integrity/access
+      // trigger now keeps the T2 base instead of the old T1.
+      const d = decideTier(facts({ behavior_change: 'yes', domain }));
+      expect(d.tier).toBe('T2');
+      expect(d.firedRule).toBe('behavior_at_base');
+      expect(d.baseTier).toBe('T2');
+    },
+  );
+
+  it('wrong-data display bug is behaviour (not cosmetic) → keeps its domain base tier', () => {
+    // Page Version 2: "Showing wrong data is not cosmetic — that is a behavior bug."
+    // The extractor answers behavior_change=yes / cosmetic_only=no, so the change is
+    // NOT downgraded to T0; with no hard trigger it keeps the domain base (T1 here).
+    const d = decideTier(
+      facts({ behavior_change: 'yes', cosmetic_only: 'no', domain: 'production_monitoring' }),
+    );
+    expect(d.tier).toBe('T1');
+    expect(d.firedRule).toBe('behavior_at_base');
+    expect(d.baseTier).toBe('T1');
+  });
+
+  it('internal admin report (Grafana) → production_monitoring base T1', () => {
+    // Page Version 2 folds internal admin reports (incl. Grafana) into
+    // production_monitoring (T1 base). A behaviour change there with no hard trigger
+    // stays T1 — read-only reporting never escalates on its own.
+    expect(DOMAIN_BASE_TIER.production_monitoring).toBe('T1');
+    const d = decideTier(facts({ behavior_change: 'yes', domain: 'production_monitoring' }));
+    expect(d.tier).toBe('T1');
+    expect(d.firedRule).toBe('behavior_at_base');
   });
 
   it('recoverable behaviour change in a T1 domain → keeps T1', () => {

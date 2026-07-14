@@ -1,5 +1,10 @@
 export type RunState = 'running' | 'success' | 'failed';
 
+/** Character budget for a fetched PR diff. Above this the diff is truncated with
+ *  a marker so the delivery-tier re-check keeps a bounded, cheap LLM payload. */
+export const PR_DIFF_MAX_CHARS = 50_000;
+const PR_DIFF_TRUNCATION_MARKER = `\n\n[... diff truncated at ${PR_DIFF_MAX_CHARS} chars ...]`;
+
 /**
  * Extract the PR number from a deploy tag. Accepts the current timestamp-first
  * format `deploy-<YYYY.MM.DD[.HH.MM.SS]>-<pr>` (date, optionally with time) and
@@ -84,15 +89,44 @@ export class GithubDispatcher {
     return { ref: body.head.ref, link: body.html_url ?? `${repoUrl}/pull/${prNumber}` };
   }
 
-  /** Open PRs for a repo, most-recently-updated first (for the picker). */
-  async listOpenPRs(repo: string, limit = 30): Promise<{ number: number; title: string; url: string; head: string }[]> {
+  /** Open PRs for a repo, most-recently-updated first (for the picker AND the
+   *  delivery-tier PR re-check, which needs the head sha for dedupe and the body
+   *  to find the linked Asana task). */
+  async listOpenPRs(
+    repo: string,
+    limit = 30,
+  ): Promise<{ number: number; title: string; url: string; head: string; sha: string; body: string }[]> {
     const res = await this.fetch(
       `${this.base(repo)}/pulls?state=open&per_page=${limit}&sort=updated&direction=desc`,
       { headers: this.headers() },
     );
     if (!res.ok) throw new Error(`list PRs failed: ${res.status}`);
-    const body = (await res.json()) as { number: number; title: string; html_url: string; head: { ref: string } }[];
-    return body.map((p) => ({ number: p.number, title: p.title, url: p.html_url, head: p.head.ref }));
+    const body = (await res.json()) as {
+      number: number; title: string; html_url: string; body: string | null; head: { ref: string; sha: string };
+    }[];
+    return body.map((p) => ({
+      number: p.number,
+      title: p.title,
+      url: p.html_url,
+      head: p.head.ref,
+      sha: p.head.sha,
+      body: p.body ?? '',
+    }));
+  }
+
+  /**
+   * Unified diff for a PR (GitHub `diff` media type). Truncated to a bounded
+   * character budget with an explicit marker so a huge PR stays a cheap LLM
+   * payload — the delivery-tier re-check reads at most `PR_DIFF_MAX_CHARS`.
+   */
+  async prDiff(repo: string, number: number): Promise<{ diff: string; truncated: boolean }> {
+    const res = await this.fetch(`${this.base(repo)}/pulls/${number}`, {
+      headers: { ...this.headers(), Accept: 'application/vnd.github.diff' },
+    });
+    if (!res.ok) throw new Error(`get PR diff ${repo}#${number} failed: ${res.status}`);
+    const full = await res.text();
+    if (full.length <= PR_DIFF_MAX_CHARS) return { diff: full, truncated: false };
+    return { diff: full.slice(0, PR_DIFF_MAX_CHARS) + PR_DIFF_TRUNCATION_MARKER, truncated: true };
   }
 
   /**

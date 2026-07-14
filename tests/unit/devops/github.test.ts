@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { GithubDispatcher, prFromTag } from '../../../src/devops/github.js';
+import { GithubDispatcher, prFromTag, PR_DIFF_MAX_CHARS } from '../../../src/devops/github.js';
+
+function textResponse(text: string, status = 200) {
+  return { ok: status < 300, status, text: async () => text } as Response;
+}
 
 describe('prFromTag', () => {
   it('parses the date-first format (PR last)', () => {
@@ -118,6 +122,54 @@ describe('GithubDispatcher', () => {
       .mockResolvedValueOnce(jsonResponse({ message: 'Reference already exists' }, 422));
     const gh = new GithubDispatcher({ token: 't', owner: 'gantri', fetch: fetchMock });
     await expect(gh.ensureBranch('core', 'preview-as-2')).resolves.toBeUndefined();
+  });
+
+  it('listOpenPRs returns head sha and body for the re-check', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse([
+      { number: 7, title: 'Fix', html_url: 'https://github.com/gantri/mantle/pull/7', body: 'links app.asana.com/0/1/2', head: { ref: 'feat/x', sha: 'sha7' } },
+    ]));
+    const gh = new GithubDispatcher({ token: 't', owner: 'gantri', fetch: fetchMock });
+    const prs = await gh.listOpenPRs('mantle');
+    expect(prs[0]).toEqual({
+      number: 7, title: 'Fix', url: 'https://github.com/gantri/mantle/pull/7',
+      head: 'feat/x', sha: 'sha7', body: 'links app.asana.com/0/1/2',
+    });
+  });
+
+  it('listOpenPRs coerces a null body to an empty string', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse([
+      { number: 8, title: 'No body', html_url: 'u', body: null, head: { ref: 'b', sha: 's' } },
+    ]));
+    const gh = new GithubDispatcher({ token: 't', owner: 'gantri', fetch: fetchMock });
+    const prs = await gh.listOpenPRs('mantle');
+    expect(prs[0].body).toBe('');
+  });
+
+  it('prDiff requests the diff media type and returns an untruncated small diff', async () => {
+    const diff = 'diff --git a/x b/x\n+line';
+    const fetchMock = vi.fn().mockResolvedValue(textResponse(diff));
+    const gh = new GithubDispatcher({ token: 't', owner: 'gantri', fetch: fetchMock });
+    const out = await gh.prDiff('porter', 5180);
+    expect(fetchMock.mock.calls[0][0]).toBe('https://api.github.com/repos/gantri/porter/pulls/5180');
+    expect((fetchMock.mock.calls[0][1] as RequestInit).headers).toMatchObject({ Accept: 'application/vnd.github.diff' });
+    expect(out).toEqual({ diff, truncated: false });
+  });
+
+  it('prDiff truncates an oversized diff and marks it', async () => {
+    const huge = 'x'.repeat(PR_DIFF_MAX_CHARS + 5000);
+    const fetchMock = vi.fn().mockResolvedValue(textResponse(huge));
+    const gh = new GithubDispatcher({ token: 't', owner: 'gantri', fetch: fetchMock });
+    const out = await gh.prDiff('porter', 1);
+    expect(out.truncated).toBe(true);
+    expect(out.diff.length).toBeGreaterThan(PR_DIFF_MAX_CHARS);
+    expect(out.diff.startsWith('x'.repeat(PR_DIFF_MAX_CHARS))).toBe(true);
+    expect(out.diff).toContain('truncated');
+  });
+
+  it('prDiff throws on a non-ok response', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(textResponse('Not Found', 404));
+    const gh = new GithubDispatcher({ token: 't', owner: 'gantri', fetch: fetchMock });
+    await expect(gh.prDiff('porter', 9)).rejects.toThrow(/get PR diff porter#9 failed: 404/);
   });
 
   it('deleteBranch DELETEs the ref and tolerates a 404', async () => {

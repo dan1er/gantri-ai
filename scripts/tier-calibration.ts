@@ -41,12 +41,13 @@
  *     invokes exactly this command on any PR that touches `src/prompts/**`,
  *     `src/connectors/asana/tier/**`, or `tests/golden/**`.
  *
- * Outputs (to the scratchpad dir, NOT committed):
+ * Outputs (to $TIER_CALIB_OUT_DIR, default os.tmpdir()/tier-calibration; NOT committed):
  *   - tier-calibration-results[-<label>].md   summary + human-readable table
  *   - tier-calibration-results[-<label>].json machine-readable facts per ticket
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Anthropic from '@anthropic-ai/sdk';
@@ -108,8 +109,7 @@ const STABILITY_RUNS = 5;
 const EVIDENCE_MAX = 80;
 
 const OUT_DIR =
-  process.env.TIER_CALIB_OUT_DIR ??
-  '/private/tmp/claude-501/-Users-danierestevez-Documents-work-gantri/b3660c2b-e86f-4c83-8a36-77fd2ee47cf9/scratchpad';
+  process.env.TIER_CALIB_OUT_DIR ?? path.join(os.tmpdir(), 'tier-calibration');
 
 /** Minimal CLI parse: `--tasks <file>` fixes the ticket set; `--golden <file>`
  *  switches to golden-eval mode; `--label <name>` suffixes the output basenames so a

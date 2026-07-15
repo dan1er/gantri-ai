@@ -1,0 +1,39 @@
+# Regression gate for the Delivery Tier classifier.
+#
+# Any change to the rubric prompt, the tier extract/decide pipeline, or the golden
+# set must pass the committed golden eval before merge. The eval makes REAL
+# Anthropic (Haiku) calls and reads the ASANA_ACCESS_TOKEN from the Supabase vault,
+# then classifies every golden ticket and exits non-zero if any row lands off its
+# expected tier (scripts/tier-calibration.ts --golden ... exits 1 on FAIL).
+#
+# Required secrets:
+#   ANTHROPIC_API_KEY          (already set on the repo)
+#   SUPABASE_URL               (MUST be added — used to read the vault ASANA token)
+#   SUPABASE_SERVICE_ROLE_KEY  (MUST be added — used to read the vault ASANA token)
+name: Tier Golden Eval
+on:
+  pull_request:
+    paths:
+      - 'src/prompts/**'
+      - 'src/connectors/asana/tier/**'
+      - 'tests/golden/**'
+concurrency:
+  group: tier-golden-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  golden:
+    name: Golden eval (real Anthropic)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Run golden eval
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx tsx scripts/tier-calibration.ts --golden tests/golden/tier-golden.json

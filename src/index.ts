@@ -27,6 +27,7 @@ import { LiveReportsConnector } from './connectors/live-reports/connector.js';
 import { LiveCatalogs } from './connectors/live-reports/live-catalogs.js';
 import { PublishedReportsRepo } from './storage/repositories/published-reports.js';
 import { mountLiveReportsRoutes } from './server/live-reports-routes.js';
+import { loadBuildStamp, createModuleStatus, renderBuildInfo } from './server/build-info.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GantriPorterConnector } from './connectors/gantri-porter/gantri-porter-connector.js';
@@ -98,6 +99,14 @@ async function main() {
   // currently writing to.
   const writeTarget = process.env.PORTER_WRITE_TARGET === 'prod' ? 'prod' : 'staging';
   logger.info({ porter_write_target: writeTarget }, 'gantri_porter_write_target');
+
+  // Build fingerprint (baked into the image at docker build) + a live ledger of
+  // which optional modules actually get wired below. Both are exposed unauthed at
+  // GET /internal/build so the deploy-canary workflow can detect a Fly image
+  // clobber that silently drops a module (e.g. the delivery-tier classifier).
+  const buildStamp = loadBuildStamp();
+  const moduleStatus = createModuleStatus();
+  logger.info({ sha: buildStamp.sha, builtAt: buildStamp.builtAt }, 'build_stamp');
 
   const [
     email, password, dashboardId,
@@ -569,6 +578,7 @@ async function main() {
               input,
             ),
         });
+        moduleStatus.flcReview = true;
         logger.info('/review-flc command registered');
       }
     },
@@ -674,6 +684,12 @@ async function main() {
   // orchestrator.run() calls go through cachingRegistry.execute(...).
   orchestrator.setRegistry(cachingRegistry as unknown as ConnectorRegistry);
 
+  // Reflect whether the wholesale product-export connector got wired (its tools
+  // are namespaced `products.*`). Deployed-but-not-merged today, so this reads
+  // false on main — but it flips true automatically the moment the connector is
+  // registered, giving the build endpoint an honest per-module boot signal.
+  moduleStatus.productExport = registry.getAllTools().some((t) => t.name.startsWith('products.'));
+
   // Liveness check — only verifies the HTTP server is up.
   // Must stay fast (<1s) so Fly health checks don't trigger auth flows on boot.
   receiver.router.get('/healthz', (_req, res) => {
@@ -689,6 +705,15 @@ async function main() {
     ]);
     const ok = nb.ok && gp.ok && gf.ok;
     res.status(ok ? 200 : 503).json({ ok, northbeam: nb, gantriPorter: gp, grafana: gf });
+  });
+
+  // Build fingerprint + boot-time module ledger. NO auth — it leaks nothing
+  // sensitive (a commit sha + booleans). `modules.tier` reports the live prompt
+  // version only once the tier runner actually started (see below), so a Fly
+  // clobber that drops the classifier shows up here as `tier: false`. Reads the
+  // live `moduleStatus` object, so flags flipped later in boot are reflected.
+  receiver.router.get('/internal/build', (_req, res) => {
+    res.status(200).json(renderBuildInfo(buildStamp, moduleStatus));
   });
 
   const reportsRunner = new ReportsRunner({
@@ -836,6 +861,9 @@ async function main() {
 
   if (tierRunner) {
     tierRunner.start();
+    // Report the live prompt version at /internal/build ONLY now that the runner
+    // is actually running — this is the exact signal the deploy canary watches.
+    moduleStatus.tier = tierPromptVersion!;
     logger.info('delivery tier runner started');
   }
 
@@ -849,6 +877,7 @@ async function main() {
         : advancePreviewJob(job, d),
     });
     jobsRunner.start();
+    moduleStatus.devops = true;
     logger.info({ vercelWiring: !!vercel }, 'devops jobs runner started');
   } else {
     logger.warn('devops disabled — set OPS_CHANNEL_ID + GITHUB_TOKEN to enable /preview');

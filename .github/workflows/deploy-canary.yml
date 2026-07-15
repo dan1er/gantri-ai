@@ -1,0 +1,58 @@
+# External deploy canary for gantri-ai-bot.
+#
+# Every 15 minutes, GET https://gantri-ai-bot.fly.dev/internal/build and assert
+# the delivery-tier classifier is still wired (`modules.tier` truthy). Two prod
+# incidents (Fly image clobbering — CI and hand-run feature-branch deploys
+# replace the whole image) silently dropped the tier module with zero errors.
+# This cron is the external tripwire: a RED run IS the alert (GitHub emails on
+# scheduled-workflow failure), and if a Slack webhook is configured it also posts
+# to the ops channel.
+#
+# Required secrets: none.
+# Optional secret:
+#   SLACK_WEBHOOK  — Slack Incoming Webhook URL. When set, a failure also posts to
+#                    the ops channel. When absent, the red cron run is the only
+#                    (still sufficient) notification.
+name: Deploy Canary
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+concurrency:
+  group: deploy-canary
+  cancel-in-progress: true
+jobs:
+  canary:
+    name: Verify tier module is live
+    runs-on: ubuntu-latest
+    env:
+      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+    steps:
+      - name: Fetch /internal/build and assert modules.tier
+        run: |
+          set -euo pipefail
+          URL="https://gantri-ai-bot.fly.dev/internal/build"
+          echo "GET $URL"
+          if ! BODY="$(curl -fsS --max-time 20 "$URL")"; then
+            echo "::error::deploy-canary: $URL is unreachable"
+            exit 1
+          fi
+          echo "$BODY"
+          TIER="$(printf '%s' "$BODY" | jq -r '.modules.tier')"
+          SHA="$(printf '%s' "$BODY" | jq -r '.sha')"
+          echo "live sha=$SHA modules.tier=$TIER"
+          # tier is falsy (false / null / empty) when the classifier did not boot.
+          if [ -z "$TIER" ] || [ "$TIER" = "false" ] || [ "$TIER" = "null" ]; then
+            echo "::error::deploy-canary: modules.tier is falsy ($TIER) at sha=$SHA — the delivery-tier classifier is NOT wired in the live image (Fly clobber?)"
+            exit 1
+          fi
+          echo "deploy-canary OK: tier=$TIER sha=$SHA"
+      - name: Notify Slack on failure
+        if: ${{ failure() && env.SLACK_WEBHOOK != '' }}
+        run: |
+          set -euo pipefail
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          TEXT=":rotating_light: *gantri-ai-bot deploy canary FAILED* — the delivery-tier classifier is not wired in the live image (\`modules.tier\` falsy at https://gantri-ai-bot.fly.dev/internal/build). Likely a Fly image clobber; redeploy main. Run: $RUN_URL"
+          curl -fsS -X POST -H 'Content-type: application/json' \
+            --data "$(jq -n --arg t "$TEXT" '{text:$t}')" \
+            "$SLACK_WEBHOOK"

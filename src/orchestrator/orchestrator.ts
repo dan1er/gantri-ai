@@ -272,25 +272,32 @@ export class Orchestrator {
             errorMessage: result.ok ? undefined : result.error?.message,
           });
 
-          // Intercept reports.attach_file results: collect the attachment and
-          // send Claude a trimmed confirmation instead of the full content (no
-          // point feeding the blob back in).
+          // Intercept any tool result that carries a downloadable attachment
+          // (single `attachment` or an `attachments[]`): collect it for upload
+          // and send Claude a trimmed confirmation instead of the full blob.
+          // This generalizes the original `reports.attach_file`-only path so
+          // server-side CSV builders (e.g. products.export_catalog) can return
+          // a ReportAttachment the same way — and subsumes attach_file, whose
+          // result is exactly `{ attachment }`.
           let toolContent: string;
-          if (result.ok && registryName === 'reports.attach_file') {
-            const data = result.data as { attachment?: ReportAttachment };
-            if (data?.attachment) {
-              attachments.push(data.attachment);
-              toolContent = JSON.stringify({
-                ok: true,
-                attached: {
-                  filename: data.attachment.normalizedFilename,
-                  format: data.attachment.format,
-                  bytes: data.attachment.content.length,
-                },
-              });
-            } else {
-              toolContent = JSON.stringify(result.data);
-            }
+          const collected = result.ok ? collectAttachments(result.data) : [];
+          if (result.ok && collected.length > 0) {
+            attachments.push(...collected);
+            // Forward any non-attachment payload keys (counts, notes) so the
+            // model can describe what it exported, plus a compact summary of
+            // each attached file.
+            const rest = { ...(result.data as Record<string, unknown>) };
+            delete rest.attachment;
+            delete rest.attachments;
+            toolContent = JSON.stringify({
+              ok: true,
+              ...rest,
+              attached: collected.map((a) => ({
+                filename: a.normalizedFilename,
+                format: a.format,
+                bytes: a.content.length,
+              })),
+            });
           } else if (result.ok) {
             toolContent = JSON.stringify(result.data);
           } else {
@@ -319,6 +326,31 @@ export class Orchestrator {
       };
     });
   }
+}
+
+/** Pull any ReportAttachment(s) out of a tool result payload. Supports both a
+ *  single `{ attachment }` (e.g. reports.attach_file) and an `{ attachments: [] }`
+ *  list. Returns only well-formed attachments (must have content + format). */
+function collectAttachments(data: unknown): ReportAttachment[] {
+  if (!data || typeof data !== 'object') return [];
+  const out: ReportAttachment[] = [];
+  const single = (data as { attachment?: unknown }).attachment;
+  const many = (data as { attachments?: unknown }).attachments;
+  const candidates: unknown[] = [];
+  if (single) candidates.push(single);
+  if (Array.isArray(many)) candidates.push(...many);
+  for (const c of candidates) {
+    if (
+      c &&
+      typeof c === 'object' &&
+      typeof (c as ReportAttachment).content === 'string' &&
+      typeof (c as ReportAttachment).format === 'string' &&
+      typeof (c as ReportAttachment).normalizedFilename === 'string'
+    ) {
+      out.push(c as ReportAttachment);
+    }
+  }
+  return out;
 }
 
 function extractText(content: any[]): string {

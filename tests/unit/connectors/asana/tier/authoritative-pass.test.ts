@@ -2,8 +2,9 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   AuthoritativePass,
   extractAsanaTaskGid,
+  extractPrLinks,
 } from '../../../../../src/connectors/asana/tier/authoritative-pass.js';
-import type { AsanaApiClient, AsanaTask } from '../../../../../src/connectors/asana/client.js';
+import type { AsanaApiClient, AsanaStory, AsanaTask } from '../../../../../src/connectors/asana/client.js';
 import type { GithubDispatcher } from '../../../../../src/devops/github.js';
 import type { TierClassificationsRepo, TierClassificationRecord } from '../../../../../src/storage/repositories/tier-classifications.js';
 import type { TierPrChecksRepo } from '../../../../../src/storage/repositories/tier-pr-checks.js';
@@ -51,16 +52,46 @@ function claudeReturning(tier: DeliveryTier) {
   };
 }
 
-function task(gid: string, tierOptionGid: string | null): AsanaTask {
+function task(gid: string, tierOptionGid: string | null, notes = 'x'.repeat(60)): AsanaTask {
   return {
     gid,
     name: `Task ${gid}`,
-    notes: 'x'.repeat(60),
+    notes,
     custom_fields: [
       { gid: TYPE_FIELD_GID, name: 'Type', enum_value: { gid: 'type-opt', name: 'Feature' } },
       { gid: DELIVERY_TIER_FIELD_GID, name: 'Delivery Tier', enum_value: tierOptionGid ? { gid: tierOptionGid } : null },
     ],
   };
+}
+
+/** A github.com/gantri/<repo>/pull/<n> link, the way a PR is recorded ON a ticket. */
+const GH_OWNER = 'gantri';
+function ghLink(repo = 'porter', number = 5180): string {
+  return `https://github.com/${GH_OWNER}/${repo}/pull/${number}`;
+}
+
+/** What `GithubDispatcher.getPr` returns for a directly-linked PR (open OR merged).
+ *  Body deliberately carries NO app.asana.com backlink — the whole point is that
+ *  the open-PR scan would never surface it, but the forward lookup diffs it. */
+function ghPr(o: { number?: number; sha?: string; merged?: boolean } = {}) {
+  return {
+    number: o.number ?? 5180,
+    title: 'Linked PR',
+    url: ghLink('porter', o.number ?? 5180),
+    head: 'feat/linked',
+    sha: o.sha ?? 'sha-linked',
+    body: 'no asana backlink here',
+    state: o.merged ? 'closed' : 'open',
+    merged: o.merged ?? false,
+  };
+}
+
+function story(text: string, createdAt = '2026-07-20T00:00:00Z'): AsanaStory {
+  return { gid: `story-${createdAt}`, text, created_at: createdAt, resource_subtype: 'comment_added' };
+}
+
+function subtask(name: string, notes: string): AsanaTask {
+  return { gid: `sub-${name}`, name, notes };
 }
 
 function record(over: Partial<TierClassificationRecord>): TierClassificationRecord {
@@ -104,12 +135,21 @@ interface BuildOpts {
   freshFieldTier?: DeliveryTier | null;
   record?: TierClassificationRecord | null;
   exists?: boolean;
+  /** Comments (stories) on the ticket — scanned for a forward PR link. */
+  stories?: AsanaStory[];
+  /** Subtasks on the ticket — the "Notes for QA" one is scanned for a PR link. */
+  subtasks?: AsanaTask[];
+  /** What `gh.getPr` resolves to (a directly-linked PR), or null when it 404s.
+   *  Undefined → null (no directly-linked PR; the open-PR scan is the fallback). */
+  linkedPr?: ReturnType<typeof ghPr> | null;
 }
 
 function build(o: BuildOpts = {}) {
   const gh = {
     listOpenPRs: vi.fn().mockResolvedValue(o.prs ?? [pr()]),
     prDiff: vi.fn().mockResolvedValue({ diff: 'diff --git a/x b/x\n+charge', truncated: false }),
+    getPr: vi.fn().mockResolvedValue(o.linkedPr === undefined ? null : o.linkedPr),
+    owner: GH_OWNER,
   } as unknown as GithubDispatcher;
   const baseline = task(GID, o.fieldTier === null ? null : tierToOptionGid(o.fieldTier ?? 'T1'));
   const getTask =
@@ -122,6 +162,8 @@ function build(o: BuildOpts = {}) {
     getTask,
     setEnumCustomField: vi.fn().mockResolvedValue(undefined),
     createStory: vi.fn().mockResolvedValue({ gid: 'story-new' }),
+    getTaskStories: vi.fn().mockResolvedValue(o.stories ?? []),
+    getTaskSubtasks: vi.fn().mockResolvedValue(o.subtasks ?? []),
   } as unknown as AsanaApiClient;
   const classifications = {
     get: vi.fn().mockResolvedValue(o.record === undefined ? record({}) : o.record),
@@ -320,5 +362,174 @@ describe('AuthoritativePass — no PR found (description fallback)', () => {
     const res = await pass.reviewCodeReviewTasks([t]);
     expect(res.skipped).toBe(1);
     expect(client.createStory).not.toHaveBeenCalled();
+  });
+});
+
+describe('extractPrLinks', () => {
+  it('extracts every owner-matched PR link in source order', () => {
+    const text = `see ${ghLink('porter', 1)} and later ${ghLink('mantle', 2)}`;
+    expect(extractPrLinks(text, 'gantri')).toEqual([
+      { repo: 'porter', number: 1 },
+      { repo: 'mantle', number: 2 },
+    ]);
+  });
+
+  it('accepts ANY repo under the owner, not just the sweep list', () => {
+    expect(extractPrLinks(ghLink('gantri-e2e', 7), 'gantri')).toEqual([{ repo: 'gantri-e2e', number: 7 }]);
+  });
+
+  it('filters out links under a different owner (owner match is case-insensitive)', () => {
+    expect(extractPrLinks('https://github.com/someone/porter/pull/9', 'gantri')).toEqual([]);
+    expect(extractPrLinks('https://github.com/GANTRI/porter/pull/9', 'gantri')).toEqual([
+      { repo: 'porter', number: 9 },
+    ]);
+  });
+
+  it('returns [] for empty / nullish / link-free text', () => {
+    expect(extractPrLinks('', 'gantri')).toEqual([]);
+    expect(extractPrLinks(null, 'gantri')).toEqual([]);
+    expect(extractPrLinks('no links here', 'gantri')).toEqual([]);
+  });
+});
+
+describe('AuthoritativePass — forward PR resolution from the ticket', () => {
+  it('resolves the PR from the ticket description (notes) and skips the open-PR scan', async () => {
+    const { pass, gh, client, prChecks } = build({
+      fieldTier: 'T1',
+      diffTier: 'T2',
+      record: record({ tier: 'T1', confirmedTier: 'T1' }),
+      linkedPr: ghPr({ number: 5180, sha: 'sha-notes' }),
+    });
+    const t = task(GID, tierToOptionGid('T1'), `Implements the thing. PR: ${ghLink('porter', 5180)}`);
+    const res = await pass.reviewCodeReviewTasks([t]);
+    expect(gh.getPr).toHaveBeenCalledWith('porter', 5180);
+    expect(gh.prDiff).toHaveBeenCalledWith('porter', 5180);
+    expect(gh.listOpenPRs).not.toHaveBeenCalled(); // forward lookup short-circuits the scan
+    expect(client.getTaskStories).not.toHaveBeenCalled(); // stop at the first hit (notes)
+    expect(res.superseded).toBe(1);
+    expect(client.setEnumCustomField).toHaveBeenCalledWith(GID, DELIVERY_TIER_FIELD_GID, tierToOptionGid('T2'));
+    expect(prChecks.insert).toHaveBeenCalledWith(
+      expect.objectContaining({ repo: 'porter', prNumber: 5180, headSha: 'sha-notes', verdict: 'superseded' }),
+    );
+  });
+
+  it('resolves the PR from a comment (story) when the notes name none, newest link winning', async () => {
+    const { pass, gh, client } = build({
+      fieldTier: 'T1',
+      diffTier: 'T2',
+      record: record({ tier: 'T1', confirmedTier: 'T1' }),
+      stories: [
+        story(`first PR ${ghLink('porter', 100)}`, '2026-07-20T00:00:00Z'),
+        story(`updated, use ${ghLink('porter', 200)}`, '2026-07-21T00:00:00Z'),
+      ],
+      linkedPr: ghPr({ number: 200, sha: 'sha-comment' }),
+    });
+    const t = task(GID, tierToOptionGid('T1'), 'A description with no PR link, just prose about the change.');
+    const res = await pass.reviewCodeReviewTasks([t]);
+    expect(gh.getPr).toHaveBeenCalledWith('porter', 200); // most-recently-added story link
+    expect(gh.listOpenPRs).not.toHaveBeenCalled();
+    expect(client.getTaskSubtasks).not.toHaveBeenCalled(); // stop at the story hit
+    expect(res.superseded).toBe(1);
+  });
+
+  it('resolves the PR from the "Notes for QA" subtask when notes and comments name none', async () => {
+    const { pass, gh, client } = build({
+      fieldTier: 'T1',
+      diffTier: 'T2',
+      record: record({ tier: 'T1', confirmedTier: 'T1' }),
+      stories: [story('just a plain comment, no link here')],
+      subtasks: [
+        subtask('Some other subtask', 'nothing here'),
+        subtask('Notes for QA', `Test the checkout flow. PR under review: ${ghLink('core', 321)}`),
+      ],
+      linkedPr: ghPr({ number: 321, sha: 'sha-qa' }),
+    });
+    const t = task(GID, tierToOptionGid('T1'), 'A description with no PR link.');
+    const res = await pass.reviewCodeReviewTasks([t]);
+    expect(client.getTaskStories).toHaveBeenCalled();
+    expect(client.getTaskSubtasks).toHaveBeenCalledWith(GID, 'name,notes');
+    expect(gh.getPr).toHaveBeenCalledWith('core', 321);
+    expect(gh.listOpenPRs).not.toHaveBeenCalled();
+    expect(res.superseded).toBe(1);
+  });
+
+  it('prefers the notes link over a comment and the Notes-for-QA subtask (priority order)', async () => {
+    const { pass, gh, client } = build({
+      fieldTier: 'T1',
+      diffTier: 'T2',
+      record: record({ tier: 'T1', confirmedTier: 'T1' }),
+      stories: [story(`comment link ${ghLink('porter', 999)}`)],
+      subtasks: [subtask('Notes for QA', ghLink('porter', 888))],
+      linkedPr: ghPr({ number: 111, sha: 'sha-notes' }),
+    });
+    const t = task(GID, tierToOptionGid('T1'), `Description PR: ${ghLink('mantle', 111)}`);
+    await pass.reviewCodeReviewTasks([t]);
+    expect(gh.getPr).toHaveBeenCalledWith('mantle', 111); // notes win
+    expect(gh.getPr).toHaveBeenCalledTimes(1);
+    expect(client.getTaskStories).not.toHaveBeenCalled();
+    expect(client.getTaskSubtasks).not.toHaveBeenCalled();
+  });
+
+  it('diffs a directly-linked MERGED PR — one the open-PR scan can never surface', async () => {
+    const { pass, gh, prChecks } = build({
+      fieldTier: 'T1',
+      diffTier: 'T2',
+      record: record({ tier: 'T1', confirmedTier: 'T1' }),
+      linkedPr: ghPr({ number: 5180, sha: 'sha-merged', merged: true }),
+    });
+    const t = task(GID, tierToOptionGid('T1'), `Shipped in ${ghLink('porter', 5180)}`);
+    const res = await pass.reviewCodeReviewTasks([t]);
+    expect(gh.getPr).toHaveBeenCalledWith('porter', 5180);
+    expect(gh.prDiff).toHaveBeenCalledWith('porter', 5180);
+    expect(gh.listOpenPRs).not.toHaveBeenCalled();
+    expect(res.superseded).toBe(1);
+    expect(prChecks.insert).toHaveBeenCalledWith(
+      expect.objectContaining({ repo: 'porter', prNumber: 5180, headSha: 'sha-merged' }),
+    );
+  });
+
+  it('ignores a PR link under a different owner and falls back to the open-PR scan', async () => {
+    const { pass, gh } = build({
+      fieldTier: 'T1',
+      diffTier: 'T2',
+      record: record({ tier: 'T1', confirmedTier: 'T1' }),
+      prs: [pr()], // ASANA_LINK body → the scan resolves this task's gid
+    });
+    const t = task(GID, tierToOptionGid('T1'), 'PR: https://github.com/someone-else/porter/pull/5180');
+    const res = await pass.reviewCodeReviewTasks([t]);
+    expect(gh.getPr).not.toHaveBeenCalled(); // foreign owner → not a forward hit
+    expect(gh.listOpenPRs).toHaveBeenCalledWith('mantle'); // fell back to the scan
+    expect(res.superseded).toBe(1);
+  });
+
+  it('falls back to the open-PR scan when a ticket-linked PR no longer exists (404)', async () => {
+    const { pass, gh } = build({
+      fieldTier: 'T1',
+      diffTier: 'T2',
+      record: record({ tier: 'T1', confirmedTier: 'T1' }),
+      linkedPr: null, // gh.getPr → 404 → null
+      prs: [pr()], // scan resolves via the ASANA_LINK body
+    });
+    const t = task(GID, tierToOptionGid('T1'), `PR: ${ghLink('porter', 404)}`);
+    const res = await pass.reviewCodeReviewTasks([t]);
+    expect(gh.getPr).toHaveBeenCalledWith('porter', 404);
+    expect(gh.listOpenPRs).toHaveBeenCalledWith('mantle'); // stale link → fell back
+    expect(res.superseded).toBe(1);
+  });
+
+  it('builds the fallback scan at most once across a batch (only for tasks that miss)', async () => {
+    // Two tasks: one resolves forward (notes link), one names no PR. The expensive
+    // open-PR scan must run exactly once, and only because of the second task.
+    const { pass, gh } = build({
+      fieldTier: 'T1',
+      diffTier: 'T2',
+      record: record({ tier: 'T1', confirmedTier: 'T1' }),
+      linkedPr: ghPr({ number: 5180, sha: 'sha-notes' }),
+      prs: [pr()],
+    });
+    const resolved = task(GID, tierToOptionGid('T1'), `PR: ${ghLink('porter', 5180)}`);
+    const unresolved = task(GID, tierToOptionGid('T1'), 'No PR named anywhere in this ticket.');
+    await pass.reviewCodeReviewTasks([resolved, unresolved]);
+    expect(gh.listOpenPRs).toHaveBeenCalledTimes(1); // one repo (mantle), built lazily once
   });
 });

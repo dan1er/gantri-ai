@@ -172,6 +172,47 @@ describe('GithubDispatcher', () => {
     await expect(gh.prDiff('porter', 9)).rejects.toThrow(/get PR diff porter#9 failed: 404/);
   });
 
+  it('getPr returns an open PR with its head sha and merged flag', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      number: 5180, title: 'Feature', html_url: 'https://github.com/gantri/porter/pull/5180',
+      body: 'body', head: { ref: 'feat/x', sha: 'sha5180' }, state: 'open', merged: false,
+    }));
+    const gh = new GithubDispatcher({ token: 't', owner: 'gantri', fetch: fetchMock });
+    const out = await gh.getPr('porter', 5180);
+    expect(fetchMock.mock.calls[0][0]).toBe('https://api.github.com/repos/gantri/porter/pulls/5180');
+    expect(out).toEqual({
+      number: 5180, title: 'Feature', url: 'https://github.com/gantri/porter/pull/5180',
+      head: 'feat/x', sha: 'sha5180', body: 'body', state: 'open', merged: false,
+    });
+  });
+
+  it('getPr surfaces a MERGED PR (state closed, merged true) and coerces a null body', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      number: 42, title: 'Shipped', html_url: 'u', body: null,
+      head: { ref: 'feat/y', sha: 'shaMerged' }, state: 'closed', merged: true,
+    }));
+    const gh = new GithubDispatcher({ token: 't', owner: 'gantri', fetch: fetchMock });
+    const out = await gh.getPr('porter', 42);
+    expect(out).toMatchObject({ number: 42, sha: 'shaMerged', state: 'closed', merged: true, body: '' });
+  });
+
+  it('getPr returns null on a 404 (stale/typo link)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ message: 'Not Found' }, 404));
+    const gh = new GithubDispatcher({ token: 't', owner: 'gantri', fetch: fetchMock });
+    expect(await gh.getPr('porter', 999)).toBeNull();
+  });
+
+  it('getPr throws on a non-404 error', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ message: 'boom' }, 500));
+    const gh = new GithubDispatcher({ token: 't', owner: 'gantri', fetch: fetchMock });
+    await expect(gh.getPr('porter', 5)).rejects.toThrow(/get PR porter#5 failed: 500/);
+  });
+
+  it('exposes the configured owner', () => {
+    const gh = new GithubDispatcher({ token: 't', owner: 'gantri', fetch: vi.fn() });
+    expect(gh.owner).toBe('gantri');
+  });
+
   it('deleteBranch DELETEs the ref and tolerates a 404', async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({}, 404));
     const gh = new GithubDispatcher({ token: 't', owner: 'gantri', fetch: fetchMock });

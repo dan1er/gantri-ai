@@ -1,4 +1,4 @@
-import type { AsanaApiClient, AsanaTask } from '../client.js';
+import type { AsanaApiClient, AsanaStory, AsanaTask } from '../client.js';
 import type { GithubDispatcher } from '../../../devops/github.js';
 import type {
   TierClassificationsRepo,
@@ -27,9 +27,15 @@ import { logger } from '../../../logger.js';
  * a legitimate supersede; a HUMAN-set field is never touched in any direction.
  *
  * The poller already scans the board and hands this pass the tasks currently in
- * Code Review; this class only has to find each task's PR (by scanning the
- * configured repos' open PRs for the task's `app.asana.com` link) and drive the
- * classify → confirm/supersede write. Idempotent by `(repo, pr_number, head_sha)`
+ * Code Review; this class only has to find each task's PR and drive the classify →
+ * confirm/supersede write. It finds the PR the way the team actually records it:
+ * the PR link usually lives ON THE TICKET — in the description (notes), a comment
+ * (story), or the "Notes for QA" subtask — not necessarily as an `app.asana.com`
+ * backlink in the PR body. So it resolves the PR FORWARD from the ticket first
+ * (notes → stories → Notes-for-QA subtask), accepting a PR under ANY repo owned by
+ * GITHUB_OWNER and diffing it whether it is open OR already merged, and only falls
+ * back to scanning the configured repos' open PRs for the task's `app.asana.com`
+ * link when the ticket names no PR. Idempotent by `(repo, pr_number, head_sha)`
  * (a new push re-runs) plus the per-task `stage` marker for the no-PR path.
  */
 
@@ -102,6 +108,31 @@ export function extractAsanaTaskGid(body: string | null | undefined): string | n
   return nums && nums.length > 0 ? nums[nums.length - 1] : null;
 }
 
+/** A GitHub PR named by a ticket: which `repo` under GITHUB_OWNER, which PR
+ *  `number`. Repo can be ANY repo under the owner, not just the sweep list. */
+export interface ParsedPrLink {
+  repo: string;
+  number: number;
+}
+
+/**
+ * Every `github.com/<owner>/<repo>/pull/<N>` link in `text` whose `<owner>`
+ * matches `owner`, in source order. Accepts any repo under the owner (a ticket can
+ * link a PR in any Gantri repo); links to other owners are ignored. Callers take
+ * the LAST element when they want the most-recent link in a single block of text.
+ */
+export function extractPrLinks(text: string | null | undefined, owner: string): ParsedPrLink[] {
+  if (!text) return [];
+  const re = /https?:\/\/github\.com\/([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)\/pull\/(\d+)/gi;
+  const out: ParsedPrLink[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    if (m[1].toLowerCase() !== owner.toLowerCase()) continue;
+    out.push({ repo: m[2], number: Number(m[3]) });
+  }
+  return out;
+}
+
 /** Read the enum option gid of a task's Delivery Tier field, or null if empty. */
 function currentTierOptionGid(task: AsanaTask): string | null {
   const cf = (task.custom_fields ?? []).find((f) => f.gid === DELIVERY_TIER_FIELD_GID);
@@ -129,9 +160,10 @@ export class AuthoritativePass {
     this.repos = deps.repos ?? AUTH_PASS_REPOS;
   }
 
-  /** Confirm/supersede the tier for every task currently in Code Review. Builds a
-   *  one-shot `taskGid → PR` index across the configured repos, then processes each
-   *  task independently so one failure never blocks the batch. */
+  /** Confirm/supersede the tier for every task currently in Code Review. Resolves
+   *  each task's PR FORWARD from the ticket itself (notes → comments → Notes-for-QA
+   *  subtask), falling back to the open-PR body scan only when the ticket names no
+   *  PR. Processes each task independently so one failure never blocks the batch. */
   async reviewCodeReviewTasks(tasks: AsanaTask[]): Promise<AuthoritativeResult> {
     const result: AuthoritativeResult = {
       considered: tasks.length,
@@ -143,11 +175,19 @@ export class AuthoritativePass {
     };
     if (tasks.length === 0) return result;
 
-    const prIndex = await this.buildPrIndex();
+    // The fallback open-PR scan is expensive (one list call per configured repo),
+    // so it is built lazily and reused — only when a task's PR can't be resolved
+    // from the ticket directly.
+    let scanIndex: Map<string, LinkedPr> | null = null;
 
     for (const task of tasks) {
       try {
-        const outcome = await this.reviewOne(task, prIndex.get(task.gid) ?? null);
+        let link = await this.resolvePrFromTicket(task);
+        if (!link) {
+          if (scanIndex === null) scanIndex = await this.buildPrIndex();
+          link = scanIndex.get(task.gid) ?? null;
+        }
+        const outcome = await this.reviewOne(task, link);
         result[outcome] += 1;
       } catch (err) {
         result.failed += 1;
@@ -160,6 +200,79 @@ export class AuthoritativePass {
 
     logger.info(result, 'delivery_tier_authoritative_done');
     return result;
+  }
+
+  /**
+   * Resolve a task's PR from the TICKET ITSELF, in priority order, stopping at the
+   * first source that names a PR under GITHUB_OWNER:
+   *   1. the description (notes),
+   *   2. the comments (stories), most-recently-added link winning,
+   *   3. the "Notes for QA" subtask's notes.
+   * The linked PR is fetched directly (open OR merged) so it can be diffed even
+   * when the open-PR scan would never surface it. Returns null when the ticket
+   * names no resolvable PR, so the caller falls back to the open-PR body scan.
+   */
+  private async resolvePrFromTicket(task: AsanaTask): Promise<LinkedPr | null> {
+    const owner = this.deps.gh.owner;
+
+    // 1. The description. When several links appear, the last one wins.
+    const inNotes = extractPrLinks(task.notes, owner);
+    if (inNotes.length > 0) return this.fetchLinkedPr(inNotes[inNotes.length - 1]);
+
+    // 2. The comments, newest-first (Asana returns stories oldest-first).
+    const inStory = await this.prLinkFromStories(task.gid, owner);
+    if (inStory) return this.fetchLinkedPr(inStory);
+
+    // 3. The "Notes for QA" subtask.
+    const inQa = await this.prLinkFromNotesForQa(task.gid, owner);
+    if (inQa) return this.fetchLinkedPr(inQa);
+
+    return null;
+  }
+
+  /** The most recently added PR link across a task's comments, or null. Asana
+   *  returns stories oldest-first, so the newest comment is scanned first. */
+  private async prLinkFromStories(taskGid: string, owner: string): Promise<ParsedPrLink | null> {
+    let stories: AsanaStory[];
+    try {
+      stories = await this.deps.client.getTaskStories(taskGid, 'text,created_at,resource_subtype');
+    } catch (err) {
+      logger.warn(
+        { taskGid, err: err instanceof Error ? err.message : String(err) },
+        'delivery_tier_authoritative_stories_failed',
+      );
+      return null;
+    }
+    for (let i = stories.length - 1; i >= 0; i--) {
+      const links = extractPrLinks(stories[i].text, owner);
+      if (links.length > 0) return links[links.length - 1];
+    }
+    return null;
+  }
+
+  /** The PR link in the "Notes for QA" subtask's description, or null. */
+  private async prLinkFromNotesForQa(taskGid: string, owner: string): Promise<ParsedPrLink | null> {
+    let subtasks: AsanaTask[];
+    try {
+      subtasks = await this.deps.client.getTaskSubtasks(taskGid, 'name,notes');
+    } catch (err) {
+      logger.warn(
+        { taskGid, err: err instanceof Error ? err.message : String(err) },
+        'delivery_tier_authoritative_subtasks_failed',
+      );
+      return null;
+    }
+    const qa = subtasks.find((s) => (s.name ?? '').toLowerCase().includes('notes for qa'));
+    if (!qa) return null;
+    const links = extractPrLinks(qa.notes, owner);
+    return links.length > 0 ? links[links.length - 1] : null;
+  }
+
+  /** Fetch a directly-linked PR (open OR merged) as a `LinkedPr`, or null when it
+   *  no longer exists (a stale link → the caller falls back to the open-PR scan). */
+  private async fetchLinkedPr(link: ParsedPrLink): Promise<LinkedPr | null> {
+    const pr = await this.deps.gh.getPr(link.repo, link.number);
+    return pr ? { repo: link.repo, pr } : null;
   }
 
   /** Map each linked Asana task gid to its open PR, scanning the configured repos

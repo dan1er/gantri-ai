@@ -18,6 +18,11 @@ describe('loadEnv', () => {
     expect(env.PORT).toBe(3000);
   });
 
+  it('leaves SOFTWARE_CHANNEL_ID undefined when unset (feature disabled), reads it when set', () => {
+    expect(loadEnv(validEnv).SOFTWARE_CHANNEL_ID).toBeUndefined();
+    expect(loadEnv({ ...validEnv, SOFTWARE_CHANNEL_ID: 'C-SOFTWARE' }).SOFTWARE_CHANNEL_ID).toBe('C-SOFTWARE');
+  });
+
   it('throws when a required var is missing', () => {
     const { SUPABASE_URL: _, ...partial } = validEnv;
     expect(() => loadEnv(partial)).toThrow(/SUPABASE_URL/);

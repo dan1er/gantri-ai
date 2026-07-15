@@ -55,6 +55,7 @@ import { TierPoller } from './connectors/asana/tier/poller.js';
 import { WeeklyTierReporter } from './connectors/asana/tier/weekly-report.js';
 import { TierRunner } from './connectors/asana/tier/tier-runner.js';
 import { AuthoritativePass } from './connectors/asana/tier/authoritative-pass.js';
+import { ReviewRequestNotifier } from './connectors/asana/tier/review-request.js';
 import { TierClassificationsRepo } from './storage/repositories/tier-classifications.js';
 import { TierWeeklyReportsRepo } from './storage/repositories/tier-weekly-reports.js';
 import { TierPrChecksRepo } from './storage/repositories/tier-pr-checks.js';
@@ -755,6 +756,15 @@ async function main() {
     // alone. Disabled (provisional-only classification) when there is no token.
     const tierGh =
       gh ?? (githubToken ? new GithubDispatcher({ token: githubToken, owner: env.GITHUB_OWNER }) : null);
+    // Code-review Slack requests: the authoritative pass pings reviewers in the
+    // software channel the first time it classifies a ticket. Optional — one boot
+    // warn when the channel is not configured.
+    const reviewRequest = env.SOFTWARE_CHANNEL_ID
+      ? new ReviewRequestNotifier({ slack: app.client, channelId: env.SOFTWARE_CHANNEL_ID })
+      : undefined;
+    if (!reviewRequest) {
+      logger.warn('code-review Slack requests disabled — SOFTWARE_CHANNEL_ID not set');
+    }
     const authoritative = tierGh
       ? new AuthoritativePass({
           gh: tierGh,
@@ -763,6 +773,7 @@ async function main() {
           prChecks: tierPrChecksRepo,
           extract: { claude, prompt: tierPrompt },
           promptVersion: tierPromptVersion,
+          reviewRequest,
         })
       : undefined;
     if (!authoritative) {

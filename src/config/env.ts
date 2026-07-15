@@ -15,6 +15,11 @@ const envSchema = z.object({
   INTERNAL_SHARED_SECRET: z.string().optional(),
   MAINTAINER_SLACK_USER_ID: z.string().optional(),
   OPS_CHANNEL_ID: z.string().optional(),
+  // Slack channel id for the software team's code-review requests. When the
+  // delivery-tier Code-Review authoritative pass first classifies a ticket it
+  // posts a review request here so reviewers get pinged with context. Optional —
+  // unset disables the feature (one boot-time warn).
+  SOFTWARE_CHANNEL_ID: z.string().optional(),
   // Comma-separated Slack user IDs allowed to drive /preview and /deploy from
   // their DM with the bot (in addition to the ops channel). Empty = ops only.
   DEVOPS_DM_USER_IDS: z.string().optional(),

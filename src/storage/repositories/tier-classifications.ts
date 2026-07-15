@@ -28,6 +28,10 @@ export interface TierClassificationRecord {
   decidedBy: 'bot' | 'human_override';
   humanTier: string | null;
   commentGid: string | null;
+  /** True once the Code-Review authoritative pass has posted a code-review request
+   *  to the software Slack channel for this task. Per-task dedupe: set only after a
+   *  successful post, so later pushes / re-checks never re-ping. */
+  reviewRequested: boolean;
   createdAt: string | null;
   updatedAt: string | null;
 }
@@ -49,6 +53,7 @@ function rowFromDb(r: Record<string, any>): TierClassificationRecord {
     decidedBy: r.decided_by as 'bot' | 'human_override',
     humanTier: (r.human_tier as string | null) ?? null,
     commentGid: (r.comment_gid as string | null) ?? null,
+    reviewRequested: !!r.review_requested,
     createdAt: (r.created_at as string | null) ?? null,
     updatedAt: (r.updated_at as string | null) ?? null,
   };
@@ -109,6 +114,18 @@ export class TierClassificationsRepo {
       { onConflict: 'task_gid' },
     );
     if (error) throw new Error(`tier_classifications upsert failed: ${error.message}`);
+  }
+
+  /** Mark that the code-review Slack request has been posted for this task. Set
+   *  only after a successful post so it dedupes the ping to once per task. Never
+   *  written by `upsertBot` (which omits the column, so its upsert preserves this
+   *  flag across re-classifications). */
+  async markReviewRequested(taskGid: string): Promise<void> {
+    const { error } = await this.client
+      .from('tier_classifications')
+      .update({ review_requested: true, updated_at: new Date().toISOString() })
+      .eq('task_gid', taskGid);
+    if (error) throw new Error(`tier_classifications markReviewRequested failed: ${error.message}`);
   }
 
   /** Flag a task as human-overridden — the bot never touches it again. */

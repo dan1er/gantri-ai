@@ -115,12 +115,19 @@ describe('TierPoller.runOnce — candidate gating', () => {
     expect(res.classified).toBe(1);
     expect(client.setEnumCustomField).toHaveBeenCalledWith('t1', DELIVERY_TIER_FIELD_GID, tierToOptionGid('T0'));
     expect(client.createStory).toHaveBeenCalledTimes(1);
-    // A pre-write record (durable before the field write) then a finalize with the
-    // comment gid and the confirmed tier.
+    // The comment is posted BEFORE the field write (papertrail: explanation → field).
+    const commentOrder = (client.createStory as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    const fieldOrder = (client.setEnumCustomField as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    expect(commentOrder).toBeLessThan(fieldOrder);
+    // Three durable records: a pre-write record (before any Asana write), a
+    // comment-persist (durable comment gid before the field write, still
+    // unconfirmed), then a finalize with the confirmed tier.
     const upserts = (repo.upsertBot as ReturnType<typeof vi.fn>).mock.calls;
-    expect(upserts.length).toBe(2);
+    expect(upserts.length).toBe(3);
     // The poller writes the PROVISIONAL pass.
     expect(upserts[0][0]).toMatchObject({ tier: 'T0', confirmedTier: null, commentGid: null, stage: 'provisional' });
+    // The comment-persist carries the comment gid but is still unconfirmed.
+    expect(upserts[1][0]).toMatchObject({ tier: 'T0', confirmedTier: null, commentGid: 'story-1', stage: 'provisional' });
     const final = upserts[upserts.length - 1][0];
     expect(final.tier).toBe('T0');
     expect(final.confirmedTier).toBe('T0');
@@ -236,8 +243,8 @@ describe('TierPoller.runOnce — human overrides & idempotency', () => {
     const res = await poller.runOnce();
     expect(res.reclassified).toBe(1);
     expect(client.setEnumCustomField).toHaveBeenCalledTimes(1);
-    // Pre-write record + finalize.
-    expect(repo.upsertBot).toHaveBeenCalledTimes(2);
+    // Pre-write record + comment-persist + finalize.
+    expect(repo.upsertBot).toHaveBeenCalledTimes(3);
   });
 });
 
@@ -472,13 +479,15 @@ describe('TierPoller.runOnce — Code-Review authoritative pass wiring', () => {
     expect(res.authoritative).toBeNull();
   });
 
-  it('applies the candidate gate before the authoritative pass (no backfill / Type-excluded)', async () => {
-    // Only the eligible candidate reaches the authoritative pass. A pre-rollout
-    // ticket, an excluded Type, and a thin-notes ticket — all sitting in Code Review
-    // — must never be classified, commented, or field-written by the pass.
+  it('the Code-Review lane ignores the rollout cutoff: pre-rollout and thin-notes tickets ARE handed to the pass; excluded Types are not', async () => {
+    // The tier is consumed at the Code-Review → QA handoff, so the whole in-flight
+    // backlog that reaches Code Review must be classifiable — including tickets
+    // created before ROLLOUT_DATE, and (at this poller stage) thin-notes tickets,
+    // since a ticket with a findable PR is diffed regardless of description length.
+    // Only the excluded-Type ticket is still filtered out.
     const reviewCodeReviewTasks = vi.fn().mockResolvedValue({
-      considered: 1,
-      confirmed: 1,
+      considered: 3,
+      confirmed: 3,
       superseded: 0,
       humanOwned: 0,
       skipped: 0,
@@ -492,6 +501,29 @@ describe('TierPoller.runOnce — Code-Review authoritative pass wiring', () => {
     const { poller } = buildPoller([eligible, preRollout, excludedType, thinNotes], {}, undefined, authoritative);
     await poller.runOnce();
     const handed = reviewCodeReviewTasks.mock.calls[0][0] as AsanaTask[];
-    expect(handed.map((t) => t.gid)).toEqual(['ok']);
+    expect(handed.map((t) => t.gid)).toEqual(['ok', 'old', 'thin']);
+  });
+
+  it('a pre-rollout ticket NOT in Code Review is still skipped everywhere (the provisional rollout gate is intact)', async () => {
+    // The rollout cutoff is only lifted for the Code-Review lane. A pre-rollout
+    // ticket that is NOT in Code Review must neither be classified provisionally
+    // (no board-wide backfill) nor handed to the authoritative pass.
+    const reviewCodeReviewTasks = vi.fn().mockResolvedValue({
+      considered: 0,
+      confirmed: 0,
+      superseded: 0,
+      humanOwned: 0,
+      skipped: 0,
+      failed: 0,
+    });
+    const authoritative = { reviewCodeReviewTasks } as unknown as AuthoritativePass;
+    const preRollout = task({ gid: 'old', createdAt: '2026-07-01T00:00:00Z' });
+    const { poller, client } = buildPoller([preRollout], {}, undefined, authoritative);
+    const res = await poller.runOnce();
+    expect(res.candidates).toBe(0);
+    expect(res.classified).toBe(0);
+    expect(client.setEnumCustomField).not.toHaveBeenCalled();
+    const handed = reviewCodeReviewTasks.mock.calls[0][0] as AsanaTask[];
+    expect(handed).toEqual([]);
   });
 });

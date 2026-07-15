@@ -52,11 +52,14 @@ function claudeReturning(tier: DeliveryTier) {
   };
 }
 
-function task(gid: string, tierOptionGid: string | null, notes = 'x'.repeat(60)): AsanaTask {
+function task(gid: string, tierOptionGid: string | null, notes = 'x'.repeat(60), createdAt?: string): AsanaTask {
   return {
     gid,
     name: `Task ${gid}`,
     notes,
+    // This lane has NO created_at gate; the field is set only to document the
+    // pre-rollout fixtures — the pass never reads it.
+    ...(createdAt ? { created_at: createdAt } : {}),
     custom_fields: [
       { gid: TYPE_FIELD_GID, name: 'Type', enum_value: { gid: 'type-opt', name: 'Feature' } },
       { gid: DELIVERY_TIER_FIELD_GID, name: 'Delivery Tier', enum_value: tierOptionGid ? { gid: tierOptionGid } : null },
@@ -245,7 +248,7 @@ describe('AuthoritativePass — supersede in either direction', () => {
     expect(prChecks.insert).toHaveBeenCalledWith(expect.objectContaining({ verdict: 'confirmed' }));
   });
 
-  it('persists the record BEFORE the field write (crash-safe ordering)', async () => {
+  it('records → comments → writes the field → finalizes (crash-safe order; comment precedes field for the papertrail)', async () => {
     const { pass, client, classifications } = build({
       fieldTier: 'T1',
       diffTier: 'T2',
@@ -256,12 +259,16 @@ describe('AuthoritativePass — supersede in either direction', () => {
       order.push(`upsert:${rec.confirmedTier}`);
       return Promise.resolve();
     });
+    (client.createStory as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      order.push('comment');
+      return Promise.resolve({ gid: 'story-new' });
+    });
     (client.setEnumCustomField as ReturnType<typeof vi.fn>).mockImplementation(() => {
       order.push('field');
       return Promise.resolve();
     });
     await pass.reviewCodeReviewTasks([task(GID, tierToOptionGid('T1'))]);
-    expect(order).toEqual(['upsert:T1', 'field', 'upsert:T2']);
+    expect(order).toEqual(['upsert:T1', 'comment', 'field', 'upsert:T2']);
   });
 });
 
@@ -362,6 +369,66 @@ describe('AuthoritativePass — no PR found (description fallback)', () => {
     const res = await pass.reviewCodeReviewTasks([t]);
     expect(res.skipped).toBe(1);
     expect(client.createStory).not.toHaveBeenCalled();
+  });
+
+  it('skips the description fallback when the ticket has no PR and only a thin description', async () => {
+    // The rollout cutoff was removed for this lane, but the thin-notes bar still
+    // guards the description-fallback path: no findable PR + a stub description is
+    // noise. A ticket WITH a PR is diffed regardless of description length.
+    const { pass, gh, client, classifications } = build({
+      prs: [pr({ body: 'no asana link here' })], // the scan resolves nothing for this task
+      diffTier: 'T2',
+      record: record({ tier: 'T1', confirmedTier: 'T1' }),
+    });
+    const t = task(GID, tierToOptionGid('T1'), 'short'); // < MIN_NOTES_CHARS, no PR named
+    const res = await pass.reviewCodeReviewTasks([t]);
+    expect(res.skipped).toBe(1);
+    expect(gh.prDiff).not.toHaveBeenCalled();
+    expect(client.createStory).not.toHaveBeenCalled();
+    expect(client.setEnumCustomField).not.toHaveBeenCalled();
+    expect(classifications.upsertBot).not.toHaveBeenCalled();
+  });
+});
+
+describe('AuthoritativePass — Code-Review lane ignores the rollout cutoff (pre-rollout tickets classify)', () => {
+  // Before ROLLOUT_DATE. The poller now routes pre-rollout tickets in Code Review to
+  // this pass; the pass itself has no created_at gate, so it classifies them like
+  // any other ticket — from the diff, or from the mature description.
+  const PRE_ROLLOUT = '2026-07-01T00:00:00Z';
+
+  it('classifies a pre-rollout ticket from its PR diff (diff path)', async () => {
+    const { pass, gh, client, prChecks } = build({
+      fieldTier: 'T1',
+      diffTier: 'T2',
+      record: record({ tier: 'T1', confirmedTier: 'T1' }),
+      linkedPr: ghPr({ number: 5180, sha: 'sha-pre' }),
+    });
+    const t = task(GID, tierToOptionGid('T1'), `Implements it. PR: ${ghLink('porter', 5180)}`, PRE_ROLLOUT);
+    const res = await pass.reviewCodeReviewTasks([t]);
+    expect(gh.prDiff).toHaveBeenCalledWith('porter', 5180);
+    expect(res.superseded).toBe(1);
+    expect(client.setEnumCustomField).toHaveBeenCalledWith(GID, DELIVERY_TIER_FIELD_GID, tierToOptionGid('T2'));
+    expect(prChecks.insert).toHaveBeenCalledWith(
+      expect.objectContaining({ repo: 'porter', prNumber: 5180, headSha: 'sha-pre', verdict: 'superseded' }),
+    );
+  });
+
+  it('classifies a pre-rollout ticket from the mature description when it names no PR (description-fallback path)', async () => {
+    const { pass, gh, client } = build({
+      prs: [pr({ body: 'no asana link here' })], // the open-PR scan resolves nothing
+      diffTier: 'T2',
+      record: record({ tier: 'T1', confirmedTier: 'T1' }),
+    });
+    const t = task(
+      GID,
+      tierToOptionGid('T1'),
+      'A mature description with plenty of substance to classify from.',
+      PRE_ROLLOUT,
+    );
+    const res = await pass.reviewCodeReviewTasks([t]);
+    expect(gh.prDiff).not.toHaveBeenCalled();
+    expect(res.superseded).toBe(1);
+    expect(client.createStory).toHaveBeenCalledWith(GID, expect.stringContaining('ticket description'));
   });
 });
 

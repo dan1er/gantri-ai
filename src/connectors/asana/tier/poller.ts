@@ -41,8 +41,10 @@ const OPT_FIELDS_TASK = [
   'memberships.section.name',
 ].join(',');
 
-/** Minimum description length to attempt a classification (thin tickets are noise). */
-const MIN_NOTES_CHARS = 40;
+/** Minimum description length to attempt a classification (thin tickets are noise).
+ *  Shared with the Code-Review authoritative pass, which enforces it only on the
+ *  description-fallback path (a ticket with a findable PR is diffed regardless). */
+export const MIN_NOTES_CHARS = 40;
 
 /** How many tasks to classify in parallel. */
 const CLASSIFY_CONCURRENCY = 3;
@@ -153,11 +155,15 @@ export class TierPoller {
     // board scan we already have (no extra board read). Isolated so a failure here
     // never fails the poll.
     if (this.deps.authoritative) {
-      // Same candidate gate as the provisional pass: no backfill (rolloutDateMs), no
-      // excluded Types, no feature-template rows, and a substantive description. A
-      // pre-rollout or excluded-Type ticket sitting in Code Review must not get an
-      // LLM classification, a bot comment, or a field write.
-      const inCodeReview = tasks.filter((t) => this.isCandidate(t) && isInCodeReview(t));
+      // The tier is consumed at the Code-Review → QA handoff, so the ENTIRE in-flight
+      // backlog that reaches Code Review must be classified — including tickets
+      // created before ROLLOUT_DATE. That cutoff exists only to avoid a board-wide
+      // backfill at launch, not to starve the review lane, so this lane uses a
+      // rollout-free gate: excluded Types and feature-template rows are still
+      // filtered, but created_at is not. The thin-description gate is enforced
+      // downstream by the pass, and only for the description-fallback case (a ticket
+      // with a findable PR is classified from its diff regardless of length).
+      const inCodeReview = tasks.filter((t) => this.isCodeReviewCandidate(t) && isInCodeReview(t));
       try {
         result.authoritative = await this.deps.authoritative.reviewCodeReviewTasks(inCodeReview);
       } catch (err) {
@@ -180,6 +186,20 @@ export class TierPoller {
     const createdMs = task.created_at ? Date.parse(task.created_at) : Number.NEGATIVE_INFINITY;
     if (!(createdMs >= this.deps.rolloutDateMs)) return false;
     if ((task.notes ?? '').trim().length < MIN_NOTES_CHARS) return false;
+    if (isTierExcludedType(typeName(task))) return false;
+    return true;
+  }
+
+  /** Eligibility for the Code-Review AUTHORITATIVE lane. Deliberately does NOT apply
+   *  the ROLLOUT_DATE cutoff or the thin-description gate that `isCandidate` uses:
+   *  the tier is consumed at the Code-Review → QA handoff, so every in-flight ticket
+   *  that reaches Code Review must be classifiable regardless of when it was created,
+   *  and a ticket with a findable PR is diffed even with a thin description (the
+   *  pass enforces the thin-notes bar only on its description-fallback path). The
+   *  completed, feature-template, and excluded-Type gates still hold. */
+  private isCodeReviewCandidate(task: AsanaTask): boolean {
+    if (task.completed) return false;
+    if (isFeatureTemplateTask(task)) return false;
     if (isTierExcludedType(typeName(task))) return false;
     return true;
   }
@@ -269,10 +289,10 @@ export class TierPoller {
     const prevConfirmed = prev?.confirmedTier ?? null;
     const outcome = prev ? 'reclassified' : 'classified';
 
-    // Phase 1 — record the decision before touching the field. `confirmedTier`
-    // stays at the previously confirmed tier so a crash here is recoverable. This
-    // is the PROVISIONAL pass — the Code-Review pass confirms it from the diff later.
-    await this.deps.repo.upsertBot({
+    // Phase 1 — record the decision before touching Asana. `confirmedTier` stays at
+    // the previously confirmed tier so a crash here is recoverable. This is the
+    // PROVISIONAL pass — the Code-Review pass confirms it from the diff later.
+    const provisional = {
       taskGid: task.gid,
       inputHash: hash,
       promptVersion: this.deps.promptVersion,
@@ -281,38 +301,38 @@ export class TierPoller {
       confirmedTier: prevConfirmed,
       liftedByUnclear: decision.liftedByUnclear,
       calibrationMismatch: decision.calibrationMismatch,
-      stage: 'provisional',
+      stage: 'provisional' as const,
       flags: decision.flags,
       domain: facts.domain,
-      commentGid: prev?.commentGid ?? null,
-    });
+    };
+    await this.deps.repo.upsertBot({ ...provisional, commentGid: prev?.commentGid ?? null });
 
-    // Phase 2 — close the scan→write TOCTOU window: re-read the field fresh. If a
-    // human set a tier we never wrote while we were classifying, respect it.
+    // Phase 2 — post the explanatory comment BEFORE the field write, so the Asana
+    // activity trail always reads bot-explanation → field change (a papertrail),
+    // never the reverse. Persist the comment gid immediately (confirmedTier still
+    // unconfirmed) so a crash before the field write cannot orphan a duplicate
+    // comment on the recovery path.
+    const commentText = renderTierComment(decision, facts, this.deps.promptVersion, { provisional: true });
+    const story = await this.deps.client.createStory(task.gid, commentText);
+    await this.deps.repo.upsertBot({ ...provisional, commentGid: story?.gid ?? prev?.commentGid ?? null });
+
+    // Phase 3 — close the scan→write TOCTOU window immediately before the field
+    // write: re-read the field fresh. If a human set a tier we never wrote while we
+    // were classifying, respect it. The announcement comment above is acceptable
+    // residue in that race (it documents what the bot WOULD have set); the human
+    // value stands.
     const allowed = tierGidSet(decision.tier, prevConfirmed);
     if (await this.humanBeatUsToIt(task.gid, allowed)) return 'overrides';
 
-    // Phase 3 — write the field (commit), post the comment, then finalize the
-    // confirmed tier.
+    // Phase 4 — write the field (commit), then finalize the confirmed tier.
     await this.deps.client.setEnumCustomField(
       task.gid,
       DELIVERY_TIER_FIELD_GID,
       tierToOptionGid(decision.tier),
     );
-    const commentText = renderTierComment(decision, facts, this.deps.promptVersion, { provisional: true });
-    const story = await this.deps.client.createStory(task.gid, commentText);
     await this.deps.repo.upsertBot({
-      taskGid: task.gid,
-      inputHash: hash,
-      promptVersion: this.deps.promptVersion,
-      facts,
-      tier: decision.tier,
+      ...provisional,
       confirmedTier: decision.tier,
-      liftedByUnclear: decision.liftedByUnclear,
-      calibrationMismatch: decision.calibrationMismatch,
-      stage: 'provisional',
-      flags: decision.flags,
-      domain: facts.domain,
       commentGid: story?.gid ?? null,
     });
     logger.info({ taskGid: task.gid, tier: decision.tier, firedRule: decision.firedRule }, 'delivery_tier_classified');
@@ -325,11 +345,8 @@ export class TierPoller {
     const allowed = tierGidSet(record.tier, record.confirmedTier);
     if (await this.humanBeatUsToIt(task.gid, allowed)) return;
 
-    await this.deps.client.setEnumCustomField(
-      task.gid,
-      DELIVERY_TIER_FIELD_GID,
-      tierToOptionGid(record.tier),
-    );
+    // Backfill the explanation BEFORE re-applying the field so the recovery path
+    // keeps the same explanation → field-change ordering as a fresh classify.
     let commentGid = record.commentGid;
     if (!commentGid) {
       const decision = decideTier(record.facts);
@@ -339,6 +356,11 @@ export class TierPoller {
       );
       commentGid = story?.gid ?? null;
     }
+    await this.deps.client.setEnumCustomField(
+      task.gid,
+      DELIVERY_TIER_FIELD_GID,
+      tierToOptionGid(record.tier),
+    );
     await this.deps.repo.upsertBot({
       taskGid: task.gid,
       inputHash: record.inputHash,

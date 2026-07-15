@@ -89,4 +89,23 @@ describe('delivery-tier rubric prompt', () => {
     expect(section).toMatch(/diff is\*?\*? authoritative/i);
     expect(section).toMatch(/verbatim from the \*?\*?diff/i);
   });
+
+  it('defines ui_testable by drivability (DRIVE+VERIFY+COVER), not file location', () => {
+    // Danny's cancel-order correction: a 100%-backend fix is ui_testable when a
+    // tester can DRIVE an existing screen to exercise the change, VERIFY the outcome
+    // in the UI, and the failure would be COVERed there. The appendix states the
+    // drivability boundary as the three-question determination and drops the
+    // backend-only blanket.
+    const section = prompt.slice(prompt.indexOf('--- MACHINE APPENDIX'));
+    expect(section).toMatch(/drivability,? not file location/i);
+    expect(section).toMatch(/would a manual UI pass be the thing that catches this change'?s failure/i);
+    expect(section).toMatch(/\*\*DRIVE\*\*/);
+    expect(section).toMatch(/\*\*VERIFY\*\*/);
+    expect(section).toMatch(/\*\*COVER\*\*/);
+    expect(section).toMatch(/100% backend/i);
+    expect(section).not.toMatch(/a backend-only change offers nothing to click/i);
+    // Always-no cases survive the rewrite.
+    expect(section).toMatch(/data migrations and one-off backfills are \*\*always\*\* `no`/i);
+    expect(section).toMatch(/webhook \/ sync \/ race internals/i);
+  });
 });

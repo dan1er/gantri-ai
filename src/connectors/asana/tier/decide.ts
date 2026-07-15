@@ -144,7 +144,15 @@ export const DOMAIN_BASE_TIER: Record<Domain, DeliveryTier> = {
 
 /** The full signal set the classifier extracts from a ticket. */
 export interface Facts {
-  /** Can QA meaningfully validate this through the product UI? */
+  /** Would a manual UI pass be the thing that catches this change's failure? This is
+   *  drivability, not file location — the extractor answers `yes` only when all three
+   *  hold: DRIVE (a tester can exercise the changed path from a UI flow), VERIFY (the
+   *  outcome is visible in the UI), and COVER (the change's plausible failure modes
+   *  show up in what the tester drives). A 100%-backend fix is still `yes` when a tester
+   *  can drive an existing screen to exercise it (e.g. cancelling an order in admin);
+   *  `no` for migrations / backfills, infra / logging, webhook / sync / race internals a
+   *  tester cannot reproduce, or a shared-helper refactor whose failures a single manual
+   *  flow would not cover. */
   ui_testable: FactValue;
   /** Does the change alter how the feature actually works? */
   behavior_change: FactValue;

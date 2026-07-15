@@ -134,6 +134,64 @@ describe('decideTier — money-adjacent domain invariants', () => {
   });
 });
 
+describe('decideTier — ui_testable drivability boundary (DRIVE + VERIFY + COVER)', () => {
+  // Danny's cancel-order correction upgraded ui_testable from a file-location blanket
+  // to a three-question determination — a change is ui-testable only when a tester
+  // can DRIVE it from a UI flow, VERIFY the outcome in the UI, and that pass would
+  // COVER the change's plausible failure modes. The three worked examples below are
+  // what the extractor answers for each; decideTier turns the answer into the tier.
+
+  it('worked example #1 — cancel-order: cron+service diff, but DRIVE+VERIFY+COVER all yes → T1', () => {
+    // "Bug: Cannot cancel full order" (golden row 41). The fix is 100% backend (cron +
+    // transaction service), but QA DRIVEs it (cancel the order in admin), VERIFYs it
+    // (the order shows Cancelled), and that pass COVERs the bug — so ui_testable=yes.
+    // It restores already-approved cancel behavior with the order/state logic untouched
+    // (restores_approved_behavior=yes), so the irreversible-cancel trigger does NOT
+    // fire and the order_management T2 base caps at min(T2, T1) = T1.
+    const d = decideTier(
+      facts({
+        ui_testable: 'yes',
+        behavior_change: 'yes',
+        irreversible_external: 'yes',
+        restores_approved_behavior: 'yes',
+        domain: 'order_management',
+      }),
+    );
+    expect(d.tier).toBe('T1');
+    expect(d.firedRule).toBe('restore_approved');
+    expect(d.baseTier).toBe('T2');
+    // A drivable change never takes the Step-1 terminal T0 path.
+    expect(d.flags).not.toContain('non_ui_lane');
+  });
+
+  it('worked example #2 — xFleet / carrier webhook race: fails DRIVE (not reproducible) → T0 + Non-UI Lane', () => {
+    // A wrong-machine xFleet event, or the SPS/Shippo shipping-webhook races (golden
+    // rows 18 and 36): an async worker / webhook race with no product-UI flow that can
+    // reproduce it. It fails DRIVE, so the extractor answers ui_testable=no and it takes
+    // the Step-1 terminal T0 with the Non-UI Lane note (sensitive backend domain).
+    const d = decideTier(
+      facts({ ui_testable: 'no', behavior_change: 'yes', domain: 'porter_fulfillment_shipping' }),
+    );
+    expect(d.tier).toBe('T0');
+    expect(d.firedRule).toBe('not_ui_testable');
+    expect(d.flags).toContain('non_ui_lane');
+  });
+
+  it('worked example #3 — shared-helper refactor across many flows: DRIVE yes but COVER no → T0', () => {
+    // A refactor of a shared helper used by a dozen flows is drivable, but driving one
+    // flow gives false confidence — the automated suite + engineering review are the
+    // real net, not a manual UI pass. COVER fails, so the extractor answers
+    // ui_testable=no and it takes the Step-1 terminal T0. design_system is not a
+    // sensitive backend domain, so there is no Non-UI Lane note.
+    const d = decideTier(
+      facts({ ui_testable: 'no', behavior_change: 'yes', domain: 'design_system' }),
+    );
+    expect(d.tier).toBe('T0');
+    expect(d.firedRule).toBe('not_ui_testable');
+    expect(d.flags).toEqual([]);
+  });
+});
+
 describe('decideTier — Step 1 (no UI surface → terminal T0)', () => {
   it('backend payments ticket → T0 + Non-UI Lane', () => {
     const d = decideTier(facts({ ui_testable: 'no', money: 'yes', domain: 'shopping_checkout' }));

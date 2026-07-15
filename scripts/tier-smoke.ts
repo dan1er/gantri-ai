@@ -242,10 +242,11 @@ async function main(): Promise<void> {
     assert('comment: Provisional line present', text.includes(PROVISIONAL_LINE),
       comment ? `story ${comment.gid}` : 'no story containing the provisional line');
     assert('comment: "Rubric v2" present', text.includes('Rubric v2'));
-    assert('comment: money rule fired', text.includes('Why: it changes money') && text.includes('(rubric Step 3)'));
-    const evMatch = text.match(/Evidence: "([^"]+)"/);
+    assert('comment: money rule fired', text.includes('changes money (Step 3)'));
+    // Line 2 is the bare quoted evidence excerpt (no "Evidence:" prefix in the compact format).
+    const evMatch = text.match(/^"([^"]+)"/m);
     assert('comment: quoted evidence present', !!(evMatch && evMatch[1].trim().length > 0),
-      evMatch ? `Evidence: "${evMatch[1]}"` : 'no evidence quote');
+      evMatch ? `evidence "${evMatch[1]}"` : 'no evidence quote');
     if (text) console.log(`[smoke] --- comment ---\n${text}\n[smoke] --- end comment ---`);
 
     const rec = await repo.get(createdGid);

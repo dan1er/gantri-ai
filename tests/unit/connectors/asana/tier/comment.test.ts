@@ -31,53 +31,89 @@ function facts(
 }
 
 describe('renderTierComment', () => {
-  it('renders a T2 money change with evidence, the domain, and the rubric footer', () => {
+  it('renders a compact T2 money change: verdict · rule · domain, then the evidence and rubric', () => {
     const f = facts({
       behavior_change: { v: 'yes' },
       money: { v: 'yes', e: 'refunds will now be issued automatically for cancelled orders' },
       domain: 'shopping_checkout',
     });
     const text = renderTierComment(decideTier(f), f, 2);
-    expect(text).toContain('🤖 Delivery Tier: T2 — QA before production');
-    expect(text).toContain('Why: it changes money');
-    expect(text).toContain('Evidence: "refunds will now be issued automatically for cancelled orders"');
-    expect(text).toContain('Domain: Shopping & Checkout');
-    expect(text).toContain(`Rubric v2 · ${RUBRIC_URL}`);
-    expect(text).toContain('lowering is never a solo call');
+    const lines = text.split('\n');
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toBe('🤖 T2 — QA before production · changes money (Step 3) · Shopping & Checkout');
+    expect(lines[1]).toBe('"refunds will now be issued automatically for cancelled orders"');
+    expect(lines[2]).toBe(`Rubric v2 · ${RUBRIC_URL}`);
+    // The verbose prose is gone.
+    expect(text).not.toContain('Why:');
+    expect(text).not.toContain('Domain:');
+    expect(text).not.toContain('lowering is never');
   });
 
-  it('renders a backend T0 with the Non-UI Lane flag', () => {
+  it('truncates a long evidence quote to ≤90 chars with a trailing ellipsis', () => {
+    const long =
+      'recording what was actually paid for shipping and duty separately from the product subtotal so refunds reconcile';
+    const f = facts({
+      behavior_change: { v: 'yes' },
+      money: { v: 'yes', e: long },
+      domain: 'order_management',
+    });
+    const text = renderTierComment(decideTier(f), f, 2);
+    const evidence = text.split('\n')[1];
+    expect(evidence.startsWith('"recording what was actually paid for shipping and duty')).toBe(true);
+    expect(evidence.endsWith('…"')).toBe(true);
+    // The quoted body (between the quotes, minus the ellipsis) never exceeds the cap.
+    const body = evidence.slice(1, -2);
+    expect(body.length).toBeLessThanOrEqual(90);
+  });
+
+  it('renders a backend T0 with the Non-UI Lane tag replacing the long sentence', () => {
     const f = facts({ ui_testable: { v: 'no' }, money: { v: 'yes' }, domain: 'shopping_checkout' });
     const text = renderTierComment(decideTier(f), f, 2);
-    expect(text).toContain('🤖 Delivery Tier: T0 — engineering validation');
-    expect(text).toContain('Non-UI Lane');
+    const lines = text.split('\n');
+    expect(lines[0]).toBe(
+      '🤖 T0 — engineering validation · no UI flow to gate (Step 1) · Shopping & Checkout · Non-UI Lane (eng gate)',
+    );
+    // No evidence quote (none supplied) → only verdict + rubric.
+    expect(lines).toHaveLength(2);
+    expect(text).not.toContain('binding engineering gate');
   });
 
-  it('renders the inconclusive T1 message without an evidence line', () => {
+  it('renders the inconclusive T1 message with the actionable tail and no evidence line', () => {
     const f = facts({ behavior_change: { v: 'unclear' }, domain: 'unknown' });
     const text = renderTierComment(decideTier(f), f, 2);
-    expect(text).toContain('🤖 Delivery Tier: T1 — production, then QA');
-    expect(text).toContain('defaulting to T1 (rubric Step 4: unsure → T1)');
-    expect(text).not.toContain('Evidence:');
+    const lines = text.split('\n');
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toBe('🤖 T1 — production, then QA · unclear → T1 floor (Step 4) · Unknown');
+    expect(lines[1]).toBe(`Add detail and the bot re-classifies · Rubric v2 · ${RUBRIC_URL}`);
+    expect(text).not.toContain('"');
   });
 
-  it('appends the provisional line when asked', () => {
+  it('prefixes line 3 with the provisional marker when asked', () => {
     const f = facts({ behavior_change: { v: 'yes' }, domain: 'product_discovery' });
     const text = renderTierComment(decideTier(f), f, 2, { provisional: true });
+    const lines = text.split('\n');
+    expect(lines[lines.length - 1]).toBe(`${PROVISIONAL_LINE} · Rubric v2 · ${RUBRIC_URL}`);
     expect(text).toContain(PROVISIONAL_LINE);
   });
 
-  it('notes a calibration mismatch and floors to T1', () => {
-    const f = facts({ behavior_change: { v: 'no' }, cosmetic_only: { v: 'yes' }, domain: 'content_marketing', llmTier: 'T2' });
+  it('floors a calibration mismatch to T1 (logic unchanged) without a note line', () => {
+    const f = facts({
+      behavior_change: { v: 'no' },
+      cosmetic_only: { v: 'yes' },
+      domain: 'content_marketing',
+      llmTier: 'T2',
+    });
     const d = decideTier(f);
     const text = renderTierComment(d, f, 2);
     expect(d.tier).toBe('T1');
-    expect(text).toContain('the model and the rubric disagreed on the tier');
+    expect(d.calibrationMismatch).toBe(true);
+    expect(text.split('\n').length).toBeLessThanOrEqual(3);
+    expect(text).not.toContain('disagreed on the tier');
   });
 });
 
 describe('renderAuthoritativeComment', () => {
-  it('leads with the confirmed delta from the PR diff when the tier moves', () => {
+  it('leads with the superseded delta from the PR diff when the tier moves', () => {
     const f = facts({
       behavior_change: { v: 'yes' },
       money: { v: 'yes', e: 'total charged now includes tax' },
@@ -92,13 +128,14 @@ describe('renderAuthoritativeComment', () => {
       facts: f,
       promptVersion: 2,
     });
-    expect(text).toContain('🤖 Confirmed at Code Review from the PR diff (#5180): T0 → T2.');
-    expect(text).toContain('Why: it changes money');
-    expect(text).toContain('Evidence: "total charged now includes tax"');
-    expect(text).toContain('Domain: Shopping & Checkout');
+    const lines = text.split('\n');
+    expect(lines[0]).toBe('🤖 T0 → T2 from PR diff (#5180) · changes money (Step 3) · Shopping & Checkout');
+    expect(lines[1]).toBe('"total charged now includes tax"');
+    expect(lines[2]).toBe(`Rubric v2 · ${RUBRIC_URL}`);
+    expect(text).not.toContain('Why:');
   });
 
-  it('states the tier held when the provisional guess was right', () => {
+  it('reads "confirmed" from the PR diff when the provisional guess held', () => {
     const f = facts({ behavior_change: { v: 'yes' }, domain: 'product_discovery' });
     const text = renderAuthoritativeComment({
       fromTier: 'T1',
@@ -109,10 +146,12 @@ describe('renderAuthoritativeComment', () => {
       facts: f,
       promptVersion: 2,
     });
-    expect(text).toContain('T1 holds');
+    expect(text.split('\n')[0]).toBe(
+      '🤖 T1 confirmed from PR diff (#42) · behavior change at domain base (Step 2) · Product Discovery',
+    );
   });
 
-  it('names the description when no PR diff was available', () => {
+  it('says "at Code Review (no PR linked)" when only the description was available', () => {
     const f = facts({ behavior_change: { v: 'no' }, cosmetic_only: { v: 'yes' }, domain: 'content_marketing' });
     const text = renderAuthoritativeComment({
       fromTier: 'T1',
@@ -122,6 +161,22 @@ describe('renderAuthoritativeComment', () => {
       facts: f,
       promptVersion: 2,
     });
-    expect(text).toContain('Confirmed at Code Review from the ticket description: T1 → T0.');
+    expect(text.split('\n')[0]).toBe(
+      '🤖 T1 → T0 at Code Review (no PR linked) · cosmetic only (Step 3) · Content & Marketing',
+    );
+  });
+
+  it('says "set" on the first-ever write (null prior tier)', () => {
+    const f = facts({ behavior_change: { v: 'yes' }, money: { v: 'yes', e: 'charge amount changes' }, domain: 'shopping_checkout' });
+    const text = renderAuthoritativeComment({
+      fromTier: null,
+      toTier: 'T2',
+      source: 'diff',
+      prNumber: 77,
+      decision: decideTier(f),
+      facts: f,
+      promptVersion: 2,
+    });
+    expect(text.split('\n')[0]).toBe('🤖 T2 set from PR diff (#77) · changes money (Step 3) · Shopping & Checkout');
   });
 });

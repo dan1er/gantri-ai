@@ -250,7 +250,7 @@ describe('AuthoritativePass — supersede in either direction', () => {
     const res = await pass.reviewCodeReviewTasks([task(GID, tierToOptionGid('T2'))]);
     expect(res.confirmed).toBe(1);
     expect(client.setEnumCustomField).not.toHaveBeenCalled();
-    expect(client.createStory).toHaveBeenCalledWith(GID, expect.stringContaining('T2 holds'));
+    expect(client.createStory).toHaveBeenCalledWith(GID, expect.stringContaining('T2 confirmed from PR diff'));
     expect(prChecks.insert).toHaveBeenCalledWith(expect.objectContaining({ verdict: 'confirmed' }));
   });
 
@@ -318,7 +318,7 @@ describe('AuthoritativePass — human ownership & dedupe', () => {
     const res = await pass.reviewCodeReviewTasks([task(GID, null)]);
     expect(res.superseded).toBe(1);
     expect(client.setEnumCustomField).toHaveBeenCalledWith(GID, DELIVERY_TIER_FIELD_GID, tierToOptionGid('T2'));
-    expect(client.createStory).toHaveBeenCalledWith(GID, expect.stringContaining('Set at Code Review'));
+    expect(client.createStory).toHaveBeenCalledWith(GID, expect.stringContaining('T2 set from PR diff'));
     expect(prChecks.insert).toHaveBeenCalledWith(expect.objectContaining({ verdict: 'superseded' }));
   });
 
@@ -359,7 +359,7 @@ describe('AuthoritativePass — no PR found (description fallback)', () => {
     const res = await pass.reviewCodeReviewTasks([task(GID, tierToOptionGid('T1'))]);
     expect(gh.prDiff).not.toHaveBeenCalled();
     expect(res.superseded).toBe(1);
-    expect(client.createStory).toHaveBeenCalledWith(GID, expect.stringContaining('ticket description'));
+    expect(client.createStory).toHaveBeenCalledWith(GID, expect.stringContaining('at Code Review (no PR linked)'));
   });
 
   it('skips the no-PR path once the record is already authoritative and unchanged', async () => {
@@ -434,7 +434,7 @@ describe('AuthoritativePass — Code-Review lane ignores the rollout cutoff (pre
     const res = await pass.reviewCodeReviewTasks([t]);
     expect(gh.prDiff).not.toHaveBeenCalled();
     expect(res.superseded).toBe(1);
-    expect(client.createStory).toHaveBeenCalledWith(GID, expect.stringContaining('ticket description'));
+    expect(client.createStory).toHaveBeenCalledWith(GID, expect.stringContaining('at Code Review (no PR linked)'));
   });
 });
 

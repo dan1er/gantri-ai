@@ -23,7 +23,8 @@ import {
   type BouncedFeatureInput,
 } from './qa-classifier.js';
 import { extractFacts, type ExtractInput } from './tier/extract.js';
-import { decideTier } from './tier/decide.js';
+import { decideTier, DOMAIN_BASE_TIER } from './tier/decide.js';
+import type { RubricSource } from './tier/rubric-source.js';
 import { TYPE_FIELD_GID } from './board-config.js';
 
 /**
@@ -55,6 +56,10 @@ export interface AsanaConnectorDeps {
    *  same extract+decide pipeline as the poller, with NO writes). */
   tierPrompt?: string;
   tierPromptVersion?: number;
+  /** The runtime rubric source. When provided, the preview tool classifies against
+   *  the live Notion rubric (prompt + version + domain table) instead of the
+   *  committed `tierPrompt` / `tierPromptVersion` snapshot. */
+  rubricSource?: RubricSource;
 }
 
 /** opt_fields the preview tool reads to classify one task. */
@@ -86,12 +91,14 @@ export class AsanaConnector implements Connector {
   private readonly claude: Pick<Anthropic, 'messages'>;
   private readonly tierPrompt?: string;
   private readonly tierPromptVersion?: number;
+  private readonly rubricSource?: RubricSource;
 
   constructor(deps: AsanaConnectorDeps) {
     this.client = deps.client;
     this.claude = deps.claude;
     this.tierPrompt = deps.tierPrompt;
     this.tierPromptVersion = deps.tierPromptVersion;
+    this.rubricSource = deps.rubricSource;
     this.tools = this.buildTools();
   }
 
@@ -191,8 +198,15 @@ export class AsanaConnector implements Connector {
       return { ok: false, error: 'provide either `task` (URL/gid) or `text`' };
     }
 
-    const facts = await extractFacts(input, { claude: this.claude, prompt });
-    const decision = decideTier(facts);
+    // Prefer the LIVE rubric (matches what the poller applies right now); fall back
+    // to the committed snapshot passed at construction.
+    const rubric = this.rubricSource?.getRubric();
+    const activePrompt = rubric?.promptText ?? prompt;
+    const activeVersion = rubric?.version ?? promptVersion;
+    const activeTableMap = rubric?.tableMap ?? DOMAIN_BASE_TIER;
+
+    const facts = await extractFacts(input, { claude: this.claude, prompt: activePrompt });
+    const decision = decideTier(facts, activeTableMap);
     const evidence =
       decision.evidenceFact && decision.firedRule !== 'inconclusive'
         ? facts[decision.evidenceFact].evidence
@@ -201,7 +215,7 @@ export class AsanaConnector implements Connector {
     return {
       ok: true,
       source,
-      rubricVersion: promptVersion,
+      rubricVersion: activeVersion,
       tier: decision.tier,
       baseTier: decision.baseTier,
       firedRule: decision.firedRule,

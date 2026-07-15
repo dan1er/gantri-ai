@@ -51,7 +51,14 @@ import { PipedriveApiClient } from './connectors/pipedrive/client.js';
 import { PipedriveWritesRepo } from './storage/repositories/pipedrive-writes.js';
 import { AsanaConnector } from './connectors/asana/connector.js';
 import { AsanaApiClient } from './connectors/asana/client.js';
-import { loadTierStandard, parseTierPromptVersion } from './connectors/asana/tier/extract.js';
+import { loadTierStandard } from './connectors/asana/tier/extract.js';
+import {
+  RubricSource,
+  splitStandard,
+  buildFallbackRubric,
+  DELIVERY_TIER_RUBRIC_PAGE_ID,
+} from './connectors/asana/tier/rubric-source.js';
+import { TierRubricCacheRepo } from './storage/repositories/tier-rubric-cache.js';
 import { TierPoller } from './connectors/asana/tier/poller.js';
 import { WeeklyTierReporter } from './connectors/asana/tier/weekly-report.js';
 import { TierRunner } from './connectors/asana/tier/tier-runner.js';
@@ -434,17 +441,61 @@ async function main() {
   let asanaClient: AsanaApiClient | undefined;
   let tierPrompt: string | undefined;
   let tierPromptVersion: number | undefined;
+  let rubricSource: RubricSource | undefined;
   if (asanaAccessToken) {
     asanaClient = new AsanaApiClient({ accessToken: asanaAccessToken });
-    tierPrompt = loadTierStandard();
-    tierPromptVersion = parseTierPromptVersion(tierPrompt);
+
+    // The rubric is READ FROM the live Notion "Delivery Tier Classifier" page at
+    // runtime (Danny's decision): editing the page recalibrates the bot within one
+    // poll cycle. The committed standard file is the fallback SNAPSHOT (page body) +
+    // the repo-owned MACHINE APPENDIX (the signals JSON contract, stable under page
+    // edits). Structural validation, an in-memory + Supabase last-known-good cache,
+    // and an ops notice on adoption all live inside `RubricSource`.
+    const standardFile = loadTierStandard();
+    const { appendix } = splitStandard(standardFile);
+    const fallbackRubric = buildFallbackRubric(standardFile);
+    tierPrompt = fallbackRubric.promptText;
+    tierPromptVersion = fallbackRubric.version;
+
+    // Reuse the /review-flc Notion token (env override or vault). Absent → the
+    // classifier runs on the committed fallback snapshot only (no live reload).
+    const rubricNotionToken = env.NOTION_API_TOKEN ?? notionApiTokenVault;
+    const rubricNotion = rubricNotionToken ? new NotionApiClient({ token: rubricNotionToken }) : undefined;
+    const rubricOps = env.OPS_CHANNEL_ID
+      ? {
+          post: async (text: string) => {
+            await appRef!.client.chat.postMessage({ channel: env.OPS_CHANNEL_ID!, text });
+          },
+        }
+      : undefined;
+    rubricSource = new RubricSource({
+      pageId: DELIVERY_TIER_RUBRIC_PAGE_ID,
+      appendix,
+      fallback: fallbackRubric,
+      notion: rubricNotion,
+      cache: new TierRubricCacheRepo(supabase),
+      ops: rubricOps,
+    });
+    try {
+      await rubricSource.init();
+    } catch (err) {
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err) },
+        'delivery tier rubric init failed — using committed fallback snapshot',
+      );
+    }
+
     registry.register(new AsanaConnector({
       client: asanaClient,
       claude,
       tierPrompt,
       tierPromptVersion,
+      rubricSource,
     }));
-    logger.info({ tierPromptVersion }, 'asana connector registered');
+    logger.info(
+      { tierPromptVersion: rubricSource.getRubric().version, liveRubric: !!rubricNotion },
+      'asana connector registered',
+    );
   } else {
     logger.warn('asana not configured (ASANA_ACCESS_TOKEN missing) — skipping registration');
   }
@@ -778,6 +829,7 @@ async function main() {
           extract: { claude, prompt: tierPrompt },
           promptVersion: tierPromptVersion,
           reviewRequest,
+          rubric: rubricSource,
         })
       : undefined;
     if (!authoritative) {
@@ -789,6 +841,7 @@ async function main() {
       repo: tierClassificationsRepo,
       extract: { claude, prompt: tierPrompt },
       promptVersion: tierPromptVersion,
+      rubric: rubricSource,
       rolloutDateMs,
       authoritative,
     });

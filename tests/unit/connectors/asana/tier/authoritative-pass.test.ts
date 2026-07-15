@@ -8,6 +8,7 @@ import type { AsanaApiClient, AsanaStory, AsanaTask } from '../../../../../src/c
 import type { GithubDispatcher } from '../../../../../src/devops/github.js';
 import type { TierClassificationsRepo, TierClassificationRecord } from '../../../../../src/storage/repositories/tier-classifications.js';
 import type { TierPrChecksRepo } from '../../../../../src/storage/repositories/tier-pr-checks.js';
+import { DOMAIN_BASE_TIER } from '../../../../../src/connectors/asana/tier/decide.js';
 import {
   DELIVERY_TIER_FIELD_GID,
   TYPE_FIELD_GID,
@@ -149,6 +150,8 @@ interface BuildOpts {
   /** Fake code-review Slack poster. Absent → the feature is disabled (the pass gets
    *  no `reviewRequest` dep, matching an unset SOFTWARE_CHANNEL_ID). */
   reviewRequest?: { post: ReturnType<typeof vi.fn> };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  rubric?: any;
 }
 
 function build(o: BuildOpts = {}) {
@@ -192,6 +195,7 @@ function build(o: BuildOpts = {}) {
     promptVersion: PROMPT_VERSION,
     repos: ['mantle'],
     ...(o.reviewRequest ? { reviewRequest: o.reviewRequest } : {}),
+    rubric: o.rubric,
   });
   return { pass, gh, client, classifications, prChecks, claude, reviewRequest: o.reviewRequest };
 }
@@ -346,6 +350,36 @@ describe('AuthoritativePass — human ownership & dedupe', () => {
     expect(res.skipped).toBe(1);
     expect(gh.prDiff).not.toHaveBeenCalled();
     expect(client.setEnumCustomField).not.toHaveBeenCalled();
+  });
+});
+
+describe('AuthoritativePass — runtime rubric threading', () => {
+  it('classifies against the injected live rubric (its prompt + version), not the committed fallback', async () => {
+    // The pass shares the poller's RubricSource; it must read the rubric the poller
+    // adopted this tick — the live prompt text as the cache-primed system block and
+    // the live version stamped on the persisted record — never the committed fallback.
+    const liveRubric = {
+      promptText: 'LIVE AUTH RUBRIC — Version: 77',
+      version: 77,
+      tableMap: { ...DOMAIN_BASE_TIER, shopping_checkout: 'T2' as const },
+      hash: 'live-auth-hash',
+    };
+    const getRubric = vi.fn(() => liveRubric);
+    const rubric = { getRubric } as unknown as { getRubric: () => typeof liveRubric };
+    const { pass, client, claude, classifications } = build({
+      fieldTier: 'T1',
+      diffTier: 'T2',
+      record: record({ tier: 'T1', confirmedTier: 'T1' }),
+      rubric,
+    });
+    const res = await pass.reviewCodeReviewTasks([task(GID, tierToOptionGid('T1'))]);
+    expect(res.superseded).toBe(1);
+    // The live prompt drives the extraction (not the committed PROMPT).
+    expect(claude.messages.create.mock.calls[0][0].system[0].text).toBe(liveRubric.promptText);
+    expect(claude.messages.create.mock.calls[0][0].system[0].text).not.toBe(PROMPT);
+    // The live version is stamped on the persisted record.
+    expect(classifications.upsertBot).toHaveBeenLastCalledWith(expect.objectContaining({ promptVersion: 77 }));
+    expect(client.setEnumCustomField).toHaveBeenCalledWith(GID, DELIVERY_TIER_FIELD_GID, tierToOptionGid('T2'));
   });
 });
 

@@ -9,7 +9,9 @@ import {
   tierToOptionGid,
 } from '../../../../../src/connectors/asana/board-config.js';
 import { tierInputHash } from '../../../../../src/connectors/asana/tier/extract.js';
+import { DOMAIN_BASE_TIER } from '../../../../../src/connectors/asana/tier/decide.js';
 import type { AuthoritativePass } from '../../../../../src/connectors/asana/tier/authoritative-pass.js';
+import type { RubricSource, Rubric } from '../../../../../src/connectors/asana/tier/rubric-source.js';
 
 const PROMPT = 'Version: 1\n\nrubric';
 const PROMPT_VERSION = 1;
@@ -229,12 +231,14 @@ describe('TierPoller.runOnce — human overrides & idempotency', () => {
     expect(client.setEnumCustomField).not.toHaveBeenCalled();
   });
 
-  it('re-classifies a bot task when the notes hash changed', async () => {
-    const t = task({ gid: 'r1', tierOptionGid: tierToOptionGid('T0') });
+  it('re-classifies a bot task when the notes hash changed AND the tier actually moves', async () => {
+    // Field/record hold T1; the re-classification (mock always returns T0) yields a
+    // DIFFERENT tier, so the field is re-written and a new comment posted.
+    const t = task({ gid: 'r1', tierOptionGid: tierToOptionGid('T1') });
     const record: Partial<TierClassificationRecord> = {
       taskGid: 'r1',
-      tier: 'T0',
-      confirmedTier: 'T0',
+      tier: 'T1',
+      confirmedTier: 'T1',
       decidedBy: 'bot',
       inputHash: 'stale-hash-from-old-notes',
       commentGid: 'story-old',
@@ -243,8 +247,38 @@ describe('TierPoller.runOnce — human overrides & idempotency', () => {
     const res = await poller.runOnce();
     expect(res.reclassified).toBe(1);
     expect(client.setEnumCustomField).toHaveBeenCalledTimes(1);
+    expect(client.setEnumCustomField).toHaveBeenCalledWith('r1', DELIVERY_TIER_FIELD_GID, tierToOptionGid('T0'));
+    expect(client.createStory).toHaveBeenCalledTimes(1);
     // Pre-write record + comment-persist + finalize.
     expect(repo.upsertBot).toHaveBeenCalledTimes(3);
+  });
+
+  it('silently updates the record on a re-classify whose tier is UNCHANGED (no duplicate comment / field re-write)', async () => {
+    // A rubric page edit bumps the rubric hash, so this healthy provisional ticket's
+    // input hash mismatches even though its notes never changed and the decided tier
+    // is identical (mock returns T0; record already holds T0). The poller must refresh
+    // the stored record silently: NO field write, NO new comment — otherwise every
+    // adopted rubric change spams a fresh provisional comment across the whole board.
+    const t = task({ gid: 's1', tierOptionGid: tierToOptionGid('T0') });
+    const record: Partial<TierClassificationRecord> = {
+      taskGid: 's1',
+      tier: 'T0',
+      confirmedTier: 'T0',
+      decidedBy: 'bot',
+      stage: 'provisional',
+      inputHash: 'stale-hash-from-old-rubric',
+      commentGid: 'story-existing',
+    };
+    const { poller, client, repo } = buildPoller([t], { get: vi.fn().mockResolvedValue(record) });
+    const res = await poller.runOnce();
+    expect(res.reclassified).toBe(1);
+    expect(client.setEnumCustomField).not.toHaveBeenCalled();
+    expect(client.createStory).not.toHaveBeenCalled();
+    // One silent record refresh carrying the new input hash + the preserved comment.
+    expect(repo.upsertBot).toHaveBeenCalledTimes(1);
+    const upsert = (repo.upsertBot as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(upsert).toMatchObject({ tier: 'T0', confirmedTier: 'T0', commentGid: 'story-existing' });
+    expect(upsert.inputHash).not.toBe('stale-hash-from-old-rubric');
   });
 });
 
@@ -351,6 +385,78 @@ describe('TierPoller.runOnce — authoritative rows are not provisionally downgr
     const res = await poller.runOnce();
     expect(res.reclassified).toBe(1);
     expect(client.setEnumCustomField).toHaveBeenCalled();
+  });
+});
+
+describe('TierPoller.runOnce — runtime rubric threading', () => {
+  it('refreshes the live rubric each tick and applies its prompt, version, and base-tier table', async () => {
+    // A live rubric that (a) carries a distinct prompt text, (b) a distinct version,
+    // and (c) a base-tier table that RAISES content_marketing T1 → T2. A behaviour-
+    // changing ticket in that domain with no hard trigger lands exactly at the base
+    // tier, so the field write is T2 ONLY IF the live table reached decideTier (the
+    // committed DOMAIN_BASE_TIER would give T1).
+    const liveRubric: Rubric = {
+      promptText: 'LIVE RUBRIC PROMPT — Version: 42',
+      version: 42,
+      tableMap: { ...DOMAIN_BASE_TIER, content_marketing: 'T2' },
+      hash: 'live-rubric-hash',
+    };
+    const refresh = vi.fn(async () => liveRubric);
+    const getRubric = vi.fn(() => liveRubric);
+    const rubric = { refresh, getRubric } as unknown as RubricSource;
+
+    const behaviorFacts = {
+      tier: 'T2',
+      domain: 'content_marketing',
+      why: 'x',
+      evidence: 'y',
+      signals: {
+        ui_testable: { value: 'yes', evidence: 'clickable' },
+        behavior_change: { value: 'yes', evidence: 'changes behaviour' },
+        cosmetic_only: { value: 'no', evidence: '' },
+        money: { value: 'no', evidence: '' },
+        irreversible_external: { value: 'no', evidence: '' },
+        data_integrity: { value: 'no', evidence: '' },
+        access_security: { value: 'no', evidence: '' },
+        visual_blast_radius: { value: 'no', evidence: '' },
+      },
+    };
+    const create = vi.fn().mockResolvedValue({ content: [{ type: 'text', text: JSON.stringify(behaviorFacts) }] });
+    const claude = { messages: { create } };
+    const t = task({ gid: 'lr1' });
+    const client = {
+      getProjectTasksUnbounded: vi.fn().mockResolvedValue([t]),
+      getTask: vi.fn().mockResolvedValue(t),
+      setEnumCustomField: vi.fn().mockResolvedValue(undefined),
+      createStory: vi.fn().mockResolvedValue({ gid: 'story-1' }),
+    } as unknown as AsanaApiClient;
+    const repo = {
+      get: vi.fn().mockResolvedValue(null),
+      listActiveBot: vi.fn().mockResolvedValue([]),
+      upsertBot: vi.fn().mockResolvedValue(undefined),
+      markOverride: vi.fn().mockResolvedValue(undefined),
+    } as unknown as TierClassificationsRepo;
+    const poller = new TierPoller({
+      client,
+      repo,
+      // The committed fallback prompt/version must NOT be what gets used.
+      extract: { claude, prompt: 'FALLBACK PROMPT — Version: 1' },
+      promptVersion: 1,
+      rolloutDateMs: ROLLOUT_MS,
+      rubric,
+    });
+
+    const res = await poller.runOnce();
+    expect(res.classified).toBe(1);
+    // (a) The live source is refreshed once per tick.
+    expect(refresh).toHaveBeenCalledTimes(1);
+    // (b) The live prompt text is the cache-primed system block (not the fallback).
+    expect(create.mock.calls[0][0].system[0].text).toBe(liveRubric.promptText);
+    // (c) The live base-tier table reached decideTier → T2 (fallback would be T1).
+    expect(client.setEnumCustomField).toHaveBeenCalledWith('lr1', DELIVERY_TIER_FIELD_GID, tierToOptionGid('T2'));
+    // (d) The stored prompt_version is the live page version.
+    const upserts = (repo.upsertBot as ReturnType<typeof vi.fn>).mock.calls;
+    expect(upserts[upserts.length - 1][0].promptVersion).toBe(42);
   });
 });
 

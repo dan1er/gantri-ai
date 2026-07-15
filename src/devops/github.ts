@@ -41,6 +41,13 @@ export class GithubDispatcher {
     return `https://api.github.com/repos/${this.deps.owner}/${repo}`;
   }
 
+  /** The GitHub org/owner these requests target (GITHUB_OWNER). Exposed so the
+   *  delivery-tier authoritative pass can accept a PR link under ANY repo owned by
+   *  this org, not just the configured sweep list. */
+  get owner(): string {
+    return this.deps.owner;
+  }
+
   async dispatch(
     repo: string, workflow: string, ref: string, inputs: Record<string, string>,
   ): Promise<void> {
@@ -112,6 +119,41 @@ export class GithubDispatcher {
       sha: p.head.sha,
       body: p.body ?? '',
     }));
+  }
+
+  /**
+   * A single PR by number (open OR merged), with the same shape as `listOpenPRs`
+   * plus its `state`/`merged` flags. The delivery-tier authoritative pass uses
+   * this to diff a PR the TICKET links directly (in its notes/comments/Notes-for-QA
+   * subtask) instead of only PRs the open-PR scan happens to surface — a merged PR
+   * is invisible to that scan but still fully diffable here. Returns `null` on 404
+   * (a stale/typo link) so the caller degrades to the open-PR scan rather than
+   * failing the task. Dedupe stays `(repo, number, head.sha)`.
+   */
+  async getPr(
+    repo: string,
+    number: number,
+  ): Promise<
+    | { number: number; title: string; url: string; head: string; sha: string; body: string; state: string; merged: boolean }
+    | null
+  > {
+    const res = await this.fetch(`${this.base(repo)}/pulls/${number}`, { headers: this.headers() });
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`get PR ${repo}#${number} failed: ${res.status}`);
+    const p = (await res.json()) as {
+      number: number; title: string; html_url: string; body: string | null;
+      head: { ref: string; sha: string }; state: string; merged?: boolean;
+    };
+    return {
+      number: p.number,
+      title: p.title,
+      url: p.html_url,
+      head: p.head.ref,
+      sha: p.head.sha,
+      body: p.body ?? '',
+      state: p.state,
+      merged: p.merged ?? false,
+    };
   }
 
   /**

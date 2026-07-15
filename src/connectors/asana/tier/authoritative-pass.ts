@@ -15,6 +15,7 @@ import {
 import { extractFacts, extractFactsFromDiff, tierInputHash, type ExtractDeps } from './extract.js';
 import { decideTier } from './decide.js';
 import { renderAuthoritativeComment } from './comment.js';
+import { MIN_NOTES_CHARS } from './poller.js';
 import { logger } from '../../../logger.js';
 
 /**
@@ -319,6 +320,13 @@ export class AuthoritativePass {
       return 'skipped';
     }
 
+    // No PR to diff → the description is the only source. The rollout cutoff was
+    // removed for this lane so the whole in-flight backlog reaches Code Review, but
+    // the thin-description bar still applies to THIS fallback: a ticket with no
+    // findable PR and only a stub description is noise, not a classification. A
+    // ticket WITH a PR is diffed above regardless of description length.
+    if (!link && input.notes.trim().length < MIN_NOTES_CHARS) return 'skipped';
+
     // Classify: diff-first (authoritative), else the now-mature description.
     const facts = link
       ? await extractFactsFromDiff(
@@ -374,8 +382,10 @@ export class AuthoritativePass {
     });
 
     // Crash-safe two-phase write, mirroring the poller: persist the decision with
-    // the PREVIOUS confirmed tier first, write the field, then finalize. A crash in
-    // between never manufactures a phantom human override.
+    // the PREVIOUS confirmed tier first, then COMMENT, then write the field, then
+    // finalize. The comment lands before the field write so the Asana activity trail
+    // reads bot-explanation → field change (a papertrail). A crash in between never
+    // manufactures a phantom human override.
     const base = {
       taskGid: task.gid,
       inputHash: textHash,
@@ -393,10 +403,10 @@ export class AuthoritativePass {
       confirmedTier: record?.confirmedTier ?? record?.tier ?? null,
       commentGid: record?.commentGid ?? null,
     });
+    const story = await this.deps.client.createStory(task.gid, comment);
     if (changed) {
       await this.deps.client.setEnumCustomField(task.gid, DELIVERY_TIER_FIELD_GID, tierToOptionGid(authTier));
     }
-    const story = await this.deps.client.createStory(task.gid, comment);
     await this.deps.classifications.upsertBot({
       ...base,
       confirmedTier: authTier,

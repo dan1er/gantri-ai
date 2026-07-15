@@ -8,14 +8,16 @@ import type { TierPrChecksRepo, TierPrCheckVerdict } from '../../../storage/repo
 import {
   DELIVERY_TIER_FIELD_GID,
   TYPE_FIELD_GID,
+  asanaTaskUrl,
   optionGidToTier,
   tierToOptionGid,
   type DeliveryTier,
 } from '../board-config.js';
 import { extractFacts, extractFactsFromDiff, tierInputHash, type ExtractDeps } from './extract.js';
-import { decideTier } from './decide.js';
+import { decideTier, type Decision } from './decide.js';
 import { renderAuthoritativeComment } from './comment.js';
 import { MIN_NOTES_CHARS } from './poller.js';
+import type { ReviewRequestPoster, ReviewRequestPr } from './review-request.js';
 import { logger } from '../../../logger.js';
 
 /**
@@ -91,6 +93,10 @@ export interface AuthoritativePassDeps {
   prChecks: TierPrChecksRepo;
   extract: ExtractDeps;
   promptVersion: number;
+  /** Posts a code-review request to the software Slack channel the first time a
+   *  task is classified here. Optional — omitted (disabled) when SOFTWARE_CHANNEL_ID
+   *  is unset. */
+  reviewRequest?: ReviewRequestPoster;
   /** Override the repo list (tests). Defaults to `AUTH_PASS_REPOS`. */
   repos?: readonly string[];
 }
@@ -418,7 +424,69 @@ export class AuthoritativePass {
       { taskGid: task.gid, from: fromTier, to: authTier, source: link ? 'diff' : 'description' },
       changed ? 'delivery_tier_authoritative_superseded' : 'delivery_tier_authoritative_confirmed',
     );
+
+    // First authoritative classification of this task → ping reviewers in Slack.
+    // `record` is the pre-check row, so its `reviewRequested` flag dedupes the ping
+    // to once per task (later pushes / re-checks never re-ping).
+    await this.maybeRequestReview(task, link, decision, authTier, record);
     return changed ? 'superseded' : 'confirmed';
+  }
+
+  /**
+   * Post a code-review request to the software Slack channel the FIRST time a task
+   * is classified here (confirm, supersede, or the no-PR description fallback).
+   * Failure-soft: any error — a Slack outage or a dedupe-flag write — is logged and
+   * never fails the pass. The dedupe flag is set ONLY after a successful post, so a
+   * failed post retries on the next check instead of being silently dropped.
+   */
+  private async maybeRequestReview(
+    task: AsanaTask,
+    link: LinkedPr | null,
+    decision: Decision,
+    tier: DeliveryTier,
+    priorRecord: TierClassificationRecord | null,
+  ): Promise<void> {
+    const notifier = this.deps.reviewRequest;
+    if (!notifier) return; // feature disabled (SOFTWARE_CHANNEL_ID unset)
+    if (priorRecord?.reviewRequested) return; // already pinged for this task
+    try {
+      const posted = await notifier.post({
+        taskName: task.name ?? '',
+        permalink: asanaTaskUrl(task.gid),
+        tier,
+        nonUiLane: decision.flags.includes('non_ui_lane'),
+        prs: this.collectRequestPrs(task, link),
+      });
+      if (posted) await this.deps.classifications.markReviewRequested(task.gid);
+    } catch (err) {
+      logger.warn(
+        { taskGid: task.gid, err: err instanceof Error ? err.message : String(err) },
+        'code_review_request_failed',
+      );
+    }
+  }
+
+  /**
+   * The PR(s) to list in the request, deduped by `repo#number`. Always includes the
+   * classification PR (which may have been resolved from the open-PR backlink scan and
+   * never named on the ticket), plus every PR the ticket's description links — so a
+   * ticket that carries a backend AND a frontend PR pings both sides in one message.
+   * Pure (no extra I/O): notes are already on the task and other-repo PR URLs are
+   * deterministic from the owner. Empty when there is no PR at all (the message then
+   * uses the no-PR description-fallback form).
+   */
+  private collectRequestPrs(task: AsanaTask, link: LinkedPr | null): ReviewRequestPr[] {
+    const owner = this.deps.gh.owner;
+    const seen = new Map<string, ReviewRequestPr>();
+    const add = (repo: string, number: number, url: string): void => {
+      const key = `${repo.toLowerCase()}#${number}`;
+      if (!seen.has(key)) seen.set(key, { repo, number, url });
+    };
+    if (link) add(link.repo, link.pr.number, link.pr.url);
+    for (const l of extractPrLinks(task.notes, owner)) {
+      add(l.repo, l.number, `https://github.com/${owner}/${l.repo}/pull/${l.number}`);
+    }
+    return [...seen.values()];
   }
 
   /** Record the dedupe ledger row when a PR drove the pass (no PR → the per-task

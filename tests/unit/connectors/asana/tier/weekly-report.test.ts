@@ -32,6 +32,7 @@ function rec(o: Partial<TierClassificationRecord>): TierClassificationRecord {
     decidedBy: o.decidedBy ?? 'bot',
     humanTier: o.humanTier ?? null,
     commentGid: null,
+    reviewRequested: o.reviewRequested ?? false,
     createdAt: o.createdAt ?? '2026-07-14T00:00:00Z',
     updatedAt: o.updatedAt ?? '2026-07-14T00:00:00Z',
   };

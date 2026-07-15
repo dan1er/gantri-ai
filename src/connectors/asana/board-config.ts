@@ -23,6 +23,13 @@ export const SOFTWARE_BOARD_PROJECT_GID = '1210754051061529';
  *  projects a task may also belong to. */
 export const BOARD_NAME = 'Software Board';
 
+/** A stable Asana permalink to a Software Board task from its gid. Deterministic
+ *  (no API read needed), matching the `app.asana.com/0/<project>/<task>` shape the
+ *  web app uses. */
+export function asanaTaskUrl(gid: string): string {
+  return `https://app.asana.com/0/${SOFTWARE_BOARD_PROJECT_GID}/${gid}`;
+}
+
 /** Custom field "Type" and its "Feature" enum option. A task is a Feature iff
  *  its Type custom field's `enum_value.gid` equals FEATURE. */
 export const TYPE_FIELD_GID = '1211288498996171';

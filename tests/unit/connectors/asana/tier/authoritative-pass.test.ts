@@ -114,6 +114,7 @@ function record(over: Partial<TierClassificationRecord>): TierClassificationReco
     decidedBy: 'bot',
     humanTier: null,
     commentGid: 'story-prov',
+    reviewRequested: false,
     createdAt: '2026-07-20T00:00:00Z',
     updatedAt: '2026-07-20T00:00:00Z',
     ...over,
@@ -145,6 +146,9 @@ interface BuildOpts {
   /** What `gh.getPr` resolves to (a directly-linked PR), or null when it 404s.
    *  Undefined → null (no directly-linked PR; the open-PR scan is the fallback). */
   linkedPr?: ReturnType<typeof ghPr> | null;
+  /** Fake code-review Slack poster. Absent → the feature is disabled (the pass gets
+   *  no `reviewRequest` dep, matching an unset SOFTWARE_CHANNEL_ID). */
+  reviewRequest?: { post: ReturnType<typeof vi.fn> };
 }
 
 function build(o: BuildOpts = {}) {
@@ -172,6 +176,7 @@ function build(o: BuildOpts = {}) {
     get: vi.fn().mockResolvedValue(o.record === undefined ? record({}) : o.record),
     upsertBot: vi.fn().mockResolvedValue(undefined),
     markOverride: vi.fn().mockResolvedValue(undefined),
+    markReviewRequested: vi.fn().mockResolvedValue(undefined),
   } as unknown as TierClassificationsRepo;
   const prChecks = {
     exists: vi.fn().mockResolvedValue(o.exists ?? false),
@@ -186,8 +191,9 @@ function build(o: BuildOpts = {}) {
     extract: { claude, prompt: PROMPT },
     promptVersion: PROMPT_VERSION,
     repos: ['mantle'],
+    ...(o.reviewRequest ? { reviewRequest: o.reviewRequest } : {}),
   });
-  return { pass, gh, client, classifications, prChecks, claude };
+  return { pass, gh, client, classifications, prChecks, claude, reviewRequest: o.reviewRequest };
 }
 
 describe('extractAsanaTaskGid', () => {
@@ -598,5 +604,124 @@ describe('AuthoritativePass — forward PR resolution from the ticket', () => {
     const unresolved = task(GID, tierToOptionGid('T1'), 'No PR named anywhere in this ticket.');
     await pass.reviewCodeReviewTasks([resolved, unresolved]);
     expect(gh.listOpenPRs).toHaveBeenCalledTimes(1); // one repo (mantle), built lazily once
+  });
+});
+
+describe('AuthoritativePass — code-review Slack request', () => {
+  it('posts a request on the first authoritative classification and sets the dedupe flag', async () => {
+    const post = vi.fn().mockResolvedValue(true);
+    const { pass, classifications } = build({
+      fieldTier: 'T1',
+      diffTier: 'T2',
+      record: record({ tier: 'T1', confirmedTier: 'T1', reviewRequested: false }),
+      linkedPr: ghPr({ number: 5180, sha: 'sha-notes' }),
+      reviewRequest: { post },
+    });
+    const t = task(GID, tierToOptionGid('T1'), `Implements it. PR: ${ghLink('porter', 5180)}`);
+    const res = await pass.reviewCodeReviewTasks([t]);
+    expect(res.superseded).toBe(1);
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(post).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskName: `Task ${GID}`,
+        tier: 'T2',
+        nonUiLane: false,
+        permalink: expect.stringContaining(GID),
+        prs: [{ repo: 'porter', number: 5180, url: ghLink('porter', 5180) }],
+      }),
+    );
+    expect(classifications.markReviewRequested).toHaveBeenCalledWith(GID);
+  });
+
+  it('lists a backend and a frontend PR from the ticket in one request (both sides)', async () => {
+    const post = vi.fn().mockResolvedValue(true);
+    const { pass } = build({
+      fieldTier: 'T1',
+      diffTier: 'T2',
+      record: record({ tier: 'T1', confirmedTier: 'T1' }),
+      linkedPr: ghPr({ number: 5180, sha: 'sha-notes' }),
+      reviewRequest: { post },
+    });
+    // The LAST notes link (porter) is the one the pass resolves + diffs; the message
+    // lists BOTH the porter (backend) and mantle (frontend) PRs the ticket names.
+    const t = task(GID, tierToOptionGid('T1'), `Frontend ${ghLink('mantle', 1230)} and backend ${ghLink('porter', 5180)}`);
+    await pass.reviewCodeReviewTasks([t]);
+    expect(post).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prs: expect.arrayContaining([
+          expect.objectContaining({ repo: 'porter', number: 5180 }),
+          expect.objectContaining({ repo: 'mantle', number: 1230 }),
+        ]),
+      }),
+    );
+  });
+
+  it('posts a no-PR request from the description-fallback classification', async () => {
+    const post = vi.fn().mockResolvedValue(true);
+    const { pass, classifications } = build({
+      prs: [pr({ body: 'no asana link here' })], // the open-PR scan resolves nothing
+      diffTier: 'T2',
+      record: record({ tier: 'T1', confirmedTier: 'T1', reviewRequested: false }),
+      reviewRequest: { post },
+    });
+    const t = task(GID, tierToOptionGid('T1'), 'A mature description with plenty of substance to classify from.');
+    const res = await pass.reviewCodeReviewTasks([t]);
+    expect(res.superseded).toBe(1);
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({ prs: [] }));
+    expect(classifications.markReviewRequested).toHaveBeenCalledWith(GID);
+  });
+
+  it('does not post again once the task has already been requested (per-task dedupe)', async () => {
+    const post = vi.fn().mockResolvedValue(true);
+    const { pass, classifications } = build({
+      fieldTier: 'T1',
+      diffTier: 'T2',
+      record: record({ tier: 'T1', confirmedTier: 'T1', reviewRequested: true }),
+      linkedPr: ghPr({ number: 5180, sha: 'sha-2' }),
+      reviewRequest: { post },
+    });
+    const t = task(GID, tierToOptionGid('T1'), `PR: ${ghLink('porter', 5180)}`);
+    const res = await pass.reviewCodeReviewTasks([t]);
+    expect(res.superseded).toBe(1); // the classification still runs
+    expect(post).not.toHaveBeenCalled();
+    expect(classifications.markReviewRequested).not.toHaveBeenCalled();
+  });
+
+  it('leaves the dedupe flag unset when the Slack post fails (retries next check)', async () => {
+    const post = vi.fn().mockResolvedValue(false); // failure-soft: post reports failure
+    const { pass, classifications } = build({
+      fieldTier: 'T1',
+      diffTier: 'T2',
+      record: record({ tier: 'T1', confirmedTier: 'T1', reviewRequested: false }),
+      linkedPr: ghPr({ number: 5180, sha: 'sha-notes' }),
+      reviewRequest: { post },
+    });
+    const t = task(GID, tierToOptionGid('T1'), `PR: ${ghLink('porter', 5180)}`);
+    const res = await pass.reviewCodeReviewTasks([t]);
+    expect(res.superseded).toBe(1); // the post failure never fails the pass
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(classifications.markReviewRequested).not.toHaveBeenCalled();
+  });
+
+  it('never requests a review when the feature is disabled (no channel configured)', async () => {
+    const { pass, classifications } = build({
+      fieldTier: 'T1',
+      diffTier: 'T2',
+      record: record({ tier: 'T1', confirmedTier: 'T1' }),
+      linkedPr: ghPr({ number: 5180, sha: 'sha-notes' }),
+      // no reviewRequest dep → feature disabled
+    });
+    const t = task(GID, tierToOptionGid('T1'), `PR: ${ghLink('porter', 5180)}`);
+    const res = await pass.reviewCodeReviewTasks([t]);
+    expect(res.superseded).toBe(1);
+    expect(classifications.markReviewRequested).not.toHaveBeenCalled();
+  });
+
+  it('does not request a review on a skipped (already-reviewed head sha) task', async () => {
+    const post = vi.fn().mockResolvedValue(true);
+    const { pass } = build({ exists: true, reviewRequest: { post } });
+    const res = await pass.reviewCodeReviewTasks([task(GID, tierToOptionGid('T1'))]);
+    expect(res.skipped).toBe(1);
+    expect(post).not.toHaveBeenCalled();
   });
 });

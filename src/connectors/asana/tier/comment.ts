@@ -74,7 +74,7 @@ const FACT_PHRASE: Record<FactKey, string> = {
 };
 
 const DISPUTE_LINE =
-  'Disagree? You can raise a tier yourself; lowering is never a solo call — the Engineering Manager is the tie-break.';
+  'Disagree? Devs can raise a tier themselves; lowering is never a solo call — the Engineering Manager is the tie-break.';
 
 /** The "Why" sentence for the decision. */
 function whyLine(decision: Decision): string {

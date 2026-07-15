@@ -35,6 +35,10 @@
  *     tier — reconcile the golden set (with a labelled diff-review) or fix the
  *     regression before merging. Do NOT merge on a red golden eval.
  *
+ *     This gate also runs automatically in CI: `.github/workflows/tier-golden.yml`
+ *     invokes exactly this command on any PR that touches `src/prompts/**`,
+ *     `src/connectors/asana/tier/**`, or `tests/golden/**`.
+ *
  * Outputs (to the scratchpad dir, NOT committed):
  *   - tier-calibration-results[-<label>].md   summary + human-readable table
  *   - tier-calibration-results[-<label>].json machine-readable facts per ticket

@@ -1,5 +1,15 @@
-# See https://fly.io/docs/app-guides/continuous-deployment-with-github-actions/
-
+# Continuous deployment to Fly on push to main.
+# https://fly.io/docs/app-guides/continuous-deployment-with-github-actions/
+#
+# Required secrets:
+#   FLY_API_TOKEN  (already set on the repo) — Fly deploy auth.
+#
+# IMAGE-CLOBBER NOTE: this app is ALSO deployed by hand from feature-branch
+# checkouts, and a `fly deploy` replaces the whole image — whoever deploys last
+# silently drops the other's features (the tier classifier has vanished from prod
+# twice). GIT_SHA is baked into the image so GET /internal/build reports which
+# commit is actually live; the deploy-canary workflow polls that endpoint and
+# alerts if a module goes missing.
 name: Fly Deploy
 on:
   push:
@@ -13,6 +23,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: superfly/flyctl-actions/setup-flyctl@master
-      - run: flyctl deploy --remote-only
+      - run: flyctl deploy --remote-only --build-arg GIT_SHA=${{ github.sha }}
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

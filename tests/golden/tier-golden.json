@@ -100,7 +100,7 @@
     "taskGid": "1216248862261982",
     "name": "Purchase view: record inbound shipping and tariff (duty) costs on each purchase",
     "expected": [
-      "T2"
+      "T1"
     ]
   },
   {

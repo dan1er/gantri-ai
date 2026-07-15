@@ -1,4 +1,4 @@
-Version: 3
+Version: 4
 
 # Delivery Tier Classifier
 
@@ -18,7 +18,7 @@ Identify the ticket's functional domain — pick exactly one — and take its **
 | Domain | Covers | Base tier |
 | --- | --- | --- |
 | auth_accounts | login, signup, password, permissions | T2 |
-| inventory_materials | inventory, purchasing | T2 |
+| inventory_materials | stock levels, counts, locations, movements — operational stock integrity | T2 |
 | production_workflow | jobs, manufacturing steps (the Jobs subsystem) | T2 |
 | shopping_checkout | cart, checkout, payments, tax, shipping, discounts | T2 |
 | order_management | orders, refunds / returns, replacements (Factory OS) | T2 |
@@ -37,7 +37,7 @@ Identify the ticket's functional domain — pick exactly one — and take its **
 | product_catalog_design | products, designs, designers, product reviews | T1 |
 | machines_fleet | machines, fleet management | T1 |
 | production_monitoring | dashboards, TV dashboards; internal admin surfaces that EDIT data (e.g. editable Grafana panels) | T1 |
-| factory_administration | internal users, settings, cron jobs | T1 |
+| factory_administration | internal users, settings, cron jobs, admin data-entry forms (e.g. purchase cost capture) | T1 |
 | design_workflow | designs, submissions, revisions | T1 |
 | customer_operations | support, communications | T1 |
 | made_products_catalog | products, catalog (MadeOS) | T1 |
@@ -60,7 +60,7 @@ The domain positions the ticket; the actual change decides:
 
 - The change does **not** alter how the feature works — a label, copy, or styling change only → **T0**, whatever the base. (Showing **wrong data** is not cosmetic — that is a behavior bug.)
 - A visible change that **preserves the behavior** — layout, restyle, reorder, with the money / order / data / auth logic intact → at most **T1** (the lower of the base and T1).
-- The change **does alter behavior** and hits one of — **money** (charge / refund / payout / price / tax / discount / credit / gift-card / quote amount — an amount actually paid or charged changes; internal bookkeeping such as marking a statement Paid or stamping status dates does **not** fire) · **irreversible for a real customer** (commits or cancels an order, sends a customer email / SMS, hard-deletes data) · **data / inventory integrity** (hard to undo) · **access / security** (lock-out or exposure) → **T2**, whatever the base. *(These are the framework's Verification-lane cases — they always verify before production.)*
+- The change **does alter behavior** and hits one of — **money** — the change alters an amount someone **will pay or be charged from now on**: a charge / refund / payout / price / tax / shipping / discount / credit / gift-card / quote **calculation or path**. Recording, importing, or displaying amounts **already paid or incurred** (costs, landed costs, historical charges) is bookkeeping — it does **not** fire; neither does marking a statement Paid or stamping status dates · **irreversible for a real customer** (commits or cancels an order, sends a customer email / SMS, hard-deletes data) · **data / inventory integrity** (hard to undo) · **access / security** (lock-out or exposure) → **T2**, whatever the base. *(These are the framework's Verification-lane cases — they always verify before production.)*
 - **A fix that restores already-shipped, already-approved behavior** — a localized guard or null / empty check, a UI-option or mapping fix, a config entry, or wiring an already-reviewed primitive into its intended call site, with the money / order / state logic itself untouched → at most **T1** (the lower of the base and T1). The trigger above fires only when the change **decides a new amount, or creates a new way for money, inventory, or order state to move** — not when it lets existing approved logic run again. If the ticket can't answer which one it is, hold at **T1** — the Code-Review diff pass settles it.
 - Otherwise → keep the **base tier**.
 
@@ -92,9 +92,9 @@ In ADDITION to the four keys above (`tier`, `domain`, `why`, `evidence`), includ
 - `behavior_change` — Step 3: does the change alter how the feature actually works (not just its look)? A fix that makes a broken feature work again still counts as a behavior change (`yes`) — then use `restores_approved_behavior` to say whether it is a *restore* of already-approved behavior or genuinely *new* logic.
 - `cosmetic_only` — Step 3: label / copy / text / styling / spacing / color / image / layout / element-order only, with no behavior change. Showing **wrong data** is NOT cosmetic — that is a behavior bug (`behavior_change` → `yes`, `cosmetic_only` → `no`).
 - `restores_approved_behavior` — Step 3 restore carve-out: is this a fix that **restores already-shipped, already-approved behavior** rather than deciding something new? Answer `yes` when the change is a localized guard or null / empty check, a UI-option or mapping fix, a config entry, wiring an already-reviewed primitive into its intended call site, or simply unblocking a broken flow (a checkout / save / confirm / place-order path that used to work now throws or no-ops) — and the money / order / state **math itself is left untouched**, so it merely lets existing approved logic run again. Releasing or applying an amount that existing approved logic **already computed** (e.g. releasing an already-accrued charge when a return expires) is letting existing logic run → `yes`. Answer `no` when the change **decides or recomputes a money AMOUNT** — a refund, charge, payout, price, or credit that now comes out to a *different number* (that is the money trigger, not a restore) — or otherwise **creates a new way for money, inventory, or order state to move** (genuinely new logic). Answer `unclear` when the ticket can't tell you which one it is.
-- `money` — Step 3 trigger: an amount actually paid or charged changes — a charge, refund, payout, price, tax, shipping, discount, credit, gift-card, or quote amount. Internal bookkeeping (marking a statement Paid, stamping status dates) does **not** fire this → `no`.
+- `money` — Step 3 trigger, judged **forward-looking**: answer `yes` only when the change alters an amount someone **will pay or be charged from now on** — a charge, refund, payout, price, tax, shipping, discount, credit, gift-card, or quote **calculation or path**. Recording, importing, or displaying amounts **already paid or incurred** — costs, landed costs, historical charges, purchase-cost capture — is bookkeeping and does **not** fire → `no`; neither does internal bookkeeping such as marking a statement Paid or stamping status dates → `no`.
 - `irreversible_external` — Step 3 trigger: commits or cancels a real order, sends a customer email / SMS / push, or hard-deletes customer data.
-- `data_integrity` — Step 3 trigger: can corrupt orders, inventory, or stored records in a way that is hard to undo.
+- `data_integrity` — Step 3 trigger, asked narrowly: does the feature's **normal operation write wrong or corrupt values into live customer orders or operational inventory stock** (stock levels / counts / locations), in a hard-to-undo way? The clear `yes` is overwriting operational state in place — e.g. a bulk inventory update that rewrites on-hand counts. It is `no` for anything that only **captures or relocates bookkeeping data**: adding an admin data-entry form or a new cost / metadata field, **purchase-cost capture / recording landed costs**, or moving where a value is entered or stored from one screen or record to another. Do **not** infer this trigger from the words "move / relocate / migrate a field", nor from generic "hard to undo if done incorrectly" migration caution — reorganizing where data lives is **schema / migration** work (an engineering-review / Non-UI-Lane concern), not corruption of the records themselves → `no`.
 - `access_security` — Step 3 trigger: changes authentication, access, or permissions in a way that could lock customers out or expose data.
 - `visual_blast_radius` — reporting only: wide visual reach — a new / removed screen, a shared component (design-system dir or used on 2+ screens), or a layout restructure.
 

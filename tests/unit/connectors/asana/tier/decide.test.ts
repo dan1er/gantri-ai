@@ -3,7 +3,7 @@ import { decideTier, DOMAIN_BASE_TIER, type Domain, type Facts, type Ternary } f
 import type { DeliveryTier } from '../../../../../src/connectors/asana/board-config.js';
 
 /**
- * The Notion "Delivery Tier Classifier" rubric page (Version 3, domain-base model),
+ * The Notion "Delivery Tier Classifier" rubric page (Version 4, domain-base model),
  * encoded as fixtures so the code is provably aligned with the public doc. The
  * functional domain sets a BASE tier; the change (Step 3/4) raises or lowers it; a
  * restore of already-approved behaviour caps at min(base, T1); uncertainty floors
@@ -131,6 +131,40 @@ describe('decideTier — money-adjacent domain invariants', () => {
     expect(d.tier).toBe('T2');
     expect(d.baseTier).toBe('T1');
     expect(d.firedRule).toBe('t2_risk_trigger');
+  });
+});
+
+describe('decideTier — Version 4 money boundary (bookkeeping vs will-pay calculation)', () => {
+  // Danny's calibration, root-caused: "Purchase view: record inbound shipping and
+  // tariff (duty) costs on each purchase" (golden row 13) was wrongly T2 via a false
+  // money trigger. Version 4 makes the money trigger forward-looking: it fires only on
+  // an amount someone WILL pay or be charged from now on (a calculation or path);
+  // recording amounts ALREADY paid or incurred — costs, landed costs, purchase-cost
+  // capture — is bookkeeping and does NOT fire. The domain routing then decides the
+  // tier: an admin data-entry form is factory_administration (T1 base).
+
+  it('recording already-paid costs (purchase cost capture): money=no, behaviour change routes by domain to T1', () => {
+    // The extractor answers money=no (bookkeeping — the costs were already incurred)
+    // and domain=factory_administration (an admin data-entry form). With no hard
+    // trigger, decideTier keeps the domain base tier = T1.
+    const d = decideTier(
+      facts({ behavior_change: 'yes', money: 'no', domain: 'factory_administration' }),
+    );
+    expect(d.tier).toBe('T1');
+    expect(d.baseTier).toBe('T1');
+    expect(d.firedRule).toBe('behavior_at_base');
+  });
+
+  it('a pricing / quote CALCULATION change: money=yes → T2 (the trigger still fires forward-looking)', () => {
+    // The mirror case: a change that alters an amount someone will be charged from now
+    // on (a price / quote calculation or path) DOES fire the money trigger and escalates
+    // to T2, whatever the base.
+    const d = decideTier(
+      facts({ behavior_change: 'yes', money: 'yes', domain: 'made_quoting_billing' }),
+    );
+    expect(d.tier).toBe('T2');
+    expect(d.firedRule).toBe('t2_risk_trigger');
+    expect(d.evidenceFact).toBe('money');
   });
 });
 

@@ -5,7 +5,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
  * single row (id = 1) holds the rendered page BODY, its parsed version, and the
  * adopted prompt hash. The `RubricSource` reads it on a cold boot so classification
  * survives a Notion outage, and re-writes it whenever it adopts a new page revision.
- * See `migrations/0040_tier_rubric_cache.sql`.
+ * See `migrations/0041_tier_rubric_cache.sql`.
  */
 export interface TierRubricCacheRow {
   /** The rendered page body markdown (pre machine-appendix). */

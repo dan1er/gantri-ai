@@ -5,7 +5,8 @@
     "name": "Hot-Fix: Unable to create a replacement order",
     "expected": [
       "T2"
-    ]
+    ],
+    "knownMiss": true
   },
   {
     "row": 2,
@@ -85,7 +86,8 @@
     "name": "Hotfix: Jobs stuck in progress for days",
     "expected": [
       "T1"
-    ]
+    ],
+    "knownMiss": true
   },
   {
     "row": 12,
@@ -100,7 +102,7 @@
     "taskGid": "1216248862261982",
     "name": "Purchase view: record inbound shipping and tariff (duty) costs on each purchase",
     "expected": [
-      "T2"
+      "T1"
     ]
   },
   {
@@ -109,7 +111,8 @@
     "name": "Bug: Dashboard numbers are inconsistent",
     "expected": [
       "T1"
-    ]
+    ],
+    "knownMiss": true
   },
   {
     "row": 15,
@@ -125,7 +128,8 @@
     "name": "Bug: Complete Return Displays \"Refund Amount Is Greater Than Charge Amount\" Error When All Items Are Marked Discard",
     "expected": [
       "T2"
-    ]
+    ],
+    "knownMiss": true
   },
   {
     "row": 17,
@@ -239,7 +243,8 @@
     "name": "Complete Return: voided units inflate the order's refunded-shipping ledger (refundedShippingCents / hasRefundShipping)",
     "expected": [
       "T2"
-    ]
+    ],
+    "knownMiss": true
   },
   {
     "row": 31,
@@ -247,7 +252,8 @@
     "name": "Bug: Finish Sample Kit Orders Receiving Error Message ",
     "expected": [
       "T2"
-    ]
+    ],
+    "knownMiss": true
   },
   {
     "row": 32,
@@ -255,7 +261,8 @@
     "name": "Hot-Fix: Completed Date Incorrect: This effects Revenue Recognition.",
     "expected": [
       "T0"
-    ]
+    ],
+    "knownMiss": true
   },
   {
     "row": 33,

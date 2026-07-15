@@ -6,7 +6,7 @@ import { TIER_RANK, maxTier, type DeliveryTier } from '../board-config.js';
  * them into the authoritative tier. Same facts → same tier, always.
  *
  * This encodes the FINAL rubric — the public "Delivery Tier Classifier" Notion
- * page (Version 3), transcribed verbatim into
+ * page (Version 4), transcribed verbatim into
  * `src/prompts/delivery-tier-standard.md`. It is a DOMAIN-BASE model: the
  * functional domain sets a base tier and the actual change raises or lowers it.
  *
@@ -93,15 +93,17 @@ export type Domain = (typeof DOMAIN_ENUM)[number];
 
 /**
  * DOMAIN_BASE_TIER — the base tier each functional domain starts at, transcribed
- * verbatim from the Notion rubric page (Version 3, hand-calibrated). The change
+ * verbatim from the Notion rubric page (Version 4, hand-calibrated). The change
  * (Step 3/4) raises or lowers it. Six domains sit at T2 base: the inherently
  * dangerous ones (auth, inventory, production) plus the customer money / order
  * surfaces (checkout, order management, orders / notifications), where a base
  * defect ships real customer harm. Payouts / statements / quotes sit at T1 and
- * reach T2 only via Step 3's money trigger — and that trigger fires only when an
- * amount actually paid or charged changes, not on internal bookkeeping (marking a
- * statement Paid, stamping status dates). Read-only reporting and pure infra sit
- * at T0; everything else, and `unknown`, is T1.
+ * reach T2 only via Step 3's money trigger — and that trigger is forward-looking:
+ * it fires only when the change alters an amount someone WILL pay or be charged
+ * from now on (a calculation or path), not when it records amounts already paid or
+ * incurred (costs, landed costs, purchase-cost capture) or stamps internal
+ * bookkeeping (marking a statement Paid, status dates). Read-only reporting and
+ * pure infra sit at T0; everything else, and `unknown`, is T1.
  */
 export const DOMAIN_BASE_TIER: Record<Domain, DeliveryTier> = {
   auth_accounts: 'T2',
@@ -167,14 +169,20 @@ export interface Facts {
    *  can't tell. When `yes`, the hard trigger does NOT fire — the tier is capped at
    *  min(base, T1). */
   restores_approved_behavior: FactValue;
-  /** An amount actually paid or charged changes — a charge, refund, payout, price,
-   *  tax, shipping, discount, credit, gift-card, or quote value. Internal
-   *  bookkeeping (marking a statement Paid, stamping status dates) does NOT fire. */
+  /** Forward-looking money trigger: an amount someone WILL pay or be charged from now
+   *  on changes — a charge, refund, payout, price, tax, shipping, discount, credit,
+   *  gift-card, or quote calculation or path. Recording amounts already paid or
+   *  incurred (costs, landed costs, purchase-cost capture) is bookkeeping and does NOT
+   *  fire; neither does marking a statement Paid or stamping status dates. */
   money: FactValue;
   /** Commits or cancels a real order, sends a customer email/SMS/push, or
    *  hard-deletes customer data. */
   irreversible_external: FactValue;
-  /** Can corrupt orders, inventory, or stored records in a hard-to-undo way. */
+  /** Can corrupt existing operational records that production or customers depend on
+   *  — live customer orders, or inventory stock levels / counts / locations — in a
+   *  hard-to-undo way (e.g. a bulk inventory update that rewrites counts). Merely
+   *  adding / capturing new data (a data-entry form, a new cost / metadata field,
+   *  moving a field between tables) or schema / one-off-migration risk does NOT fire. */
   data_integrity: FactValue;
   /** Changes authentication, access, or permissions in a risky way. */
   access_security: FactValue;

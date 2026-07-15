@@ -4,7 +4,7 @@ import { DOMAIN_BASE_TIER, type Domain } from '../../../../../src/connectors/asa
 
 /**
  * The public rubric prompt must stay verbatim-equivalent to the Notion "Delivery
- * Tier Classifier" page (Version 3, the domain-base model) plus the clearly-marked
+ * Tier Classifier" page (Version 4, the domain-base model) plus the clearly-marked
  * bot-only machine appendix (signals contract + diff-mode carve-out). These guards
  * keep the four rubric steps, the domain→base-tier table, and the signals contract
  * in sync so page ↔ code ↔ prompt agree.
@@ -12,11 +12,11 @@ import { DOMAIN_BASE_TIER, type Domain } from '../../../../../src/connectors/asa
 describe('delivery-tier rubric prompt', () => {
   const prompt = loadTierStandard();
 
-  it('is Version 3 (matches the Notion page header)', () => {
-    expect(parseTierPromptVersion(prompt)).toBe(3);
+  it('is Version 4 (matches the Notion page header)', () => {
+    expect(parseTierPromptVersion(prompt)).toBe(4);
   });
 
-  it('Step 3 carries the Version 3 restore-vs-rework carve-out', () => {
+  it('Step 3 carries the restore-vs-rework carve-out', () => {
     const section = prompt.slice(prompt.indexOf('## Step 3'), prompt.indexOf('## Step 4'));
     expect(section).toMatch(/restores already-shipped, already-approved behavior/i);
     expect(section).toMatch(/decides a new amount, or creates a new way for money, inventory, or order state to move/i);
@@ -39,6 +39,20 @@ describe('delivery-tier rubric prompt', () => {
     expect(section).toMatch(/irreversible for a real customer/i);
     expect(section).toMatch(/data \/ inventory integrity/i);
     expect(section).toMatch(/access \/ security/i);
+  });
+
+  it('Step 3 states the Version 4 forward-looking money boundary (will-pay vs already-paid bookkeeping)', () => {
+    // Version 4 (Danny's calibration): the money trigger fires on an amount someone
+    // WILL pay or be charged from now on — a calculation or path — while recording /
+    // importing / displaying amounts ALREADY paid or incurred (costs, landed costs,
+    // historical charges) is bookkeeping and does NOT fire. This is what stops the
+    // "record inbound shipping and tariff costs" ticket from mis-firing T2.
+    const section = prompt.slice(prompt.indexOf('## Step 3'), prompt.indexOf('## Step 4'));
+    expect(section).toMatch(/will\s+pay or be charged from now on/i);
+    expect(section).toMatch(/calculation or path/i);
+    expect(section).toMatch(/already paid or incurred/i);
+    expect(section).toMatch(/landed costs/i);
+    expect(section).toMatch(/is bookkeeping — it does \*\*not\*\* fire/i);
   });
 
   it('the domain→base-tier table lists every code domain with a matching base tier', () => {
@@ -82,6 +96,19 @@ describe('delivery-tier rubric prompt', () => {
     ]) {
       expect(section).toContain(signal);
     }
+  });
+
+  it('the appendix money signal uses the same forward-looking test (bookkeeping does not fire)', () => {
+    // The machine `money` signal must mirror Step 3's Version 4 boundary so the
+    // deterministic recompute agrees with the prose: will-pay-from-now-on = yes;
+    // recording already-paid / incurred costs (landed costs, purchase-cost capture) = no.
+    const section = prompt.slice(prompt.indexOf('--- MACHINE APPENDIX'));
+    const moneyLine = section.slice(section.indexOf('- `money`'), section.indexOf('- `irreversible_external`'));
+    expect(moneyLine).toMatch(/forward-looking/i);
+    expect(moneyLine).toMatch(/will\*?\*? pay or be charged from now on/i);
+    expect(moneyLine).toMatch(/already paid or incurred/i);
+    expect(moneyLine).toMatch(/landed costs/i);
+    expect(moneyLine).toMatch(/purchase-cost capture/i);
   });
 
   it('carves out diff mode inside the machine appendix: the diff is authoritative', () => {

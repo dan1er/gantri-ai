@@ -102,6 +102,67 @@ describe('extractFacts', () => {
   });
 });
 
+describe('extractFacts — Version 4 money boundary fixtures', () => {
+  // These fixtures pin the signal envelope the model is expected to return under the
+  // Version 4 forward-looking money boundary, and confirm the extractor parses it.
+
+  it('recording already-paid costs (purchase-cost capture) → money=no, factory_administration', async () => {
+    // "Purchase view: record inbound shipping and tariff (duty) costs on each purchase"
+    // (golden row 13): the amounts were already incurred, so recording them is
+    // bookkeeping — money=no — and it is an admin data-entry form (factory_administration).
+    const envelope = {
+      tier: 'T1',
+      domain: 'factory_administration',
+      why: 'Step 2: admin data-entry form, base tier T1; Step 3 money does not fire (bookkeeping)',
+      evidence: 'record inbound shipping and tariff (duty) costs on each purchase',
+      signals: {
+        ui_testable: { value: 'yes', evidence: 'enter the costs on the purchase view' },
+        behavior_change: { value: 'yes', evidence: 'record inbound shipping and tariff costs' },
+        cosmetic_only: { value: 'no', evidence: '' },
+        restores_approved_behavior: { value: 'no', evidence: '' },
+        money: { value: 'no', evidence: 'recording amounts already incurred — bookkeeping' },
+        irreversible_external: { value: 'no', evidence: '' },
+        data_integrity: { value: 'no', evidence: '' },
+        access_security: { value: 'no', evidence: '' },
+        visual_blast_radius: { value: 'no', evidence: '' },
+      },
+    };
+    const claude = claudeReturning(JSON.stringify(envelope));
+    const facts = await extractFacts(INPUT, { claude, prompt: PROMPT });
+    expect(facts.domain).toBe('factory_administration');
+    expect(facts.money.value).toBe('no');
+    expect(facts.behavior_change.value).toBe('yes');
+    expect(facts.llmTier).toBe('T1');
+  });
+
+  it('a pricing / quote CALCULATION change → money=yes, made_quoting_billing', async () => {
+    // The mirror: a change to how a quote amount is calculated alters what someone will
+    // be charged from now on — money=yes — so the trigger fires.
+    const envelope = {
+      tier: 'T2',
+      domain: 'made_quoting_billing',
+      why: 'Step 3: changes how the quote amount is calculated',
+      evidence: 'recompute the quote total from the new margin formula',
+      signals: {
+        ui_testable: { value: 'yes', evidence: 'generate a quote' },
+        behavior_change: { value: 'yes', evidence: 'recompute the quote total' },
+        cosmetic_only: { value: 'no', evidence: '' },
+        restores_approved_behavior: { value: 'no', evidence: '' },
+        money: { value: 'yes', evidence: 'recompute the quote total from the new margin formula' },
+        irreversible_external: { value: 'no', evidence: '' },
+        data_integrity: { value: 'no', evidence: '' },
+        access_security: { value: 'no', evidence: '' },
+        visual_blast_radius: { value: 'no', evidence: '' },
+      },
+    };
+    const claude = claudeReturning(JSON.stringify(envelope));
+    const facts = await extractFacts(INPUT, { claude, prompt: PROMPT });
+    expect(facts.domain).toBe('made_quoting_billing');
+    expect(facts.money.value).toBe('yes');
+    expect(facts.llmTier).toBe('T2');
+  });
+});
+
 describe('extractFactsFromDiff', () => {
   it('reuses the rubric prompt as the cached system block and puts the diff in the user turn', async () => {
     const claude = claudeReturning(JSON.stringify(FULL_FACTS));

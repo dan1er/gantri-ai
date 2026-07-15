@@ -21,7 +21,9 @@
  *                    classify each gid with the live extract+decide pipeline, and
  *                    score each row (PASS = computed tier ∈ `expected`). Prints a
  *                    per-row PASS/FAIL table + the total score and EXITS 1 if any row
- *                    FAILS. This is the regression gate for the classifier.
+ *                    NOT flagged `knownMiss` FAILS (ratchet: documented misses are
+ *                    allowed; new misses and regressions are not). This is the
+ *                    regression gate for the classifier.
  *   --label <name>   suffix the output basenames (`…-<name>.md/.json`) so a re-run
  *                    does not clobber a prior golden set.
  *
@@ -365,6 +367,10 @@ interface GoldenEntry {
   name: string;
   /** Accepted tiers — PASS when the computed tier is any of these (e.g. `["T0","T1"]`). */
   expected: string[];
+  /** Documented miss the team has accepted for now: it does NOT fail the gate, but a
+   *  NEW miss on any unflagged row does (ratchet semantics). Remove the flag once the
+   *  rubric change that fixes the row lands — the gate nudges when it starts passing. */
+  knownMiss: boolean;
 }
 
 /** One scored golden row. */
@@ -376,6 +382,7 @@ interface GoldenRowResult {
   expected: string[];
   actual: string | null;
   pass: boolean;
+  knownMiss: boolean;
   domain: string | null;
   firedRule: string | null;
   evidence: string;
@@ -397,6 +404,7 @@ function readGolden(file: string): GoldenEntry[] {
       taskGid: String(g.taskGid),
       name: g.name ?? '',
       expected: g.expected.map(String),
+      knownMiss: g.knownMiss === true,
     };
   });
 }
@@ -431,8 +439,9 @@ async function runGolden(
       const actual = decision.tier;
       const pass = g.expected.includes(actual);
       const reason = `${whyLine(decision.firedRule, decision.evidenceFact)}${decision.flags.length ? ` [${decision.flags.join(',')}]` : ''}`;
+      const tag = pass ? (g.knownMiss ? 'PASS (was a known miss — remove knownMiss)' : 'PASS') : g.knownMiss ? 'MISS (known, allowed)' : 'FAIL';
       console.log(
-        `[golden] #${g.row} ${g.taskGid} -> ${actual} exp[${g.expected.join('|')}] ${pass ? 'PASS' : 'FAIL'} (${decision.firedRule})`,
+        `[golden] #${g.row} ${g.taskGid} -> ${actual} exp[${g.expected.join('|')}] ${tag} (${decision.firedRule})`,
       );
       return {
         row: g.row,
@@ -440,6 +449,7 @@ async function runGolden(
         url,
         name: t.name ?? g.name,
         expected: g.expected,
+        knownMiss: g.knownMiss,
         actual,
         pass,
         domain: facts.domain,
@@ -456,6 +466,7 @@ async function runGolden(
         url,
         name: g.name,
         expected: g.expected,
+        knownMiss: g.knownMiss,
         actual: null,
         pass: false,
         domain: null,
@@ -497,17 +508,24 @@ async function runGolden(
 
   console.log(`\n[golden] score: ${passCount}/${rows.length}`);
   console.log(`[golden] distribution: T0=${dist.T0} T1=${dist.T1} T2=${dist.T2}${dist.ERROR ? ` ERROR=${dist.ERROR}` : ''}`);
-  if (failing.length) {
-    console.log(`[golden] FAILING rows (${failing.length}):`);
-    for (const r of failing) {
+  const hardFails = failing.filter((r) => !r.knownMiss);
+  const allowedMisses = failing.filter((r) => r.knownMiss);
+  if (hardFails.length) {
+    console.log(`[golden] FAILING rows (${hardFails.length}) — new misses or regressions:`);
+    for (const r of hardFails) {
       console.log(`  #${r.row} ${r.taskGid} got ${r.actual ?? 'ERROR'} expected [${r.expected.join('|')}] — ${r.reason}`);
     }
+  }
+  if (allowedMisses.length) {
+    console.log(`[golden] known misses, allowed (${allowedMisses.length}): ${allowedMisses.map((r) => '#' + r.row).join(' ')}`);
   }
   console.log(`[golden] wrote ${outMd}`);
   console.log(`[golden] wrote ${outJson}`);
 
-  // The regression gate: any FAIL is a non-zero exit so CI / a merge check catches it.
-  if (failing.length) process.exitCode = 1;
+  // The regression gate (ratchet): a FAIL on any row NOT flagged knownMiss is a
+  // non-zero exit so CI / a merge check catches new misses and regressions, while the
+  // documented known misses stay visible without blocking.
+  if (hardFails.length) process.exitCode = 1;
 }
 
 interface GoldenRenderArgs {

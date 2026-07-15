@@ -320,5 +320,13 @@
     "expected": [
       "T1"
     ]
+  },
+  {
+    "row": 41,
+    "taskGid": "1216545799812697",
+    "name": "Bug: Cannot cancel full order",
+    "expected": [
+      "T1"
+    ]
   }
 ]

@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   extractFacts,
   extractFactsFromDiff,
+  loadTierStandard,
   parseTierPromptVersion,
   tierInputHash,
   TierExtractError,
@@ -124,6 +125,56 @@ describe('extractFactsFromDiff', () => {
     await extractFactsFromDiff({ ...INPUT, diff: 'partial diff', truncated: true }, { claude, prompt: PROMPT });
     const userText = claude.messages.create.mock.calls[0][0].messages[0].content as string;
     expect(userText).toContain('NOTE: the diff was truncated');
+  });
+});
+
+describe('machine appendix — ui_testable drivability boundary', () => {
+  // Danny's live correction: "Bug: Cannot cancel full order" (fix = backend cron +
+  // transaction service) was wrongly judged ui_testable=no and downgraded T1→T0 by
+  // the diff pass, on the blanket "backend-only → no". A tester CAN drive it: cancel
+  // the order in admin and verify the fix. The appendix must define ui_testable by
+  // DRIVABILITY (does a UI flow exercise the changed behavior), not by file location —
+  // as the three-question determination DRIVE + VERIFY + COVER (all must hold).
+  const appendix = (() => {
+    const prompt = loadTierStandard();
+    return prompt.slice(prompt.indexOf('--- MACHINE APPENDIX'));
+  })();
+
+  it('defines ui_testable by drivability, not by which files changed', () => {
+    expect(appendix).toMatch(/drivability,? not file location/i);
+    expect(appendix).toMatch(/exercises the changed behavior/i);
+    // The blanket "backend-only ⇒ no" rule must be gone: an all-backend fix can be yes.
+    expect(appendix).toMatch(/100% backend/i);
+    expect(appendix).not.toMatch(/a backend-only change offers nothing to click/i);
+  });
+
+  it('frames the question as "would a manual UI pass catch this change\'s failure?"', () => {
+    expect(appendix).toMatch(/would a manual UI pass be the thing that catches this change'?s failure/i);
+    // Not "does it have any UI consequence" — almost everything does.
+    expect(appendix).toMatch(/never "does this change have any UI consequence\?"/i);
+  });
+
+  it('carries the three-question determination: DRIVE + VERIFY + COVER (all must hold)', () => {
+    expect(appendix).toMatch(/\*\*DRIVE\*\*/);
+    expect(appendix).toMatch(/\*\*VERIFY\*\*/);
+    expect(appendix).toMatch(/\*\*COVER\*\*/);
+    expect(appendix).toMatch(/all THREE hold/i);
+    // COVER: a shared-helper refactor across many flows is drivable but not covered.
+    expect(appendix).toMatch(/refactor of a shared helper/i);
+    // Genuinely unclear → 'unclear' (the T1 floor handles it), not a confident no.
+    expect(appendix).toMatch(/answer `unclear`/i);
+  });
+
+  it('keeps the observe-not-drive line and the always-no cases', () => {
+    // Actively driving the corrected behavior = yes; passively observing output = no.
+    expect(appendix).toMatch(/observ/i);
+    // Migrations / backfills stay always-no; webhook / sync / race internals stay no.
+    expect(appendix).toMatch(/data migrations and one-off backfills are \*\*always\*\* `no`/i);
+    expect(appendix).toMatch(/webhook \/ sync \/ race internals/i);
+  });
+
+  it('the diff-mode carve-out judges ui_testable by behavior, never by file location', () => {
+    expect(appendix).toMatch(/Judge `ui_testable` by whether a product-UI flow \*\*exercises the changed behavior\*\*, never by which files/i);
   });
 });
 

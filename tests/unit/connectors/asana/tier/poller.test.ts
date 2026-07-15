@@ -134,7 +134,7 @@ describe('TierPoller.runOnce — candidate gating', () => {
     expect(final.commentGid).toBe('story-1');
     expect(final.stage).toBe('provisional');
     // The comment carries the provisional note.
-    expect((client.createStory as ReturnType<typeof vi.fn>).mock.calls[0][1]).toContain('Provisional — will be confirmed');
+    expect((client.createStory as ReturnType<typeof vi.fn>).mock.calls[0][1]).toContain('Provisional until Code Review');
   });
 
   it('excludes tasks created before ROLLOUT_DATE, thin descriptions, completed tasks, and excluded Types', async () => {
@@ -448,7 +448,7 @@ describe('TierPoller.runOnce — finalizeConfirmed backfills a missing comment',
     // is backfilled with the provisional note.
     expect(client.setEnumCustomField).not.toHaveBeenCalled();
     expect(client.createStory).toHaveBeenCalledTimes(1);
-    expect((client.createStory as ReturnType<typeof vi.fn>).mock.calls[0][1]).toContain('Provisional — will be confirmed');
+    expect((client.createStory as ReturnType<typeof vi.fn>).mock.calls[0][1]).toContain('Provisional until Code Review');
   });
 });
 

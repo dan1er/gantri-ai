@@ -58,6 +58,11 @@ export interface JobSpec {
   // Pre-deploy E2E gate config (deploy jobs). Absent = skipped (no gate). The
   // per-frontend run state lives on each DeployItem (e2e*).
   e2e?: { scope: 'smoke' | 'both' };
+  // Deploy jobs only — per-repo mrkdwn fragments (same shape `findSkipped` emits)
+  // listing earlier un-deployed PRs bundled into this deploy's tags; captured at
+  // confirm time so the thread keeps a durable record of what the requester
+  // acknowledged.
+  carriedOver?: string[];
   // On-demand suite run (kind = 'e2e', the /e2e Slack command). Mirrors the
   // qase-trigger.yml workflow inputs; 2+ areas are folded into a grep_override
   // (the workflow's area input is single-choice).

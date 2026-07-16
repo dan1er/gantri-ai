@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { renderJobBlocks, renderJobDetailBlocks, deployRollbackActions, e2eLocalConfig } from '../../../src/devops/messages.js';
+import { renderJobBlocks, renderJobDetailBlocks, deployRollbackActions, e2eLocalConfig, carriedOverNote } from '../../../src/devops/messages.js';
 import type { Job } from '../../../src/devops/types.js';
 
 const baseJob: Job = {
@@ -137,5 +137,40 @@ describe('deploy rendering', () => {
       spec: { deployFrontends: [{ repo: 'mantle', tag: 'deploy-1203-2026.06.08', sha: 's', pr: 1203, url: 'https://www.gantri.com' }] },
     };
     expect(deployRollbackActions(job)).toBeNull();
+  });
+});
+
+describe('carriedOverNote', () => {
+  const withCarried = (carriedOver?: string[], kind: Job['kind'] = 'deploy'): Job => ({
+    ...deployJob, kind,
+    spec: { ...deployJob.spec, carriedOver },
+  });
+
+  it('renders the header, the fragments, and the footer', () => {
+    const note = carriedOverNote(withCarried([
+      '*Porter*:\n    • deploy-x-5209',
+      '*Marketplace*:\n    • deploy-y-1203',
+    ]))!;
+    expect(note).toContain('Also shipping with this deploy');
+    expect(note).toContain('deploy-x-5209');
+    expect(note).toContain('deploy-y-1203');
+    expect(note).toContain('Acknowledged at confirm time');
+  });
+
+  it('returns null when there is no carried-over list', () => {
+    expect(carriedOverNote(withCarried(undefined))).toBeNull();
+    expect(carriedOverNote(withCarried([]))).toBeNull();
+  });
+
+  it('returns null for a non-deploy job even if a list is present', () => {
+    expect(carriedOverNote(withCarried(['*Porter*:\n    • deploy-x-5209'], 'preview'))).toBeNull();
+  });
+
+  it('truncates when the joined fragments overflow the Slack section limit', () => {
+    const huge = Array.from({ length: 50 }, (_v, i) => `*Repo${i}*:\n` + '    • deploy-x '.repeat(60));
+    const note = carriedOverNote(withCarried(huge))!;
+    expect(note.length).toBeLessThanOrEqual(3000);
+    expect(note).toContain('…list truncated');
+    expect(note).toContain('Acknowledged at confirm time'); // footer survives the cut
   });
 });

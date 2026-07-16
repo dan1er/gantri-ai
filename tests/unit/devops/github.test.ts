@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { GithubDispatcher, prFromTag, PR_DIFF_MAX_CHARS } from '../../../src/devops/github.js';
+import { GithubDispatcher, prFromTag, timestampFromTag, PR_DIFF_MAX_CHARS } from '../../../src/devops/github.js';
 
 function textResponse(text: string, status = 200) {
   return { ok: status < 300, status, text: async () => text } as Response;
@@ -18,6 +18,29 @@ describe('prFromTag', () => {
   it('returns null for an unparseable tag', () => {
     expect(prFromTag('deploy-weird')).toBeNull();
     expect(prFromTag('v2026.06.09')).toBeNull();
+  });
+});
+
+describe('timestampFromTag', () => {
+  it('parses the timestamped date-first format to an ISO timestamp', () => {
+    expect(timestampFromTag('deploy-2026.07.16.21.44.02-5264')).toBe('2026-07-16T21:44:02Z');
+  });
+  it('parses the date-only date-first format with the PR as a same-day tie-break', () => {
+    expect(timestampFromTag('deploy-2026.06.07-27')).toBe('2026-06-07T00:00:00.000027Z');
+  });
+  it('parses the legacy pr-first format with the PR as a same-day tie-break', () => {
+    expect(timestampFromTag('deploy-61-2026.07.14')).toBe('2026-07-14T00:00:00.000061Z');
+  });
+  it('orders same-day date-only tags by PR number and below any timestamped tag later that day', () => {
+    const t60 = timestampFromTag('deploy-60-2026.07.14');
+    const t61 = timestampFromTag('deploy-61-2026.07.14');
+    const timed = timestampFromTag('deploy-2026.07.14.21.29.58-5255');
+    expect(t61 > t60).toBe(true);
+    expect(timed > t61).toBe(true);
+  });
+  it('returns empty for a name with no recognizable timestamp', () => {
+    expect(timestampFromTag('deploy-weird')).toBe('');
+    expect(timestampFromTag('v2026.06.09')).toBe('');
   });
 });
 
@@ -206,6 +229,54 @@ describe('GithubDispatcher', () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ message: 'boom' }, 500));
     const gh = new GithubDispatcher({ token: 't', owner: 'gantri', fetch: fetchMock });
     await expect(gh.getPr('porter', 5)).rejects.toThrow(/get PR porter#5 failed: 500/);
+  });
+
+  it('listDeployTags dates tags from their names without calling the commits API', async () => {
+    const refs = [
+      { ref: 'refs/tags/deploy-2026.07.14.21.29.58-5255', object: { sha: 'a1' } },
+      { ref: 'refs/tags/deploy-2026.07.16.21.44.02-5264', object: { sha: 'b2' } },
+      { ref: 'refs/tags/deploy-61-2026.07.14', object: { sha: 'c3' } },
+    ];
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(refs));
+    const gh = new GithubDispatcher({ token: 't', owner: 'gantri', fetch: fetchMock });
+    const tags = await gh.listDeployTags('porter');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(tags.map((t) => t.tag)).toEqual([
+      'deploy-2026.07.16.21.44.02-5264',
+      'deploy-2026.07.14.21.29.58-5255',
+      'deploy-61-2026.07.14',
+    ]);
+    expect(tags.every((t) => t.committedAt !== '')).toBe(true);
+  });
+
+  it('listDeployTags falls back to the commits API only for unparseable tag names', async () => {
+    const refs = [
+      { ref: 'refs/tags/deploy-2026.07.16.21.44.02-5264', object: { sha: 'b2' } },
+      { ref: 'refs/tags/deploy-weird', object: { sha: 'z9' } },
+    ];
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes('/commits/z9')) return jsonResponse({ commit: { committer: { date: '2026-07-01T00:00:00Z' } } });
+      return jsonResponse(refs);
+    });
+    const gh = new GithubDispatcher({ token: 't', owner: 'gantri', fetch: fetchMock });
+    const tags = await gh.listDeployTags('porter');
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).includes('/commits/'))).toHaveLength(1);
+    expect(tags.find((t) => t.tag === 'deploy-weird')?.committedAt).toBe('2026-07-01T00:00:00Z');
+  });
+
+  it('listDeployTags keeps name-derived dates when the commits API is down (503)', async () => {
+    const refs = [
+      { ref: 'refs/tags/deploy-2026.07.16.21.44.02-5264', object: { sha: 'b2' } },
+      { ref: 'refs/tags/deploy-weird', object: { sha: 'z9' } },
+    ];
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes('/commits/')) return jsonResponse({}, 503);
+      return jsonResponse(refs);
+    });
+    const gh = new GithubDispatcher({ token: 't', owner: 'gantri', fetch: fetchMock });
+    const tags = await gh.listDeployTags('porter');
+    expect(tags.find((t) => t.tag === 'deploy-2026.07.16.21.44.02-5264')?.committedAt).toBe('2026-07-16T21:44:02Z');
+    expect(tags.find((t) => t.tag === 'deploy-weird')?.committedAt).toBe('');
   });
 
   it('exposes the configured owner', () => {

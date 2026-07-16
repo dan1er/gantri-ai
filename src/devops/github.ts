@@ -16,6 +16,29 @@ export function prFromTag(tag: string): number | null {
   return m ? Number(m[1]) : null;
 }
 
+/**
+ * Sortable ISO-like timestamp derived from a deploy tag's NAME. Tags are
+ * bot-authored at merge time, so the embedded timestamp IS the merge time —
+ * the ordering the /deploy picker needs — and, unlike a commits-API lookup,
+ * it cannot fail. Date-only formats tie-break same-day tags by PR number,
+ * encoded as fractional seconds so plain string comparison still orders them.
+ * Returns '' for a name with no recognizable timestamp.
+ */
+export function timestampFromTag(tag: string): string {
+  const full = tag.match(/^deploy-(\d{4})\.(\d{2})\.(\d{2})\.(\d{2})\.(\d{2})\.(\d{2})-\d+$/);
+  if (full) return `${full[1]}-${full[2]}-${full[3]}T${full[4]}:${full[5]}:${full[6]}Z`;
+  const dateFirst = tag.match(/^deploy-(\d{4})\.(\d{2})\.(\d{2})-(\d+)$/);
+  const prFirst = tag.match(/^deploy-(\d+)-(\d{4})\.(\d{2})\.(\d{2})$/);
+  const parts = dateFirst
+    ? [dateFirst[1], dateFirst[2], dateFirst[3], dateFirst[4]]
+    : prFirst
+      ? [prFirst[2], prFirst[3], prFirst[4], prFirst[1]]
+      : null;
+  if (!parts) return '';
+  const [y, m, d, pr] = parts;
+  return `${y}-${m}-${d}T00:00:00.${pr.padStart(6, '0').slice(-6)}Z`;
+}
+
 export interface GithubDispatcherDeps {
   token: string;
   owner: string;
@@ -172,10 +195,14 @@ export class GithubDispatcher {
   }
 
   /**
-   * `deploy-*` tags for a repo, newest COMMIT first (for the /deploy picker).
-   * Ordered by the tag's commit date, not the PR number — a PR can be merged
-   * out of numeric order (a low number merged late), so PR number is not a
-   * reliable proxy for "what is newer / already shipped".
+   * `deploy-*` tags for a repo, newest first (for the /deploy picker).
+   * Ordered by merge time — a PR can be merged out of numeric order (a low
+   * number merged late), so PR number is not a reliable proxy for "what is
+   * newer / already shipped". Merge time comes from the timestamp embedded in
+   * the tag name (tags are bot-authored at merge time); the commits API is
+   * only a fallback for names with no parseable timestamp, so a GitHub
+   * degradation can't silently blank every date and disable the
+   * already-shipped filter downstream.
    */
   async listDeployTags(repo: string, limit = 25): Promise<{ tag: string; sha: string; pr: number | null; committedAt: string }[]> {
     const res = await this.fetch(`${this.base(repo)}/git/matching-refs/tags/deploy-`, { headers: this.headers() });
@@ -185,12 +212,14 @@ export class GithubDispatcher {
       body.map(async (r) => {
         const tag = r.ref.replace('refs/tags/', '');
         const sha = r.object.sha;
-        let committedAt = '';
-        try {
-          const c = await this.fetch(`${this.base(repo)}/commits/${sha}`, { headers: this.headers() });
-          if (c.ok) committedAt = ((await c.json()) as { commit?: { committer?: { date?: string } } })?.commit?.committer?.date ?? '';
-        } catch {
-          // leave empty — tag sorts last, still selectable
+        let committedAt = timestampFromTag(tag);
+        if (!committedAt) {
+          try {
+            const c = await this.fetch(`${this.base(repo)}/commits/${sha}`, { headers: this.headers() });
+            if (c.ok) committedAt = ((await c.json()) as { commit?: { committer?: { date?: string } } })?.commit?.committer?.date ?? '';
+          } catch {
+            // leave empty — tag sorts last, still selectable
+          }
         }
         return { tag, sha, pr: prFromTag(tag), committedAt };
       }),

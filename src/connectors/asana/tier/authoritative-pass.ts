@@ -41,6 +41,12 @@ import { logger } from '../../../logger.js';
  * back to scanning the configured repos' open PRs for the task's `app.asana.com`
  * link when the ticket names no PR. Idempotent by `(repo, pr_number, head_sha)`
  * (a new push re-runs) plus the per-task `stage` marker for the no-PR path.
+ *
+ * A re-run posts a NEW comment only when the classification actually changed. When
+ * the authoritative verdict is unchanged (same tier as the last authoritative run,
+ * field still agreeing), it UPDATES the previous authoritative comment in place —
+ * a fresh render, so the evidence quote / PR number may drift — instead of stacking
+ * a near-identical duplicate on every push or Code-Review re-entry.
  */
 
 /** Repos a Gantri PR that touches a classified ticket can live in. */
@@ -419,11 +425,23 @@ export class AuthoritativePass {
       promptVersion: this.activeRubric.version,
     });
 
+    // An unchanged authoritative verdict refreshes the previous comment in place
+    // instead of stacking a duplicate: same tier as the last authoritative run,
+    // the field already agrees, and the previous comment is known. The FIRST
+    // authoritative comment (after a provisional pass) always posts fresh — the
+    // provisional → confirmed transition is real information.
+    const refreshableGid =
+      record?.stage === 'authoritative' && record.confirmedTier === authTier && !changed
+        ? record.commentGid
+        : null;
+
     // Crash-safe two-phase write, mirroring the poller: persist the decision with
     // the PREVIOUS confirmed tier first, then COMMENT, then write the field, then
-    // finalize. The comment lands before the field write so the Asana activity trail
-    // reads bot-explanation → field change (a papertrail). A crash in between never
-    // manufactures a phantom human override.
+    // finalize. The comment step is update-or-create — an unchanged verdict edits its
+    // previous comment in place (refreshableGid), everything else posts a fresh one so
+    // a real change is announced. The comment lands before the field write so the Asana
+    // activity trail reads bot-explanation → field change (a papertrail). A crash in
+    // between never manufactures a phantom human override.
     const base = {
       taskGid: task.gid,
       inputHash: textHash,
@@ -441,14 +459,29 @@ export class AuthoritativePass {
       confirmedTier: record?.confirmedTier ?? record?.tier ?? null,
       commentGid: record?.commentGid ?? null,
     });
-    const story = await this.deps.client.createStory(task.gid, comment);
+    let commentGid = refreshableGid;
+    if (refreshableGid) {
+      try {
+        await this.deps.client.updateStory(refreshableGid, comment);
+      } catch (err) {
+        logger.warn(
+          { taskGid: task.gid, storyGid: refreshableGid, err: err instanceof Error ? err.message : String(err) },
+          'delivery_tier_comment_update_failed',
+        );
+        commentGid = null; // fall through to a fresh comment below
+      }
+    }
+    if (!commentGid) {
+      const story = await this.deps.client.createStory(task.gid, comment);
+      commentGid = story?.gid ?? record?.commentGid ?? null;
+    }
     if (changed) {
       await this.deps.client.setEnumCustomField(task.gid, DELIVERY_TIER_FIELD_GID, tierToOptionGid(authTier));
     }
     await this.deps.classifications.upsertBot({
       ...base,
       confirmedTier: authTier,
-      commentGid: story?.gid ?? record?.commentGid ?? null,
+      commentGid,
     });
 
     await this.record(link, task.gid, changed ? 'superseded' : 'confirmed', authTier, true);

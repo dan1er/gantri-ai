@@ -277,6 +277,13 @@ export class AsanaApiClient {
     return this.write<AsanaStory>('POST', `/tasks/${taskGid}/stories`, { text });
   }
 
+  /** Update an existing comment (story) in place. Only the comment's author can
+   *  edit it — the bot always comments through the same PAT, so its own comments
+   *  qualify. Used to refresh an unchanged verdict instead of re-posting it. */
+  async updateStory(storyGid: string, text: string): Promise<AsanaStory> {
+    return this.write<AsanaStory>('PUT', `/stories/${storyGid}`, { text });
+  }
+
   /** The authenticated user — used for health checks and smoke reachability. */
   async getCurrentUser(): Promise<AsanaUser> {
     const resp = await this.request<AsanaUser>('/users/me', { opt_fields: 'name,email' });

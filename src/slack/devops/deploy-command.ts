@@ -21,12 +21,12 @@ export interface DeployCommandDeps {
  * ships every earlier commit too (they're bundled into it), so any tag at or
  * before the live commit is already in production — hide it.
  *
- * Ordered by the tag's COMMIT date, not the PR number: a PR can merge out of
- * numeric order (a low-numbered PR merged late), so a higher already-deployed
- * PR# must not hide a newer, lower-numbered tag. The deployed tag's commit date
+ * Ordered by merge time (committedAt), not the PR number: a PR can merge out
+ * of numeric order (a low-numbered PR merged late), so a higher already-deployed
+ * PR# must not hide a newer, lower-numbered tag. The deployed tag's merge time
  * is read from `tags` (matched by tag string). A failed deploy drops out of
  * listDeployJobs, so its tag reappears for a retry (the mark falls back). Tags
- * with no commit date are never hidden (shown by default).
+ * with no merge time are never hidden (shown by default).
  */
 export function candidateDeployTags<T extends { tag: string; committedAt: string }>(
   tags: T[], deployJobs: Job[], repo: string,

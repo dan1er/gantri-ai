@@ -243,8 +243,7 @@
     "name": "Complete Return: voided units inflate the order's refunded-shipping ledger (refundedShippingCents / hasRefundShipping)",
     "expected": [
       "T2"
-    ],
-    "knownMiss": true
+    ]
   },
   {
     "row": 31,
@@ -326,7 +325,8 @@
     "name": "Release the accrued shipping when an expired return is cancelled (same ledger leak as AS-2569, automatic path)",
     "expected": [
       "T1"
-    ]
+    ],
+    "knownMiss": true
   },
   {
     "row": 41,

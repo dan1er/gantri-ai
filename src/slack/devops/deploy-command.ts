@@ -3,7 +3,7 @@ import type { WebClient } from '@slack/web-api';
 import type { DevopsJobsRepo } from '../../devops/jobs-repo.js';
 import type { GithubDispatcher } from '../../devops/github.js';
 import type { FrontendRepo, DeployItem, Job } from '../../devops/types.js';
-import { renderJobBlocks } from '../../devops/messages.js';
+import { renderJobBlocks, carriedOverNote } from '../../devops/messages.js';
 import { decideCommandChannel, channelFromView } from './channel-access.js';
 import { logger } from '../../logger.js';
 
@@ -158,8 +158,16 @@ async function postErr(deps: DeployCommandDeps, label: string, requestedBy: stri
 
 async function createDeployAndPost(
   deps: DeployCommandDeps, target: 'backend' | 'frontend' | 'fullstack',
-  spec: { deployBackend?: DeployItem; deployFrontends?: DeployItem[]; e2e?: { scope: 'smoke' | 'both' } }, requestedBy: string, channel: string,
+  spec: { deployBackend?: DeployItem; deployFrontends?: DeployItem[]; e2e?: { scope: 'smoke' | 'both' }; carriedOver?: string[] }, requestedBy: string, channel: string,
 ) {
+  // Capture the carried-over PRs (earlier un-deployed tags bundled into the picked
+  // tag(s)) BEFORE the job row exists: findSkipped derives the live-in-prod
+  // high-water mark from listDeployJobs, and this new job's own tag would otherwise
+  // count as already deployed and empty (or skew) the list. Recomputed here — not
+  // threaded through the ephemeral confirm's copy via the button value — because
+  // Slack button values cap at 2000 chars.
+  const carriedOver = await findSkipped(deps, spec).catch(() => [] as string[]);
+  if (carriedOver.length) spec = { ...spec, carriedOver };
   // Snapshot the deploy tag currently live in prod as the rollback target, before
   // this job is created (so it's the PREVIOUS release, not this one).
   if (spec.deployBackend) {
@@ -171,7 +179,19 @@ async function createDeployAndPost(
     channel, text: '🚀 deploy starting…', blocks: renderJobBlocks(job) as any,
     unfurl_links: false, unfurl_media: false,
   });
-  if (posted.ts) await deps.repo.update(job.id, { messageTs: posted.ts });
+  if (posted.ts) {
+    await deps.repo.update(job.id, { messageTs: posted.ts });
+    // Post the carried-over changes as a durable thread reply (the ephemeral
+    // confirm vanishes). Render from the local enriched spec so it's correct
+    // regardless of whether repo.create echoes the spec back. Never fail the
+    // deploy because this note failed.
+    const note = carriedOverNote({ ...job, spec });
+    if (note) {
+      await deps.slack.chat
+        .postMessage({ channel, thread_ts: posted.ts, text: note, unfurl_links: false, unfurl_media: false })
+        .catch((err) => logger.warn({ jobId: job.id, err: String((err as Error)?.message ?? err) }, 'devops carried-over note failed'));
+    }
+  }
 }
 
 const PROD_DOMAIN: Record<string, string> = { mantle: 'www.gantri.com', core: 'admin.gantri.com', made: 'made.gantri.com' };

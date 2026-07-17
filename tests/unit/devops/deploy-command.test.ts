@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
-import { candidateDeployTags, previousBackendDeployTag, findSkipped } from '../../../src/slack/devops/deploy-command.js';
+import type { App } from '@slack/bolt';
+import { candidateDeployTags, previousBackendDeployTag, findSkipped, registerDeployCommand } from '../../../src/slack/devops/deploy-command.js';
 import type { Job, JobSpec, DeployItem } from '../../../src/devops/types.js';
 
 function job(spec: JobSpec, status: Job['status'] = 'ready'): Job {
@@ -116,6 +117,103 @@ describe('findSkipped', () => {
     expect(out).toHaveLength(1);
     expect(out[0]).toMatch(/…and \d+ more/);          // truncated
     expect((out[0].match(/ • /g) ?? []).length).toBe(7); // 6 shown + the "…and N more" line
+  });
+});
+
+describe('deploy_confirm → createDeployAndPost', () => {
+  // A stub Bolt app that captures registered handlers so tests can invoke them.
+  function makeApp() {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const handlers: Record<string, (args: any) => Promise<void>> = {};
+    const app = {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      command: (name: string, fn: any) => { handlers[`command:${name}`] = fn; },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      view: (name: string, fn: any) => { handlers[`view:${name}`] = fn; },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      action: (name: string, fn: any) => { handlers[`action:${name}`] = fn; },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      options: (name: string, fn: any) => { handlers[`options:${name}`] = fn; },
+    } as unknown as App;
+    return { app, handlers };
+  }
+
+  const tg = (pr: number, committedAt: string) => ({ tag: `deploy-x-${pr}`, sha: 's', pr, committedAt });
+
+  // deployedPrs → prior backend deploy jobs (the high-water mark); tags → the
+  // repo's deploy tags. repo.create echoes the spec back the way the real
+  // insert-then-select does; slack.chat.postMessage resolves with a parent ts.
+  function makeDeps(deployedPrs: number[], tags: ReturnType<typeof tg>[]) {
+    const created: Job = {
+      id: 'job1', kind: 'deploy', target: 'backend', status: 'pending',
+      spec: {}, requestedBy: 'U1', channelId: 'C1', messageTs: null, runId: null,
+      error: null, createdAt: 't', updatedAt: 't', idlePingedAt: null,
+    };
+    const repo = {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      create: vi.fn(async (input: any) => ({ ...created, ...input, spec: input.spec })),
+      update: vi.fn().mockResolvedValue(undefined),
+      listDeployJobs: vi.fn().mockResolvedValue(
+        deployedPrs.map((pr) => job({ deployBackend: { tag: `deploy-x-${pr}`, sha: 's', pr } })),
+      ),
+    };
+    const slack = { chat: { postMessage: vi.fn().mockResolvedValue({ ts: 'parent.ts' }) } };
+    const gh = { listDeployTags: vi.fn().mockResolvedValue(tags), resolveRef: vi.fn().mockRejectedValue(new Error('no ref')) };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const deps = { repo, slack, gh, opsChannelId: 'C-ops', dmUserIds: [] } as any;
+    return { deps, repo, slack, gh };
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const confirm = (handlers: any, spec: unknown, target = 'backend') =>
+    handlers['action:deploy_confirm']({
+      ack: vi.fn().mockResolvedValue(undefined),
+      respond: vi.fn().mockResolvedValue(undefined),
+      body: { user: { id: 'U1' }, channel: { id: 'C1' } },
+      action: { value: JSON.stringify({ target, spec }) },
+    });
+
+  it('stores the carried-over PRs on the created job and threads the note', async () => {
+    // prod at 5200; picking 5214 → 5209 and 5180 ride along (5196 is older than live).
+    const tags = [
+      tg(5214, '2026-06-09T21:14:00Z'), tg(5209, '2026-06-09T19:58:00Z'),
+      tg(5180, '2026-06-09T15:54:00Z'), tg(5200, '2026-06-08T17:58:00Z'),
+      tg(5196, '2026-06-08T16:09:00Z'),
+    ];
+    const { deps, repo, slack } = makeDeps([5200], tags);
+    const { app, handlers } = makeApp();
+    registerDeployCommand(app, deps);
+
+    await confirm(handlers, { deployBackend: { tag: 'deploy-x-5214', sha: 's', pr: 5214 } });
+
+    // carriedOver persisted on the created job's spec.
+    const createdSpec = repo.create.mock.calls[0][0].spec;
+    expect(createdSpec.carriedOver?.length).toBeGreaterThan(0);
+    expect(createdSpec.carriedOver.join('\n')).toContain('deploy-x-5209');
+    expect(createdSpec.carriedOver.join('\n')).toContain('deploy-x-5180');
+
+    // Two posts: the parent deploy message + a threaded carried-over note.
+    expect(slack.chat.postMessage).toHaveBeenCalledTimes(2);
+    const reply = slack.chat.postMessage.mock.calls[1][0];
+    expect(reply.thread_ts).toBe('parent.ts');
+    expect(reply.text).toContain('Also shipping with this deploy');
+    expect(reply.text).toContain('deploy-x-5209');
+  });
+
+  it('adds no carriedOver and posts no extra reply when nothing is skipped', async () => {
+    // prod at 5213; deploying 5214 right after → nothing carried over.
+    const tags = [
+      tg(5214, '2026-06-09T21:14:00Z'), tg(5213, '2026-06-09T20:13:00Z'),
+      tg(5209, '2026-06-09T19:58:00Z'),
+    ];
+    const { deps, repo, slack } = makeDeps([5213], tags);
+    const { app, handlers } = makeApp();
+    registerDeployCommand(app, deps);
+
+    await confirm(handlers, { deployBackend: { tag: 'deploy-x-5214', sha: 's', pr: 5214 } });
+
+    expect(repo.create.mock.calls[0][0].spec.carriedOver).toBeUndefined();
+    expect(slack.chat.postMessage).toHaveBeenCalledTimes(1); // parent only, no thread reply
   });
 });
 

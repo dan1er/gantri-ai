@@ -251,6 +251,25 @@ export function deployRollbackActions(job: Job): unknown | null {
 }
 
 /**
+ * The "also shipping" note posted in the deploy's THREAD: the earlier
+ * un-deployed PRs bundled into the picked tag(s), captured at confirm time so
+ * the thread holds a durable record of what the requester acknowledged. Null
+ * unless this is a deploy job that actually carried something over.
+ */
+export function carriedOverNote(job: Job): string | null {
+  if (job.kind !== 'deploy' || !job.spec.carriedOver?.length) return null;
+  const header = '📦 *Also shipping with this deploy* — earlier un-deployed PRs bundled into the deployed tag(s):';
+  const footer = '_Acknowledged at confirm time — their changes go to production with this deploy._';
+  // Defensive truncation (same pattern as confirmBlocks): a section's text field
+  // maxes at 3000 chars in Slack — keep the whole block safely under the limit so
+  // the note always renders even when many tags carried over.
+  const budget = 2900 - header.length - footer.length;
+  let body = job.spec.carriedOver.join('\n');
+  if (body.length > budget) body = `${body.slice(0, budget)}\n_…list truncated_`;
+  return [header, body, footer].join('\n');
+}
+
+/**
  * The compact main-channel message: 1-2 lines + action buttons. Everything
  * verbose (per-component Source/API/Deployment links) goes to the thread via
  * renderJobDetailBlocks — the channel stays scannable.

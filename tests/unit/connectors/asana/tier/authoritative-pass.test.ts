@@ -172,6 +172,7 @@ function build(o: BuildOpts = {}) {
     getTask,
     setEnumCustomField: vi.fn().mockResolvedValue(undefined),
     createStory: vi.fn().mockResolvedValue({ gid: 'story-new' }),
+    updateStory: vi.fn().mockResolvedValue({ gid: 'story-prev' }),
     getTaskStories: vi.fn().mockResolvedValue(o.stories ?? []),
     getTaskSubtasks: vi.fn().mockResolvedValue(o.subtasks ?? []),
   } as unknown as AsanaApiClient;
@@ -279,6 +280,69 @@ describe('AuthoritativePass — supersede in either direction', () => {
     });
     await pass.reviewCodeReviewTasks([task(GID, tierToOptionGid('T1'))]);
     expect(order).toEqual(['upsert:T1', 'comment', 'field', 'upsert:T2']);
+  });
+});
+
+describe('AuthoritativePass — unchanged verdict refreshes the previous comment', () => {
+  it('updates the previous authoritative comment in place instead of posting a duplicate', async () => {
+    // Same tier as the last authoritative run, field still agreeing, previous
+    // comment known → the re-run (new head sha) refreshes that comment, no new one.
+    const { pass, client, classifications } = build({
+      fieldTier: 'T2',
+      diffTier: 'T2',
+      record: record({ tier: 'T2', confirmedTier: 'T2', stage: 'authoritative', commentGid: 'story-prev' }),
+    });
+    const res = await pass.reviewCodeReviewTasks([task(GID, tierToOptionGid('T2'))]);
+    expect(res.confirmed).toBe(1);
+    expect(client.updateStory).toHaveBeenCalledWith('story-prev', expect.stringContaining('T2 confirmed from PR diff'));
+    expect(client.createStory).not.toHaveBeenCalled();
+    expect(client.setEnumCustomField).not.toHaveBeenCalled();
+    expect(classifications.upsertBot).toHaveBeenLastCalledWith(
+      expect.objectContaining({ confirmedTier: 'T2', commentGid: 'story-prev' }),
+    );
+  });
+
+  it('falls back to a fresh comment when the in-place update fails (404)', async () => {
+    const { pass, client, classifications } = build({
+      fieldTier: 'T2',
+      diffTier: 'T2',
+      record: record({ tier: 'T2', confirmedTier: 'T2', stage: 'authoritative', commentGid: 'story-prev' }),
+    });
+    (client.updateStory as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('404 Not Found'));
+    const res = await pass.reviewCodeReviewTasks([task(GID, tierToOptionGid('T2'))]);
+    expect(res.confirmed).toBe(1);
+    expect(client.updateStory).toHaveBeenCalledWith('story-prev', expect.stringContaining('T2 confirmed from PR diff'));
+    expect(client.createStory).toHaveBeenCalledWith(GID, expect.stringContaining('T2 confirmed from PR diff'));
+    expect(classifications.upsertBot).toHaveBeenLastCalledWith(
+      expect.objectContaining({ confirmedTier: 'T2', commentGid: 'story-new' }),
+    );
+  });
+
+  it('posts a NEW comment (never an in-place update) when the verdict changed', async () => {
+    const { pass, client } = build({
+      fieldTier: 'T2',
+      diffTier: 'T1',
+      record: record({ tier: 'T2', confirmedTier: 'T2', stage: 'authoritative', commentGid: 'story-prev' }),
+    });
+    const res = await pass.reviewCodeReviewTasks([task(GID, tierToOptionGid('T2'))]);
+    expect(res.superseded).toBe(1);
+    expect(client.createStory).toHaveBeenCalledWith(GID, expect.stringContaining('T2 → T1'));
+    expect(client.updateStory).not.toHaveBeenCalled();
+    expect(client.setEnumCustomField).toHaveBeenCalledWith(GID, DELIVERY_TIER_FIELD_GID, tierToOptionGid('T1'));
+  });
+
+  it('posts a fresh comment on the first authoritative pass after a provisional one', async () => {
+    // The provisional → confirmed transition is real information, so the first
+    // authoritative comment always posts fresh even when the tier is unchanged.
+    const { pass, client } = build({
+      fieldTier: 'T2',
+      diffTier: 'T2',
+      record: record({ tier: 'T2', confirmedTier: null, stage: 'provisional', commentGid: 'story-prov' }),
+    });
+    const res = await pass.reviewCodeReviewTasks([task(GID, tierToOptionGid('T2'))]);
+    expect(res.confirmed).toBe(1);
+    expect(client.createStory).toHaveBeenCalledWith(GID, expect.stringContaining('T2 confirmed from PR diff'));
+    expect(client.updateStory).not.toHaveBeenCalled();
   });
 });
 

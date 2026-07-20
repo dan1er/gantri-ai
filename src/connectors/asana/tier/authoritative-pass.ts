@@ -462,7 +462,7 @@ export class AuthoritativePass {
     let commentGid = refreshableGid;
     if (refreshableGid) {
       try {
-        await this.deps.client.updateStory(refreshableGid, comment);
+        await this.deps.client.updateStory(refreshableGid, comment.text, comment.html);
       } catch (err) {
         logger.warn(
           { taskGid: task.gid, storyGid: refreshableGid, err: err instanceof Error ? err.message : String(err) },
@@ -472,7 +472,7 @@ export class AuthoritativePass {
       }
     }
     if (!commentGid) {
-      const story = await this.deps.client.createStory(task.gid, comment);
+      const story = await this.deps.client.createStory(task.gid, comment.text, comment.html);
       commentGid = story?.gid ?? record?.commentGid ?? null;
     }
     if (changed) {

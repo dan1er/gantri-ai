@@ -92,6 +92,47 @@ describe('AsanaApiClient writes', () => {
     expect(JSON.parse(opts.body)).toEqual({ data: { text: 'hi' } });
   });
 
+  it('createStory POSTs html_text (not text) when an html variant is supplied', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ data: { gid: 'story-9' } }));
+    const client = new AsanaApiClient({ accessToken: 'tok', fetchImpl });
+    await client.createStory('42', 'plain', '<body>rich</body>');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const [, opts] = fetchImpl.mock.calls[0];
+    expect(JSON.parse(opts.body)).toEqual({ data: { html_text: '<body>rich</body>' } });
+  });
+
+  it('createStory retries once as plain text when the html_text write is rejected with a 400', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'invalid html_text' }] }, 400))
+      .mockResolvedValueOnce(jsonResponse({ data: { gid: 'story-9' } }));
+    const client = new AsanaApiClient({ accessToken: 'tok', fetchImpl });
+    const story = await client.createStory('42', 'plain', '<body>bad</body>');
+    expect(story.gid).toBe('story-9');
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    // First attempt is the rich-text body; the fallback is the plain text.
+    expect(JSON.parse(fetchImpl.mock.calls[0][1].body)).toEqual({ data: { html_text: '<body>bad</body>' } });
+    expect(JSON.parse(fetchImpl.mock.calls[1][1].body)).toEqual({ data: { text: 'plain' } });
+  });
+
+  it('updateStory PUTs html_text when an html variant is supplied', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ data: { gid: 'story-9' } }));
+    const client = new AsanaApiClient({ accessToken: 'tok', fetchImpl });
+    await client.updateStory('story-9', 'plain', '<body>rich</body>');
+    const [url, opts] = fetchImpl.mock.calls[0];
+    expect(String(url)).toContain('/stories/story-9');
+    expect(opts.method).toBe('PUT');
+    expect(JSON.parse(opts.body)).toEqual({ data: { html_text: '<body>rich</body>' } });
+  });
+
+  it('does not fall back on a non-400 failure of the html_text write', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ errors: [{ message: 'Forbidden' }] }, 403));
+    const client = new AsanaApiClient({ accessToken: 'tok', fetchImpl });
+    await expect(client.createStory('42', 'plain', '<body>rich</body>')).rejects.toBeInstanceOf(AsanaApiError);
+    // 403 is not the html-specific 400, so no plain-text retry is attempted.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it('retries a write once on 429 then succeeds', async () => {
     const fetchImpl = vi.fn()
       .mockResolvedValueOnce(new Response('rate limited', { status: 429 }))

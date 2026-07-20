@@ -271,17 +271,41 @@ export class AsanaApiClient {
     });
   }
 
-  /** Post a comment (story) on a task. Returns the created story so callers can
-   *  persist its gid. */
-  async createStory(taskGid: string, text: string): Promise<AsanaStory> {
-    return this.write<AsanaStory>('POST', `/tasks/${taskGid}/stories`, { text });
+  /** Post a comment (story) on a task. When an `html` body (`<body>…</body>`) is
+   *  given it is posted as Asana rich text (`html_text`); otherwise the plain `text`
+   *  is posted. Returns the created story so callers can persist its gid. */
+  async createStory(taskGid: string, text: string, html?: string): Promise<AsanaStory> {
+    return this.writeStory('POST', `/tasks/${taskGid}/stories`, text, html);
   }
 
   /** Update an existing comment (story) in place. Only the comment's author can
    *  edit it — the bot always comments through the same PAT, so its own comments
-   *  qualify. Used to refresh an unchanged verdict instead of re-posting it. */
-  async updateStory(storyGid: string, text: string): Promise<AsanaStory> {
-    return this.write<AsanaStory>('PUT', `/stories/${storyGid}`, { text });
+   *  qualify. Used to refresh an unchanged verdict instead of re-posting it. Same
+   *  rich-text handling as `createStory`. */
+  async updateStory(storyGid: string, text: string, html?: string): Promise<AsanaStory> {
+    return this.writeStory('PUT', `/stories/${storyGid}`, text, html);
+  }
+
+  /** Write a comment body, preferring Asana rich text (`html_text`) when an html
+   *  variant is supplied. If Asana rejects the rich-text body with a 400 (a malformed
+   *  `html_text` payload), retry ONCE with the plain `text` so a formatting slip never
+   *  drops the comment entirely. Plain `text` directly when there is no html variant. */
+  private async writeStory(
+    method: 'POST' | 'PUT',
+    path: string,
+    text: string,
+    html?: string,
+  ): Promise<AsanaStory> {
+    if (!html) return this.write<AsanaStory>(method, path, { text });
+    try {
+      return await this.write<AsanaStory>(method, path, { html_text: html });
+    } catch (err) {
+      if (err instanceof AsanaApiError && err.status === 400) {
+        logger.warn({ path, method }, 'asana html_text write rejected (400) — retrying as plain text');
+        return this.write<AsanaStory>(method, path, { text });
+      }
+      throw err;
+    }
   }
 
   /** The authenticated user — used for health checks and smoke reachability. */

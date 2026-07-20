@@ -226,7 +226,7 @@ describe('AuthoritativePass — supersede in either direction', () => {
     const res = await pass.reviewCodeReviewTasks([task(GID, tierToOptionGid('T2'))]);
     expect(res.superseded).toBe(1);
     expect(client.setEnumCustomField).toHaveBeenCalledWith(GID, DELIVERY_TIER_FIELD_GID, tierToOptionGid('T0'));
-    expect(client.createStory).toHaveBeenCalledWith(GID, expect.stringContaining('T2 → T0'));
+    expect(client.createStory).toHaveBeenCalledWith(GID, expect.stringContaining('T2 → T0'), expect.any(String));
     expect(classifications.upsertBot).toHaveBeenLastCalledWith(
       expect.objectContaining({ tier: 'T0', confirmedTier: 'T0', stage: 'authoritative' }),
     );
@@ -242,7 +242,7 @@ describe('AuthoritativePass — supersede in either direction', () => {
     const res = await pass.reviewCodeReviewTasks([task(GID, tierToOptionGid('T1'))]);
     expect(res.superseded).toBe(1);
     expect(client.setEnumCustomField).toHaveBeenCalledWith(GID, DELIVERY_TIER_FIELD_GID, tierToOptionGid('T2'));
-    expect(client.createStory).toHaveBeenCalledWith(GID, expect.stringContaining('T1 → T2'));
+    expect(client.createStory).toHaveBeenCalledWith(GID, expect.stringContaining('T1 → T2'), expect.any(String));
     expect(prChecks.insert).toHaveBeenCalledWith(expect.objectContaining({ verdict: 'superseded' }));
   });
 
@@ -255,7 +255,7 @@ describe('AuthoritativePass — supersede in either direction', () => {
     const res = await pass.reviewCodeReviewTasks([task(GID, tierToOptionGid('T2'))]);
     expect(res.confirmed).toBe(1);
     expect(client.setEnumCustomField).not.toHaveBeenCalled();
-    expect(client.createStory).toHaveBeenCalledWith(GID, expect.stringContaining('T2 confirmed from PR diff'));
+    expect(client.createStory).toHaveBeenCalledWith(GID, expect.stringContaining('T2 confirmed'), expect.any(String));
     expect(prChecks.insert).toHaveBeenCalledWith(expect.objectContaining({ verdict: 'confirmed' }));
   });
 
@@ -294,7 +294,7 @@ describe('AuthoritativePass — unchanged verdict refreshes the previous comment
     });
     const res = await pass.reviewCodeReviewTasks([task(GID, tierToOptionGid('T2'))]);
     expect(res.confirmed).toBe(1);
-    expect(client.updateStory).toHaveBeenCalledWith('story-prev', expect.stringContaining('T2 confirmed from PR diff'));
+    expect(client.updateStory).toHaveBeenCalledWith('story-prev', expect.stringContaining('T2 confirmed'), expect.any(String));
     expect(client.createStory).not.toHaveBeenCalled();
     expect(client.setEnumCustomField).not.toHaveBeenCalled();
     expect(classifications.upsertBot).toHaveBeenLastCalledWith(
@@ -311,8 +311,8 @@ describe('AuthoritativePass — unchanged verdict refreshes the previous comment
     (client.updateStory as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('404 Not Found'));
     const res = await pass.reviewCodeReviewTasks([task(GID, tierToOptionGid('T2'))]);
     expect(res.confirmed).toBe(1);
-    expect(client.updateStory).toHaveBeenCalledWith('story-prev', expect.stringContaining('T2 confirmed from PR diff'));
-    expect(client.createStory).toHaveBeenCalledWith(GID, expect.stringContaining('T2 confirmed from PR diff'));
+    expect(client.updateStory).toHaveBeenCalledWith('story-prev', expect.stringContaining('T2 confirmed'), expect.any(String));
+    expect(client.createStory).toHaveBeenCalledWith(GID, expect.stringContaining('T2 confirmed'), expect.any(String));
     expect(classifications.upsertBot).toHaveBeenLastCalledWith(
       expect.objectContaining({ confirmedTier: 'T2', commentGid: 'story-new' }),
     );
@@ -326,7 +326,7 @@ describe('AuthoritativePass — unchanged verdict refreshes the previous comment
     });
     const res = await pass.reviewCodeReviewTasks([task(GID, tierToOptionGid('T2'))]);
     expect(res.superseded).toBe(1);
-    expect(client.createStory).toHaveBeenCalledWith(GID, expect.stringContaining('T2 → T1'));
+    expect(client.createStory).toHaveBeenCalledWith(GID, expect.stringContaining('T2 → T1'), expect.any(String));
     expect(client.updateStory).not.toHaveBeenCalled();
     expect(client.setEnumCustomField).toHaveBeenCalledWith(GID, DELIVERY_TIER_FIELD_GID, tierToOptionGid('T1'));
   });
@@ -341,7 +341,7 @@ describe('AuthoritativePass — unchanged verdict refreshes the previous comment
     });
     const res = await pass.reviewCodeReviewTasks([task(GID, tierToOptionGid('T2'))]);
     expect(res.confirmed).toBe(1);
-    expect(client.createStory).toHaveBeenCalledWith(GID, expect.stringContaining('T2 confirmed from PR diff'));
+    expect(client.createStory).toHaveBeenCalledWith(GID, expect.stringContaining('T2 confirmed'), expect.any(String));
     expect(client.updateStory).not.toHaveBeenCalled();
   });
 });
@@ -386,7 +386,7 @@ describe('AuthoritativePass — human ownership & dedupe', () => {
     const res = await pass.reviewCodeReviewTasks([task(GID, null)]);
     expect(res.superseded).toBe(1);
     expect(client.setEnumCustomField).toHaveBeenCalledWith(GID, DELIVERY_TIER_FIELD_GID, tierToOptionGid('T2'));
-    expect(client.createStory).toHaveBeenCalledWith(GID, expect.stringContaining('T2 set from PR diff'));
+    expect(client.createStory).toHaveBeenCalledWith(GID, expect.stringContaining('Decision: T2 — QA before production'), expect.any(String));
     expect(prChecks.insert).toHaveBeenCalledWith(expect.objectContaining({ verdict: 'superseded' }));
   });
 
@@ -457,7 +457,7 @@ describe('AuthoritativePass — no PR found (description fallback)', () => {
     const res = await pass.reviewCodeReviewTasks([task(GID, tierToOptionGid('T1'))]);
     expect(gh.prDiff).not.toHaveBeenCalled();
     expect(res.superseded).toBe(1);
-    expect(client.createStory).toHaveBeenCalledWith(GID, expect.stringContaining('at Code Review (no PR linked)'));
+    expect(client.createStory).toHaveBeenCalledWith(GID, expect.stringContaining('Code Review (no PR linked)'), expect.any(String));
   });
 
   it('skips the no-PR path once the record is already authoritative and unchanged', async () => {
@@ -532,7 +532,7 @@ describe('AuthoritativePass — Code-Review lane ignores the rollout cutoff (pre
     const res = await pass.reviewCodeReviewTasks([t]);
     expect(gh.prDiff).not.toHaveBeenCalled();
     expect(res.superseded).toBe(1);
-    expect(client.createStory).toHaveBeenCalledWith(GID, expect.stringContaining('at Code Review (no PR linked)'));
+    expect(client.createStory).toHaveBeenCalledWith(GID, expect.stringContaining('Code Review (no PR linked)'), expect.any(String));
   });
 });
 

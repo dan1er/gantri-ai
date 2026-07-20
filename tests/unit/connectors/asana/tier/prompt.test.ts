@@ -122,7 +122,21 @@ describe('delivery-tier rubric prompt', () => {
   it('carves out diff mode inside the machine appendix: the diff is authoritative', () => {
     const section = prompt.slice(prompt.indexOf('--- MACHINE APPENDIX'));
     expect(section).toMatch(/diff is\*?\*? authoritative/i);
-    expect(section).toMatch(/verbatim from the \*?\*?diff/i);
+    // The diff drives the classification, but the evidence wording stays plain English
+    // (describe what the diff changes, never a copied line/symbol/path).
+    expect(section).toMatch(/what the \*?\*?diff\*?\*? actually changes/i);
+    expect(section).toMatch(/never a copied line, symbol, or path/i);
+  });
+
+  it('requires every evidence field to be a plain-English clause, never code / identifiers / paths', () => {
+    const section = prompt.slice(prompt.indexOf('--- MACHINE APPENDIX'));
+    expect(section).toMatch(/Evidence must read like a product note, not code/i);
+    expect(section).toMatch(/plain-English clause/i);
+    expect(section).toMatch(/NEVER contain quoted code/i);
+    expect(section).toMatch(/identifiers/i);
+    expect(section).toMatch(/file paths/i);
+    // The old per-signal "verbatim quote" instruction is gone.
+    expect(section).not.toMatch(/short verbatim quote/i);
   });
 
   it('defines ui_testable by drivability (DRIVE+VERIFY+COVER), not file location', () => {

@@ -375,8 +375,8 @@ export class TierPoller {
     // never the reverse. Persist the comment gid immediately (confirmedTier still
     // unconfirmed) so a crash before the field write cannot orphan a duplicate
     // comment on the recovery path.
-    const commentText = renderTierComment(decision, facts, this.activeRubric.version, { provisional: true });
-    const story = await this.deps.client.createStory(task.gid, commentText);
+    const comment = renderTierComment(decision, facts, this.activeRubric.version, { provisional: true });
+    const story = await this.deps.client.createStory(task.gid, comment.text, comment.html);
     await this.deps.repo.upsertBot({ ...provisional, commentGid: story?.gid ?? prev?.commentGid ?? null });
 
     // Phase 3 — close the scan→write TOCTOU window immediately before the field
@@ -413,10 +413,8 @@ export class TierPoller {
     let commentGid = record.commentGid;
     if (!commentGid) {
       const decision = decideTier(record.facts, this.activeRubric.tableMap);
-      const story = await this.deps.client.createStory(
-        task.gid,
-        renderTierComment(decision, record.facts, this.activeRubric.version),
-      );
+      const comment = renderTierComment(decision, record.facts, this.activeRubric.version);
+      const story = await this.deps.client.createStory(task.gid, comment.text, comment.html);
       commentGid = story?.gid ?? null;
     }
     await this.deps.client.setEnumCustomField(
@@ -450,12 +448,10 @@ export class TierPoller {
     let commentGid = record.commentGid;
     if (!commentGid) {
       const decision = decideTier(record.facts, this.activeRubric.tableMap);
-      const story = await this.deps.client.createStory(
-        record.taskGid,
-        renderTierComment(decision, record.facts, record.promptVersion, {
-          provisional: record.stage === 'provisional',
-        }),
-      );
+      const comment = renderTierComment(decision, record.facts, record.promptVersion, {
+        provisional: record.stage === 'provisional',
+      });
+      const story = await this.deps.client.createStory(record.taskGid, comment.text, comment.html);
       commentGid = story?.gid ?? null;
     }
     await this.deps.repo.upsertBot({

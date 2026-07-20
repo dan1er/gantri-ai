@@ -307,4 +307,83 @@ describe('renderAuthoritativeComment', () => {
     // Description source → the why sentence reads "ticket", not "PR".
     expect(text).not.toContain('the PR ');
   });
+
+  it('hyperlinks the PR number in the html when a prUrl is given; the plain text stays bare', () => {
+    const f = facts({
+      behavior_change: { v: 'yes', e: 'orders capture sidemarks' },
+      domain: 'order_management',
+    });
+    const url = 'https://github.com/gantri/core/pull/2180';
+    const { text, html } = renderAuthoritativeComment({
+      fromTier: null,
+      toTier: 'T2',
+      source: 'diff',
+      prNumber: 2180,
+      prUrl: url,
+      decision: decideTier(f),
+      facts: f,
+      promptVersion: 4,
+    });
+    // Plain text is unchanged: the source segment is the bare `PR #2180`.
+    expect(text.split('\n')[2]).toBe(`PR #2180 · Rubric v4 · ${RUBRIC_URL}`);
+    // The html links `PR #2180` to the PR URL, before the (still hyperlinked) rubric.
+    // Line 3 is the last html line, so it carries the closing `</body>`.
+    expect(html.split('\n')[2]).toBe(
+      `<a href="${url}">PR #2180</a> · <a href="${RUBRIC_URL}">Rubric v4</a></body>`,
+    );
+  });
+
+  it('leaves the PR segment un-linked when no prUrl is supplied (unchanged behavior)', () => {
+    const f = facts({
+      behavior_change: { v: 'yes', e: 'orders capture sidemarks' },
+      domain: 'order_management',
+    });
+    const { text, html } = renderAuthoritativeComment({
+      fromTier: null,
+      toTier: 'T2',
+      source: 'diff',
+      prNumber: 2180,
+      decision: decideTier(f),
+      facts: f,
+      promptVersion: 4,
+    });
+    expect(text.split('\n')[2]).toBe(`PR #2180 · Rubric v4 · ${RUBRIC_URL}`);
+    expect(html.split('\n')[2]).toBe(`PR #2180 · <a href="${RUBRIC_URL}">Rubric v4</a></body>`);
+    expect(html).not.toContain('<a href="https://github.com');
+  });
+
+  it('escapes the prUrl for the href attribute (& and the closing double-quote)', () => {
+    const f = facts({ behavior_change: { v: 'yes' }, domain: 'order_management' });
+    const { html } = renderAuthoritativeComment({
+      fromTier: null,
+      toTier: 'T2',
+      source: 'diff',
+      prNumber: 7,
+      prUrl: 'https://github.com/o/r/pull/7?a=1&b=2"',
+      decision: decideTier(f),
+      facts: f,
+      promptVersion: 4,
+    });
+    expect(html).toContain('href="https://github.com/o/r/pull/7?a=1&amp;b=2&quot;"');
+    expect(html).not.toContain('a=1&b=2"');
+  });
+
+  it('ignores prUrl when the source is the description (no PR segment to link)', () => {
+    const f = facts({
+      behavior_change: { v: 'no' },
+      cosmetic_only: { v: 'yes', e: 'fixes the label' },
+      domain: 'content_marketing',
+    });
+    const { text, html } = renderAuthoritativeComment({
+      fromTier: 'T1',
+      toTier: 'T0',
+      source: 'description',
+      prUrl: 'https://github.com/gantri/core/pull/2180',
+      decision: decideTier(f),
+      facts: f,
+      promptVersion: 2,
+    });
+    expect(text.split('\n')[2]).toBe(`Code Review (no PR linked) · Rubric v2 · ${RUBRIC_URL}`);
+    expect(html).not.toContain('pull/2180');
+  });
 });

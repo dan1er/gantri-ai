@@ -20,8 +20,9 @@ import type { Decision, Domain, FactKey, Facts } from './decide.js';
  *            joined by ` · `.
  *
  * Each renderer returns BOTH forms (`RenderedComment`): `html` is the `<body>…</body>`
- * rich-text body Asana stores as `html_text` (with `<strong>` on the verdict and an
- * `<a href>` on the rubric link, and `&`/`<`/`>` escaped in any interpolated dynamic
+ * rich-text body Asana stores as `html_text` (with `<strong>` on the verdict, an
+ * `<a href>` on the rubric link, and — when a PR URL is supplied — an `<a href>` on the
+ * `PR #<n>` source segment, with `&`/`<`/`>` escaped in any interpolated dynamic
  * content); `text` is the same content as plain text, the rubric rendered as
  * `Rubric vN · <url>` — a resilience fallback used when the rich-text write is
  * rejected. The longer prose (dispute policy, per-trigger enumerations, the Non-UI
@@ -115,6 +116,18 @@ interface Line {
  *  `&`). Ampersand first so an already-escaped `<`/`>` is not double-escaped. */
 function esc(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/** Escape a URL for a double-quoted `href` attribute: the three markup characters
+ *  plus the double-quote that would otherwise close the attribute. Ampersand first so
+ *  an already-escaped entity is not double-escaped. */
+function escAttr(url: string): string {
+  return esc(url).replace(/"/g, '&quot;');
+}
+
+/** A line whose text and html forms are identical (no dynamic content to escape). */
+function plain(s: string): Line {
+  return { text: s, html: s };
 }
 
 /** Truncate to at most `max` chars, cutting on the last word boundary and adding a
@@ -227,10 +240,12 @@ function verdictLine(verdict: string, meaning: string, provisional: boolean): Li
 }
 
 /** Line 3 — the source segment, an optional Non-UI Lane tag, and the Rubric link. The
- *  rubric link is a compact hyperlink in html and `Rubric vN · <url>` in plain text. */
-function metaLine(source: string, nonUiLane: boolean, version: number): Line {
-  const segsText: string[] = [source];
-  const segsHtml: string[] = [source];
+ *  source carries its own text/html forms (the html form may hyperlink the `PR #<n>`
+ *  segment); the rubric link is a compact hyperlink in html and `Rubric vN · <url>` in
+ *  plain text. */
+function metaLine(source: Line, nonUiLane: boolean, version: number): Line {
+  const segsText: string[] = [source.text];
+  const segsHtml: string[] = [source.html];
   if (nonUiLane) {
     segsText.push('Non-UI Lane');
     segsHtml.push('Non-UI Lane');
@@ -263,7 +278,7 @@ export function renderTierComment(
   const line1 = verdictLine(decision.tier, TIER_MEANING[decision.tier], provisional);
   const line2 = composeWhy(decision, facts, false);
   const line3 = metaLine(
-    'Re-checked from the PR diff at Code Review',
+    plain('Re-checked from the PR diff at Code Review'),
     decision.flags.includes('non_ui_lane'),
     promptVersion,
   );
@@ -277,24 +292,35 @@ export function renderTierComment(
  * decision"). When the diff is unavailable it re-confirms from the now-mature
  * description. The verdict reads `T2` on a first-ever write (null `fromTier`),
  * `T2 confirmed` when the guess held (`fromTier === toTier`), or `T1 → T2` on a move.
+ *
+ * When the source is a diff with a PR number AND `prUrl` is supplied, the html form of
+ * the source segment hyperlinks `PR #<n>` to the PR (the plain-text form stays the bare
+ * `PR #<n>`). Omitting `prUrl` keeps the previous behavior (an un-linked segment).
  */
 export function renderAuthoritativeComment(args: {
   fromTier: DeliveryTier | null;
   toTier: DeliveryTier;
   source: 'diff' | 'description';
   prNumber?: number;
+  prUrl?: string;
   decision: Decision;
   facts: Facts;
   promptVersion: number;
 }): RenderedComment {
-  const { fromTier, toTier, source, prNumber, decision, facts, promptVersion } = args;
+  const { fromTier, toTier, source, prNumber, prUrl, decision, facts, promptVersion } = args;
 
   let verdict: string;
   if (fromTier === null) verdict = toTier;
   else if (fromTier === toTier) verdict = `${toTier} confirmed`;
   else verdict = `${fromTier} → ${toTier}`;
 
-  const sourceSeg = source === 'diff' && prNumber ? `PR #${prNumber}` : 'Code Review (no PR linked)';
+  const hasPr = source === 'diff' && !!prNumber;
+  const sourceSeg: Line = hasPr
+    ? {
+        text: `PR #${prNumber}`,
+        html: prUrl ? `<a href="${escAttr(prUrl)}">PR #${prNumber}</a>` : `PR #${prNumber}`,
+      }
+    : plain('Code Review (no PR linked)');
   const line1 = verdictLine(verdict, TIER_MEANING[toTier], false);
   const line2 = composeWhy(decision, facts, source === 'diff');
   const line3 = metaLine(sourceSeg, decision.flags.includes('non_ui_lane'), promptVersion);

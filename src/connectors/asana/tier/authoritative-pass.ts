@@ -152,6 +152,12 @@ export function extractPrLinks(text: string | null | undefined, owner: string): 
   return out;
 }
 
+/** The canonical GitHub web URL for a PR under `owner`. Single source of the URL shape
+ *  so callers (the review-request list, the comment-refresh script) never re-spell it. */
+export function githubPrUrl(owner: string, repo: string, number: number): string {
+  return `https://github.com/${owner}/${repo}/pull/${number}`;
+}
+
 /** Read the enum option gid of a task's Delivery Tier field, or null if empty. */
 function currentTierOptionGid(task: AsanaTask): string | null {
   const cf = (task.custom_fields ?? []).find((f) => f.gid === DELIVERY_TIER_FIELD_GID);
@@ -420,6 +426,7 @@ export class AuthoritativePass {
       toTier: authTier,
       source: link ? 'diff' : 'description',
       prNumber: link?.pr.number,
+      prUrl: link?.pr.url,
       decision,
       facts,
       promptVersion: this.activeRubric.version,
@@ -549,7 +556,7 @@ export class AuthoritativePass {
     };
     if (link) add(link.repo, link.pr.number, link.pr.url);
     for (const l of extractPrLinks(task.notes, owner)) {
-      add(l.repo, l.number, `https://github.com/${owner}/${l.repo}/pull/${l.number}`);
+      add(l.repo, l.number, githubPrUrl(owner, l.repo, l.number));
     }
     return [...seen.values()];
   }

@@ -12,7 +12,10 @@
  * DEFAULT = DRY RUN: no writes anywhere (still runs the Haiku rewrites so the printed
  * NEW text is exactly what would be posted). `--live` performs the writes (updateStory +
  * persisting the rewritten evidence back into the record). `--limit N` caps the number of
- * records processed (for testing).
+ * records processed (for testing). `--force` bypasses ONLY the "comment already starts
+ * with `Decision:`" idempotency skip — so a comment already in the new format is
+ * re-rendered (e.g. to pick up the new `PR #<n>` hyperlink); every OTHER guard
+ * (human_override, completed, task 404, tier-mismatch) still applies.
  *
  * Read-only otherwise (plus Haiku calls). Run: `npx tsx scripts/tier-comment-refresh.ts`
  */
@@ -23,6 +26,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { createClient } from '@supabase/supabase-js';
 
 import type { Facts, FactKey, Decision } from '../src/connectors/asana/tier/decide.js';
+import type { ParsedPrLink } from '../src/connectors/asana/tier/authoritative-pass.js';
 import type {
   TierClassificationRecord,
   TierUpsert,
@@ -54,7 +58,9 @@ const { decideTier } = await import('../src/connectors/asana/tier/decide.js');
 const { renderTierComment, renderAuthoritativeComment } = await import(
   '../src/connectors/asana/tier/comment.js'
 );
-const { extractPrLinks } = await import('../src/connectors/asana/tier/authoritative-pass.js');
+const { extractPrLinks, githubPrUrl } = await import(
+  '../src/connectors/asana/tier/authoritative-pass.js'
+);
 const { loadTierStandard } = await import('../src/connectors/asana/tier/extract.js');
 const { RubricSource, DELIVERY_TIER_RUBRIC_PAGE_ID, splitStandard, buildFallbackRubric } =
   await import('../src/connectors/asana/tier/rubric-source.js');
@@ -69,6 +75,7 @@ const { callClaudeWithResilience } = await import('../src/llm/resilient-claude.j
 // ---------------------------------------------------------------------------
 const argv = process.argv.slice(2);
 const LIVE = argv.includes('--live');
+const FORCE = argv.includes('--force');
 const LIMIT = parseLimit(argv);
 
 function parseLimit(args: string[]): number | null {
@@ -194,22 +201,23 @@ function sanitizeRewrite(raw: string): string | null {
 }
 
 /**
- * Resolve a PR number forward from the ticket, mirroring the authoritative pass's
- * priority order: description (notes) → comments (newest-first) → "Notes for QA"
- * subtask. Only the number is needed for rendering (no GitHub fetch), so the open-PR
- * body-scan fallback is intentionally omitted. Returns null when the ticket names none.
+ * Resolve a PR forward from the ticket, mirroring the authoritative pass's priority
+ * order: description (notes) → comments (newest-first) → "Notes for QA" subtask. Returns
+ * the `{ repo, number }` link (both needed to build the PR URL for the hyperlink) — no
+ * GitHub fetch, so the open-PR body-scan fallback is intentionally omitted. Returns null
+ * when the ticket names none.
  */
-async function resolvePrNumberFromTicket(
+async function resolvePrLinkFromTicket(
   client: InstanceType<typeof AsanaApiClient>,
   task: AsanaTask,
   stories: AsanaStory[],
-): Promise<number | null> {
+): Promise<ParsedPrLink | null> {
   const inNotes = extractPrLinks(task.notes, GITHUB_OWNER);
-  if (inNotes.length > 0) return inNotes[inNotes.length - 1].number;
+  if (inNotes.length > 0) return inNotes[inNotes.length - 1];
 
   for (let i = stories.length - 1; i >= 0; i--) {
     const links = extractPrLinks(stories[i].text, GITHUB_OWNER);
-    if (links.length > 0) return links[links.length - 1].number;
+    if (links.length > 0) return links[links.length - 1];
   }
 
   let subtasks: AsanaTask[];
@@ -221,7 +229,7 @@ async function resolvePrNumberFromTicket(
   const qa = subtasks.find((s) => (s.name ?? '').toLowerCase().includes('notes for qa'));
   if (!qa) return null;
   const links = extractPrLinks(qa.notes, GITHUB_OWNER);
-  return links.length > 0 ? links[links.length - 1].number : null;
+  return links.length > 0 ? links[links.length - 1] : null;
 }
 
 /** Map a stored record + (optionally mutated) facts to a faithful upsert that changes
@@ -271,6 +279,7 @@ console.log(
   `[refresh] rubric adopted: Version ${rubric.version} (hash ${rubric.hash.slice(0, 8)})`,
 );
 console.log(`[refresh] mode: ${LIVE ? 'LIVE (writes enabled)' : 'DRY RUN (no writes)'}` +
+  (FORCE ? ', force (re-render already-new comments)' : '') +
   (LIMIT ? `, limit ${LIMIT}` : ''));
 
 // Every bot-owned (non-overridden) classification, then the cheap filters.
@@ -349,7 +358,7 @@ async function processRecord(record: TierClassificationRecord): Promise<void> {
     return;
   }
   const oldText = story.text ?? '';
-  if (oldText.startsWith(NEW_FORMAT_PREFIX)) {
+  if (!FORCE && oldText.startsWith(NEW_FORMAT_PREFIX)) {
     skipped.already_refreshed += 1;
     console.log(`  [skip] "${taskName}" already in new format`);
     return;
@@ -370,12 +379,13 @@ async function processRecord(record: TierClassificationRecord): Promise<void> {
   // forward from the ticket; provisional-stage records render the provisional comment.
   let rendered: { text: string; html: string };
   if (record.stage === 'authoritative') {
-    const prNumber = await resolvePrNumberFromTicket(asana, task, stories);
+    const prLink = await resolvePrLinkFromTicket(asana, task, stories);
     rendered = renderAuthoritativeComment({
       fromTier: null,
       toTier: record.tier,
-      source: prNumber ? 'diff' : 'description',
-      prNumber: prNumber ?? undefined,
+      source: prLink ? 'diff' : 'description',
+      prNumber: prLink?.number,
+      prUrl: prLink ? githubPrUrl(GITHUB_OWNER, prLink.repo, prLink.number) : undefined,
       decision,
       facts: renderFacts,
       promptVersion: rubric.version,

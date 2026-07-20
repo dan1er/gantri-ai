@@ -3,6 +3,7 @@ import {
   AuthoritativePass,
   extractAsanaTaskGid,
   extractPrLinks,
+  githubPrUrl,
 } from '../../../../../src/connectors/asana/tier/authoritative-pass.js';
 import type { AsanaApiClient, AsanaStory, AsanaTask } from '../../../../../src/connectors/asana/client.js';
 import type { GithubDispatcher } from '../../../../../src/devops/github.js';
@@ -702,6 +703,30 @@ describe('AuthoritativePass — forward PR resolution from the ticket', () => {
     const unresolved = task(GID, tierToOptionGid('T1'), 'No PR named anywhere in this ticket.');
     await pass.reviewCodeReviewTasks([resolved, unresolved]);
     expect(gh.listOpenPRs).toHaveBeenCalledTimes(1); // one repo (mantle), built lazily once
+  });
+});
+
+describe('githubPrUrl', () => {
+  it('builds the canonical GitHub PR web URL under the owner', () => {
+    expect(githubPrUrl('gantri', 'porter', 5180)).toBe('https://github.com/gantri/porter/pull/5180');
+  });
+});
+
+describe('AuthoritativePass — PR hyperlink in the comment html', () => {
+  it('hyperlinks the resolved PR number in the comment html while the text stays plain', async () => {
+    const { pass, client } = build({
+      fieldTier: 'T1',
+      diffTier: 'T2',
+      record: record({ tier: 'T1', confirmedTier: 'T1' }),
+      linkedPr: ghPr({ number: 5180, sha: 'sha-notes' }),
+    });
+    const t = task(GID, tierToOptionGid('T1'), `Implements it. PR: ${ghLink('porter', 5180)}`);
+    await pass.reviewCodeReviewTasks([t]);
+    const [, text, html] = (client.createStory as ReturnType<typeof vi.fn>).mock.calls[0];
+    // Plain text keeps the bare PR segment; the html links it to the resolved PR URL.
+    expect(text).toContain('PR #5180');
+    expect(text).not.toContain('<a href');
+    expect(html).toContain(`<a href="${ghLink('porter', 5180)}">PR #5180</a>`);
   });
 });
 

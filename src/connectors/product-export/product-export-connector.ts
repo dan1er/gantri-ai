@@ -704,8 +704,6 @@ export function certification(category: string | null): string {
     : 'SGS for UL and CSA';
 }
 
-/** One product photo: its Cloudinary `url` and its `name` (the raw filename,
- *  shown as the clickable link text). */
 /**
  * The product-photo URLs for a row, in order and deduped. Built from the
  * existing `skuAssets` white-background photos (the selected photo plus the

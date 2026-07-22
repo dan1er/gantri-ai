@@ -4,6 +4,7 @@ import type { Connector, ToolDef } from '../base/connector.js';
 import { zodToJsonSchema } from '../base/zod-to-json-schema.js';
 import { normalizeFilename, type ReportAttachment } from '../reports/reports-connector.js';
 import type { GrafanaConnector } from '../grafana/grafana-connector.js';
+import { getColorsByProduct } from './product-colors.js';
 import { logger } from '../../logger.js';
 
 /**
@@ -22,9 +23,12 @@ import { logger } from '../../logger.js';
  * those columns exist.
  *
  * Output is ONE row per product by default: the SKU, Color and Image URLs
- * columns each aggregate every variant into a single "; "-joined cell (all SKUs,
- * all colors, and the full URL of every product photo we have). `granularity:
- * 'sku'` instead emits one row per color/SKU variant.
+ * columns each aggregate every variant into a single cell, one value per line.
+ * Color lists ALL colors the product can be ordered in (derived from the palette
+ * via getColorsByProduct — the storefront "All colors" set — NOT just the
+ * designer subset in `Products.colors`), SKU lists the matching SKU for each, and
+ * Image URLs lists the full URL of every product photo we have. `granularity:
+ * 'sku'` instead emits one row per available color/SKU variant.
  *
  * Why one tool (not `grafana.sql` + `reports.attach_file`): the SKU/color/image
  * aggregation (Postgres `colors` text[] of JSON strings), the nested `specs`
@@ -200,7 +204,13 @@ export interface CatalogProduct {
   downloads: DownloadsShape | null;
   /** Per-SKU asset filenames (photos), keyed by sku. Used to build image URLs. */
   skuAssets: Record<string, SkuAssetShape> | null;
+  /** Designer/creator-selected color subset. NOT the full orderable set — the
+   *  full set is derived from the palette via getColorsByProduct (needs isPainted
+   *  + category). `colors` is used only for authoritative per-color defaultSkus. */
   colors: ColorShape[];
+  /** Whether the product has painted color finishes. Drives getColorsByProduct
+   *  (non-painted → no color options). */
+  isPainted: boolean;
 }
 
 interface SkuAssetShape {
@@ -256,10 +266,12 @@ const BASE_COLUMNS: ColumnDef[] = [
   { header: 'Category', value: (c) => c.product.category ?? '' },
   { header: 'Sub Category', value: (c) => c.product.subCategory ?? '' },
   { header: 'Size', value: (c) => c.product.size?.name ?? '' },
-  // At 'product' granularity these hold every SKU / color of the product,
-  // "; "-joined into one cell; at 'sku' granularity, the single variant.
-  { header: 'SKU', value: (c) => (c.skus ? c.skus.join('; ') : c.sku) },
-  { header: 'Color', value: (c) => (c.colorNames ? c.colorNames.join('; ') : c.colorName) },
+  // At 'product' granularity these hold every SKU / color of the product, one
+  // per line (newline-separated) in a single cell; at 'sku' granularity, the
+  // single variant. Color = ALL available colors (getColorsByProduct), not just
+  // the designer subset.
+  { header: 'SKU', value: (c) => (c.skus ? c.skus.join('\n') : c.sku) },
+  { header: 'Color', value: (c) => (c.colorNames ? c.colorNames.join('\n') : c.colorName) },
   { header: 'Status', value: (c) => c.product.status ?? '' },
   { header: 'List Price (USD)', value: (c) => listPrice(c.product) },
   { header: 'Lead Time', value: (c) => leadTime(c.product) },
@@ -323,9 +335,9 @@ const BASE_COLUMNS: ColumnDef[] = [
   { header: 'Warranty', value: () => WHOLESALE_DEFAULTS.warranty },
   { header: 'Country of Origin', value: () => WHOLESALE_DEFAULTS.countryOfOrigin },
   { header: 'Product URL', value: (c) => productUrl(c.product.id, c.sku) },
-  // Full image URLs, "; "-joined. At 'product' granularity: every photo across
+  // Full image URLs, one per line. At 'product' granularity: every photo across
   // all of the product's SKUs; at 'sku' granularity: the single SKU's photo(s).
-  { header: 'Image URLs', value: (c) => imageUrls(c).join('; ') },
+  { header: 'Image URLs', value: (c) => imageUrls(c).join('\n') },
   { header: 'Cut Sheet URL', value: (c) => cutSheetUrl(c.product, c.sku) },
   { header: 'Install Instructions URLs', value: (c) => instructionUrls(c.product) },
 ];
@@ -357,7 +369,7 @@ export class ProductExportConnector implements Connector {
       description: [
         'Export Gantri product catalog data as a downloadable CSV attachment. Use this whenever the user asks for a product spec sheet / catalog / price list / "product data to share with a wholesale partner" / "export our products as a CSV".',
         '',
-        'ONE row per product by default — the SKU, Color and Image URLs columns each aggregate ALL of the product\'s variants into a single "; "-joined cell (every SKU, every color, and the full URL of every product photo we have). Columns: product name, designer, category, size, SKU(s), color(s), status, list price (USD), lead time, summary, description, material, recommended + compatible bulbs, dimensions, footprint, backplate, cord length, weight, return policy, warranty, country of origin, product URL, image URLs, and browser-clickable cut-sheet + install-instruction PDF URLs.',
+        'ONE row per product by default — the SKU, Color and Image URLs columns each aggregate ALL of the product\'s variants into a single cell, one value per line. Color lists ALL colors the product can be ordered in (the full storefront palette set, not just the designer-picked subset), SKU the matching SKU per color, and Image URLs the full URL of every product photo. Columns: product name, designer, category, size, SKU(s), color(s), status, list price (USD), lead time, summary, description, material, recommended + compatible bulbs, dimensions, footprint, backplate, cord length, weight, return policy, warranty, country of origin, product URL, image URLs, and browser-clickable cut-sheet + install-instruction PDF URLs.',
         '',
         'Filters: `status` (Active default, or "all"), `category` (single name or array — see below), `productIds` (explicit allow-list), `productNameContains`, `granularity` ("product" default = one row per product | "sku" = one row per color/SKU variant).',
         '',
@@ -498,7 +510,7 @@ export function buildCatalogSql(args: Args): string {
 SELECT
   id, name, category, "subCategory", "designerName", status, type,
   summary, description, "leadTime", "leadTimeOption",
-  colors, size, specs, downloads, "skuAssets"
+  colors, size, specs, downloads, "skuAssets", "isPainted"
 FROM "Products"
 ${where}
 ORDER BY category NULLS LAST, name
@@ -532,7 +544,93 @@ export function parseProductRow(fields: string[], row: unknown[]): CatalogProduc
     downloads: ensureObject(at('downloads')) as DownloadsShape | null,
     skuAssets: ensureObject(at('skuAssets')) as Record<string, SkuAssetShape> | null,
     colors: parsePgJsonArray(at('colors')) as ColorShape[],
+    isPainted: toBool(at('isPainted')),
   };
+}
+
+/** Coerce a Postgres/Grafana boolean cell (native bool, or 't'/'true'/1) to a
+ *  boolean. Defaults to false for null/unknown (matches the NOT-NULL default). */
+export function toBool(v: unknown): boolean {
+  return v === true || v === 't' || v === 'true' || v === 1 || v === '1';
+}
+
+/**
+ * The color options a product should be expanded into: every color it can
+ * actually be ordered in, each with its SKU.
+ *
+ * "All available colors" comes from `getColorsByProduct` (the palette-derived
+ * set — same source as the mantle PDP "All colors" tab and Porter's cut-sheet),
+ * NOT from `Products.colors` (which is only the designer-selected subset).
+ * `Products.colors` is consulted only to pick up each color's authoritative
+ * `defaultSku`; colors it doesn't cover get a derived `{id}-{size}-{code}` SKU
+ * (the same scheme Porter generates for every color).
+ *
+ * We request the marketplace-parity set: trade colors included, Gantri-exclusive
+ * excluded, archived excluded — matching the storefront "All colors" tab.
+ *
+ * Falls back to the designer subset when the palette yields nothing (non-painted
+ * products), so such products never show fewer colors than before.
+ */
+export function productColorOptions(product: CatalogProduct): { code: string; name: string; sku: string }[] {
+  const designerColors = (product.colors ?? []).filter((c) => c && c.code);
+  const designerByCode = new Map(designerColors.map((c) => [c.code as string, c]));
+  // A representative authoritative SKU: the FIRST designer color's defaultSku (in
+  // catalog order — deterministic). Real SKUs carry size + variant segments
+  // (e.g. "10072-sm-canyon-white_cord_1_4_feet") that a bare {id}-{size}-{color}
+  // derivation would drop, so we build missing-color SKUs by swapping the color
+  // segment of this template and preserving everything else. The default variant
+  // config (cord/rod/finish) is a product-level default, uniform across colors,
+  // so any designer defaultSku is a valid template.
+  const templateSku = designerColors.map((c) => c.defaultSku).find((s): s is string => !!s);
+
+  const skuForColor = (code: string): string => {
+    const authoritative = designerByCode.get(code)?.defaultSku;
+    if (authoritative) return authoritative;
+    // Prefer swapping the color into a real SKU (keeps variant suffixes). If the
+    // template is malformed (can't be safely swapped), degrade to deriveSku.
+    const swapped = templateSku ? swapSkuColor(templateSku, code) : null;
+    return swapped ?? deriveSku(product, code);
+  };
+
+  const available = getColorsByProduct({
+    productId: product.id,
+    isPainted: product.isPainted,
+    productCategory: product.category,
+    allowTradeColors: true,
+    allowGantriColors: false,
+  });
+
+  if (available.length > 0) {
+    return available.map(({ code, name }) => ({ code, name, sku: skuForColor(code) }));
+  }
+
+  // No palette colors (non-painted / unknown) → the designer subset, as before.
+  return designerColors
+    .filter((c) => c.defaultSku || c.code)
+    .map((c) => ({
+      code: c.code ?? '',
+      name: c.name ?? c.code ?? '',
+      sku: c.defaultSku ?? skuForColor(c.code ?? ''),
+    }));
+}
+
+/**
+ * Build a sibling SKU for `colorCode` from a representative authoritative SKU,
+ * replacing ONLY its color segment and preserving the id, size, and any trailing
+ * variant segments (cord/rod/finish, e.g.
+ * "10072-sm-canyon-white_cord_1_4_feet" → "10072-sm-carbon-white_cord_1_4_feet").
+ * SKU shape is `{id}-{size}-{color}[-variant...]`; color is the 3rd segment
+ * (size/color codes never contain "-"; variant segments use "_").
+ *
+ * Returns null when the template can't be safely swapped (fewer than 3 "-"
+ * segments — a malformed or unexpectedly-delimited SKU), so the caller can fall
+ * back to `deriveSku` instead of emitting a bad SKU.
+ */
+export function swapSkuColor(templateSku: string, colorCode: string): string | null {
+  const parts = templateSku.split('-');
+  if (parts.length < 3) return null;
+  parts[2] = colorCode;
+  return parts.join('-');
 }
 
 /** Expand products into export rows per the requested granularity. */
@@ -540,7 +638,7 @@ export function expandRows(products: CatalogProduct[], granularity: 'sku' | 'pro
   const out: RowContext[] = [];
   for (const product of products) {
     const bulb = decodeBulb(product.specs?.bulb);
-    const colors = product.colors.filter((c) => c && (c.defaultSku || c.code));
+    const options = productColorOptions(product);
 
     if (granularity === 'product') {
       // One row per product. Aggregate every SKU and color into the row so the
@@ -549,31 +647,33 @@ export function expandRows(products: CatalogProduct[], granularity: 'sku' | 'pro
       // empty for colorless products (gift cards) — so the columns switch to
       // aggregate mode. sku/colorName stay '' so price/URL helpers use the
       // product-level (base) values.
-      const skus = colors.map((color) => color.defaultSku ?? deriveSku(product, color));
-      const colorNames = colors.map((color) => color.name ?? color.code ?? '').filter((n) => n !== '');
+      const skus = options.map((o) => o.sku);
+      const colorNames = options.map((o) => o.name).filter((n) => n !== '');
       out.push({ product, sku: '', colorName: '', bulb, skus, colorNames });
       continue;
     }
 
-    // 'sku' granularity: one row per color/SKU variant.
-    if (colors.length === 0) {
+    // 'sku' granularity: one row per available color/SKU.
+    if (options.length === 0) {
       // No color variants (gift cards, some accessories) — still emit the
       // product as a single row rather than dropping it.
       out.push({ product, sku: '', colorName: '', bulb });
       continue;
     }
-    for (const color of colors) {
-      const sku = color.defaultSku ?? deriveSku(product, color);
-      out.push({ product, sku, colorName: color.name ?? color.code ?? '', bulb });
+    for (const o of options) {
+      out.push({ product, sku: o.sku, colorName: o.name, bulb });
     }
   }
   return out;
 }
 
-function deriveSku(product: CatalogProduct, color: ColorShape): string {
-  const sizeCode = product.size?.code;
-  const parts = [String(product.id), sizeCode, color.code].filter((p) => p != null && p !== '');
-  return parts.join('-');
+/** Derive a SKU `{id}-{sizeCode}-{colorCode}` (Porter's scheme; a missing size is
+ *  encoded as "0" to match gantri-components generateSku). Last-resort fallback,
+ *  used only when the product has no authoritative defaultSku to swap the color
+ *  into — so it cannot recover cord/rod/finish variant segments. */
+function deriveSku(product: CatalogProduct, colorCode: string): string {
+  const sizeCode = product.size?.code || '0';
+  return `${product.id}-${sizeCode}-${colorCode}`;
 }
 
 // ---------------------------------------------------------------------------

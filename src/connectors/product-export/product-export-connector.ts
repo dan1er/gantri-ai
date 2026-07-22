@@ -21,9 +21,11 @@ import { logger } from '../../logger.js';
  * additions + manual data entry in FactoryOS and light up automatically once
  * those columns exist.
  *
- * Output is ONE row per product by default: the SKU, Color and Image URL
- * columns each aggregate every variant of the product into a single "; "-joined
- * cell (all SKUs, all colors, all photos). `granularity: 'sku'` instead emits
+ * Output is ONE row per product by default: the SKU and Color columns aggregate
+ * every variant into a single "; "-joined cell (all SKUs, all colors), and every
+ * product photo we have is emitted as its own `Image N` column, each a clickable
+ * name link (a spreadsheet =HYPERLINK showing the filename — one link per cell is
+ * the CSV limit, hence one column per image). `granularity: 'sku'` instead emits
  * one row per color/SKU variant.
  *
  * Why one tool (not `grafana.sql` + `reports.attach_file`): the SKU/color/image
@@ -70,6 +72,11 @@ const IMAGE_URL_BASE = 'https://res.cloudinary.com/gantri/image/upload/dynamic-a
  *  but a `status:'all'` pull on a much larger catalog could approach it. */
 const MAX_CSV_BYTES = 1_900_000;
 const MAX_ROWS = 5000;
+/** Max `Image N` columns emitted. A CSV cell can hold at most ONE clickable
+ *  link (a spreadsheet `=HYPERLINK` formula), so each product image gets its own
+ *  column. Products with more photos than this have the overflow dropped (with a
+ *  note); 12 comfortably covers our widest colorways. */
+const MAX_IMAGE_COLUMNS = 12;
 
 // Categories that ship with integrated/installed power (no plug-in cord-set).
 // Ported from mantle (src/constants/{wireless,hardwired}-categories.ts) — used
@@ -325,9 +332,9 @@ const BASE_COLUMNS: ColumnDef[] = [
   { header: 'Warranty', value: () => WHOLESALE_DEFAULTS.warranty },
   { header: 'Country of Origin', value: () => WHOLESALE_DEFAULTS.countryOfOrigin },
   { header: 'Product URL', value: (c) => productUrl(c.product.id, c.sku) },
-  // At 'product' granularity: every product image we have (all SKUs' photos),
-  // "; "-joined; at 'sku' granularity: the single SKU's primary photo.
-  { header: 'Image URL', value: (c) => (c.skus ? allImageUrls(c.product) : primaryImageUrl(c.product, c.sku)) },
+  // NOTE: the image columns are NOT here — they are generated dynamically in
+  // run() (one `Image N` column per photo, each a clickable name link) and
+  // spliced in right after this Product URL column.
   { header: 'Cut Sheet URL', value: (c) => cutSheetUrl(c.product, c.sku) },
   { header: 'Install Instructions URLs', value: (c) => instructionUrls(c.product) },
 ];
@@ -359,7 +366,7 @@ export class ProductExportConnector implements Connector {
       description: [
         'Export Gantri product catalog data as a downloadable CSV attachment. Use this whenever the user asks for a product spec sheet / catalog / price list / "product data to share with a wholesale partner" / "export our products as a CSV".',
         '',
-        'ONE row per product by default — the SKU, Color and Image URL columns each aggregate ALL of the product\'s variants into a single "; "-joined cell (every SKU, every color, every image we have). Columns: product name, designer, category, size, SKU(s), color(s), status, list price (USD), lead time, summary, description, material, recommended + compatible bulbs, dimensions, footprint, backplate, cord length, weight, return policy, warranty, country of origin, product URL, image URL(s), and browser-clickable cut-sheet + install-instruction PDF URLs.',
+        'ONE row per product by default — the SKU and Color columns aggregate ALL of the product\'s variants into a single "; "-joined cell (every SKU, every color), and every product photo we have becomes its own "Image N" column showing the image filename as a clickable link. Columns: product name, designer, category, size, SKU(s), color(s), status, list price (USD), lead time, summary, description, material, recommended + compatible bulbs, dimensions, footprint, backplate, cord length, weight, return policy, warranty, country of origin, product URL, one clickable Image column per photo, and browser-clickable cut-sheet + install-instruction PDF URLs.',
         '',
         'Filters: `status` (Active default, or "all"), `category` (single name or array — see below), `productIds` (explicit allow-list), `productNameContains`, `granularity` ("product" default = one row per product | "sku" = one row per color/SKU variant).',
         '',
@@ -413,7 +420,20 @@ export class ProductExportConnector implements Connector {
     }
 
     const contexts = expandRows(products, args.granularity);
-    const columns = args.includeInternalCost ? [...BASE_COLUMNS, ...INTERNAL_COST_COLUMNS] : BASE_COLUMNS;
+
+    // Each product image is shown as a clickable name link (=HYPERLINK). A CSV
+    // cell holds at most one link, so images fan out across `Image N` columns —
+    // sized to the widest row in this export (>= 1 so the column always exists),
+    // capped at MAX_IMAGE_COLUMNS. Overflow beyond the cap is dropped + noted.
+    const maxImagesInData = contexts.reduce((m, ctx) => Math.max(m, imageEntries(ctx).length), 0);
+    const imageColumnCount = Math.min(MAX_IMAGE_COLUMNS, Math.max(1, maxImagesInData));
+    const imageColumnsTruncated = maxImagesInData > imageColumnCount;
+    const imageColumns = buildImageColumns(imageColumnCount);
+
+    const baseColumns = args.includeInternalCost ? [...BASE_COLUMNS, ...INTERNAL_COST_COLUMNS] : [...BASE_COLUMNS];
+    const insertAt = baseColumns.findIndex((c) => c.header === 'Product URL') + 1;
+    const columns = [...baseColumns.slice(0, insertAt), ...imageColumns, ...baseColumns.slice(insertAt)];
+
     const headers = columns.map((c) => c.header);
     const data = contexts.map((ctx) => columns.map((col) => col.value(ctx)));
     const content = Papa.unparse({ fields: headers, data });
@@ -438,16 +458,22 @@ export class ProductExportConnector implements Connector {
     };
 
     const truncated = rows.length >= MAX_ROWS;
+    const notes: string[] = [];
+    if (truncated) {
+      notes.push(`Hit the ${MAX_ROWS}-product cap; some products may be missing. Filter by category to be exhaustive.`);
+    }
+    if (imageColumnsTruncated) {
+      notes.push(`Some products have more than ${MAX_IMAGE_COLUMNS} images; only the first ${MAX_IMAGE_COLUMNS} are included per product.`);
+    }
     return {
       attachment,
       productsExported: products.length,
       rowsExported: contexts.length,
       granularity: args.granularity,
+      imageColumns: imageColumnCount,
       includedInternalCost: args.includeInternalCost,
       truncated,
-      note: truncated
-        ? `Hit the ${MAX_ROWS}-product cap; some products may be missing. Filter by category to be exhaustive.`
-        : undefined,
+      note: notes.length ? notes.join(' ') : undefined,
     };
   }
 }
@@ -709,36 +735,35 @@ export function certification(category: string | null): string {
     : 'SGS for UL and CSA';
 }
 
-/**
- * Primary product image URL for a SKU, built from the existing `skuAssets`
- * photo filenames. Pattern verified against the live PDP. Returns blank when
- * the SKU has no white-background photo.
- */
-export function primaryImageUrl(product: CatalogProduct, sku: string): string {
-  if (!sku) return '';
-  const asset = product.skuAssets?.[sku];
-  if (!asset) return '';
-  const fileName =
-    asset.selectedWhiteBackgroundPhoto ||
-    (Array.isArray(asset.whiteBackgroundPhotos) ? asset.whiteBackgroundPhotos[0] : null);
-  if (!fileName) return '';
-  return `${IMAGE_URL_BASE}/${product.id}/${sku}/product-photos/${fileName}`;
+/** One product photo: its Cloudinary `url` and its `name` (the raw filename,
+ *  shown as the clickable link text). */
+export interface ImageEntry {
+  url: string;
+  name: string;
 }
 
 /**
- * Every product image URL we have, "; "-joined — the union of each SKU's
- * white-background photos (the selected one plus the full gallery), built with
- * the same Cloudinary pattern as `primaryImageUrl`. Used by the one-row-per-
- * product export so a wholesale partner sees all color/angle photos in a single
- * cell. Iterates `skuAssets` (the live store of every product photo), dedupes by
- * URL, preserves order. Blank when the product has no photos.
+ * The product photos for a row, in order and deduped by URL. Built from the
+ * existing `skuAssets` white-background photos (the selected one plus the full
+ * gallery), Cloudinary URL pattern verified against the live PDP.
+ *
+ * - 'product' granularity (ctx.skus present): EVERY photo across ALL of the
+ *   product's SKUs — "all the images we have".
+ * - 'sku' granularity: just the given SKU's photos.
+ *
+ * The `name` is the raw filename; the Image columns render it as the visible,
+ * clickable link text (see `hyperlinkCell`).
  */
-export function allImageUrls(product: CatalogProduct): string {
+export function imageEntries(ctx: RowContext): ImageEntry[] {
+  const { product } = ctx;
   const assets = product.skuAssets;
-  if (!assets) return '';
-  const urls: string[] = [];
+  if (!assets) return [];
+  const aggregate = ctx.skus != null; // product granularity → every SKU's photos
+  const skus = aggregate ? Object.keys(assets) : ctx.sku ? [ctx.sku] : [];
+  const out: ImageEntry[] = [];
   const seen = new Set<string>();
-  for (const [sku, asset] of Object.entries(assets)) {
+  for (const sku of skus) {
+    const asset = assets[sku];
     if (!asset) continue;
     const fileNames: string[] = [];
     if (asset.selectedWhiteBackgroundPhoto) fileNames.push(asset.selectedWhiteBackgroundPhoto);
@@ -747,15 +772,41 @@ export function allImageUrls(product: CatalogProduct): string {
         if (typeof f === 'string' && f.length > 0) fileNames.push(f);
       }
     }
-    for (const fileName of fileNames) {
-      const url = `${IMAGE_URL_BASE}/${product.id}/${sku}/product-photos/${fileName}`;
+    for (const name of fileNames) {
+      const url = `${IMAGE_URL_BASE}/${product.id}/${sku}/product-photos/${name}`;
       if (!seen.has(url)) {
         seen.add(url);
-        urls.push(url);
+        out.push({ url, name });
       }
     }
   }
-  return urls.join('; ');
+  return out;
+}
+
+/**
+ * A spreadsheet HYPERLINK-formula cell: shows `text`, links to `url`. Excel,
+ * Google Sheets and Numbers all render it as a clickable link with the filename
+ * as the visible text; a raw-text CSV viewer shows the formula (URL still
+ * visible). Any `"` in url/text is stripped so it can't break the formula (our
+ * Cloudinary URLs / filenames never contain quotes, but this keeps it safe).
+ */
+export function hyperlinkCell(url: string, text: string): string {
+  const safeUrl = url.replace(/"/g, '');
+  const safeText = text.replace(/"/g, '');
+  return `=HYPERLINK("${safeUrl}","${safeText}")`;
+}
+
+/** Build `count` image columns ("Image" when there's only one, else "Image 1",
+ *  "Image 2", …). Each cell is the row's i-th photo as a clickable name link,
+ *  or blank when the row has fewer photos. */
+export function buildImageColumns(count: number): ColumnDef[] {
+  return Array.from({ length: count }, (_, i) => ({
+    header: count === 1 ? 'Image' : `Image ${i + 1}`,
+    value: (ctx: RowContext) => {
+      const entry = imageEntries(ctx)[i];
+      return entry ? hyperlinkCell(entry.url, entry.name) : '';
+    },
+  }));
 }
 
 export function productUrl(id: number, sku: string): string {

@@ -14,7 +14,7 @@ import {
   escapeSql,
   decodeBulb,
   certification,
-  imageFileNames,
+  imageUrls,
   cutSheetUrl,
   instructionUrls,
   fullProductName,
@@ -184,13 +184,12 @@ describe('products.export_catalog', () => {
     expect(headers).not.toContain('Royalty (%)');
     expect(headers).toEqual(
       expect.arrayContaining([
-        'SKU', 'List Price (USD)', 'Product URL', 'Return Policy', 'Bulb Type', 'Certification', 'Images',
+        'SKU', 'List Price (USD)', 'Product URL', 'Return Policy', 'Bulb Type', 'Certification', 'Image URLs',
         'CRI', 'Voltage', 'Dimmer Type', 'Cut Sheet URL', 'Install Instructions URLs',
       ]),
     );
-    // Images are a single "; "-joined filename column (no per-image fan-out).
-    expect(headers).toContain('Images');
-    expect(headers).not.toContain('Image URL');
+    // Images are a single "; "-joined full-URL column (no per-image fan-out).
+    expect(headers).toContain('Image URLs');
     // Old availability markers are gone — replaced by URL-bearing columns.
     expect(headers).not.toContain('Cut Sheet');
     expect(headers).not.toContain('Install Instructions');
@@ -256,9 +255,13 @@ describe('products.export_catalog', () => {
     expect(snow['Shipping Box Weight (lb)']).toBe('');
     // Certification derived from category (Table Light = plug-in).
     expect(snow.Certification).toBe('SGS for UL and CSA');
-    // Images cell = the photo filename(s) from skuAssets, plain text.
-    expect(snow.Images).toBe('10018-cm-snow--product-photos-abc.jpg');
-    expect(carbon.Images).toBe('10018-cm-carbon--product-photos-def.jpg');
+    // Image URLs cell = the full Cloudinary URL(s) from skuAssets photos.
+    expect(snow['Image URLs']).toBe(
+      'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10018/10018-cm-snow/product-photos/10018-cm-snow--product-photos-abc.jpg',
+    );
+    expect(carbon['Image URLs']).toBe(
+      'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10018/10018-cm-carbon/product-photos/10018-cm-carbon--product-photos-def.jpg',
+    );
     // Material with embedded comma + newline survives the CSV round-trip.
     expect(snow.Material).toBe('Translucent diffuser,\nOpaque body');
     // Backplate is all-zero → blank, not "0 x 0".
@@ -334,10 +337,13 @@ describe('products.export_catalog', () => {
     expect(rows).toHaveLength(1);
     const row = rows[0];
 
-    // Every SKU, color and image filename aggregated into single "; "-joined cells.
+    // Every SKU, color and full image URL aggregated into single "; "-joined cells.
     expect(row.SKU).toBe('10018-cm-snow; 10018-cm-carbon');
     expect(row.Color).toBe('Snow; Carbon');
-    expect(row.Images).toBe('10018-cm-snow--product-photos-abc.jpg; 10018-cm-carbon--product-photos-def.jpg');
+    expect(row['Image URLs']).toBe(
+      'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10018/10018-cm-snow/product-photos/10018-cm-snow--product-photos-abc.jpg; ' +
+        'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10018/10018-cm-carbon/product-photos/10018-cm-carbon--product-photos-def.jpg',
+    );
     // Product-level fields stay singular: base list price + bare product URL
     // (no ?sku= query).
     expect(row['List Price (USD)']).toBe('248.00');
@@ -363,7 +369,7 @@ describe('products.export_catalog', () => {
     expect(row['Product Name']).toBe('Gift Card');
     expect(row.SKU).toBe('');
     expect(row.Color).toBe('');
-    expect(row.Images).toBe('');
+    expect(row['Image URLs']).toBe('');
   });
 
   it('returns NO_PRODUCTS when the filter matches nothing', async () => {
@@ -590,7 +596,7 @@ describe('parsing + formatting helpers', () => {
     expect(certification(null)).toBe('');
   });
 
-  it('imageFileNames returns the single SKU photo at sku granularity', () => {
+  it('imageUrls returns the single SKU photo URL at sku granularity', () => {
     const product = {
       id: 10018,
       skuAssets: {
@@ -599,27 +605,33 @@ describe('parsing + formatting helpers', () => {
         '10018-cm-bare': {},
       },
     } as unknown as CatalogProduct;
+    const base = 'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10018';
     // sku granularity: ctx.skus undefined → only the ctx.sku's photos.
-    expect(imageFileNames({ product, sku: '10018-cm-snow' } as any)).toEqual(['x.jpg']);
-    expect(imageFileNames({ product, sku: '10018-cm-fog' } as any)).toEqual(['y.jpg']);
-    expect(imageFileNames({ product, sku: '10018-cm-bare' } as any)).toEqual([]);
-    expect(imageFileNames({ product, sku: '' } as any)).toEqual([]);
+    expect(imageUrls({ product, sku: '10018-cm-snow' } as any)).toEqual([`${base}/10018-cm-snow/product-photos/x.jpg`]);
+    expect(imageUrls({ product, sku: '10018-cm-fog' } as any)).toEqual([`${base}/10018-cm-fog/product-photos/y.jpg`]);
+    expect(imageUrls({ product, sku: '10018-cm-bare' } as any)).toEqual([]);
+    expect(imageUrls({ product, sku: '' } as any)).toEqual([]);
   });
 
-  it('imageFileNames unions every SKU photo at product granularity, deduped and order-stable', () => {
+  it('imageUrls unions every SKU photo URL at product granularity, deduped and order-stable', () => {
     const product = {
       id: 10018,
       skuAssets: {
-        // selected also appears in the gallery → deduped to one name.
+        // selected also appears in the gallery → deduped to one URL.
         '10018-cm-snow': { selectedWhiteBackgroundPhoto: 'a.jpg', whiteBackgroundPhotos: ['a.jpg', 'b.jpg'] },
         '10018-cm-fog': { whiteBackgroundPhotos: ['c.jpg'] },
         '10018-cm-bare': {}, // no photos → contributes nothing
       },
     } as unknown as CatalogProduct;
+    const base = 'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10018';
     // product granularity is signalled by ctx.skus being present (any array).
-    expect(imageFileNames({ product, sku: '', skus: [] } as any)).toEqual(['a.jpg', 'b.jpg', 'c.jpg']);
-    // No skuAssets → no names.
-    expect(imageFileNames({ product: { id: 1, skuAssets: null }, sku: '', skus: [] } as any)).toEqual([]);
+    expect(imageUrls({ product, sku: '', skus: [] } as any)).toEqual([
+      `${base}/10018-cm-snow/product-photos/a.jpg`,
+      `${base}/10018-cm-snow/product-photos/b.jpg`,
+      `${base}/10018-cm-fog/product-photos/c.jpg`,
+    ]);
+    // No skuAssets → no URLs.
+    expect(imageUrls({ product: { id: 1, skuAssets: null }, sku: '', skus: [] } as any)).toEqual([]);
   });
 
   it('cutSheetUrl builds a Cloudinary PDF URL from the cached filename, with sibling fallback', () => {

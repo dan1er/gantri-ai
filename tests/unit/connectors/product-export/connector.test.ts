@@ -15,6 +15,7 @@ import {
   decodeBulb,
   certification,
   primaryImageUrl,
+  allImageUrls,
   cutSheetUrl,
   instructionUrls,
   fullProductName,
@@ -321,17 +322,58 @@ describe('products.export_catalog', () => {
     expect(result.includedInternalCost).toBe(true);
   });
 
-  it('collapses to one row per product at product granularity', async () => {
+  it('defaults to one row per product, aggregating all SKUs, colors and images', async () => {
     const { connector } = makeConnector(async () => ({ fields: FIELDS, rows: [lagoRow()] }));
+    // granularity omitted → schema default kicks in ('product').
+    const parsedDefault = connector.tools[0].schema.parse({});
+    expect((parsedDefault as any).granularity).toBe('product');
+
+    const result: any = await connector.tools[0].execute({
+      status: 'Active',
+      granularity: 'product',
+      includeInternalCost: false,
+    });
+    expect(result.granularity).toBe('product');
+    expect(result.rowsExported).toBe(1);
+
+    const rows = parseCsv(result.attachment.content);
+    expect(rows).toHaveLength(1);
+    const row = rows[0];
+
+    // Every SKU and color aggregated into single "; "-joined cells.
+    expect(row.SKU).toBe('10018-cm-snow; 10018-cm-carbon');
+    expect(row.Color).toBe('Snow; Carbon');
+    // Every image we have — both SKUs' white-background photos, "; "-joined.
+    expect(row['Image URL']).toBe(
+      'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10018/10018-cm-snow/product-photos/10018-cm-snow--product-photos-abc.jpg; ' +
+        'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10018/10018-cm-carbon/product-photos/10018-cm-carbon--product-photos-def.jpg',
+    );
+    // Product-level fields stay singular: base list price + bare product URL
+    // (no per-SKU override, no ?sku= query).
+    expect(row['List Price (USD)']).toBe('248.00');
+    expect(row['Product URL']).toBe('https://www.gantri.com/products/10018');
+    // Cut sheet + install instructions are product-level docs → still one URL each.
+    expect(row['Cut Sheet URL']).toBe(
+      'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10018/10018-cm-snow/10018-cm-snow-cut-sheet_1779271198808.pdf',
+    );
+    expect(row['Install Instructions URLs']).toBe(
+      'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10018/downloads/10018-install-instructions_1740000000000.pdf',
+    );
+  });
+
+  it('colorless products still export as one product row (empty SKU/Color cells)', async () => {
+    const { connector } = makeConnector(async () => ({ fields: FIELDS, rows: [giftCardRow()] }));
     const result: any = await connector.tools[0].execute({
       status: 'Active',
       granularity: 'product',
       includeInternalCost: false,
     });
     expect(result.rowsExported).toBe(1);
-    const rows = parseCsv(result.attachment.content);
-    expect(rows).toHaveLength(1);
-    expect(rows[0].SKU).toBe('');
+    const row = parseCsv(result.attachment.content)[0];
+    expect(row['Product Name']).toBe('Gift Card');
+    expect(row.SKU).toBe('');
+    expect(row.Color).toBe('');
+    expect(row['Image URL']).toBe('');
   });
 
   it('returns NO_PRODUCTS when the filter matches nothing', async () => {
@@ -577,6 +619,25 @@ describe('parsing + formatting helpers', () => {
     expect(primaryImageUrl(p, '10018-cm-fog')).toContain('/10018-cm-fog/product-photos/y.jpg');
     expect(primaryImageUrl(p, '10018-cm-bare')).toBe('');
     expect(primaryImageUrl(p, '')).toBe('');
+  });
+
+  it('allImageUrls unions every SKU photo, deduped and order-stable', () => {
+    const p = {
+      id: 10018,
+      skuAssets: {
+        // selected also appears in the gallery → deduped to one URL.
+        '10018-cm-snow': { selectedWhiteBackgroundPhoto: 'a.jpg', whiteBackgroundPhotos: ['a.jpg', 'b.jpg'] },
+        '10018-cm-fog': { whiteBackgroundPhotos: ['c.jpg'] },
+        '10018-cm-bare': {}, // no photos → contributes nothing
+      },
+    } as unknown as CatalogProduct;
+    expect(allImageUrls(p)).toBe(
+      'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10018/10018-cm-snow/product-photos/a.jpg; ' +
+        'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10018/10018-cm-snow/product-photos/b.jpg; ' +
+        'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10018/10018-cm-fog/product-photos/c.jpg',
+    );
+    // No skuAssets → blank.
+    expect(allImageUrls({ id: 1, skuAssets: null } as unknown as CatalogProduct)).toBe('');
   });
 
   it('cutSheetUrl builds a Cloudinary PDF URL from the cached filename, with sibling fallback', () => {

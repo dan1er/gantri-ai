@@ -574,17 +574,22 @@ export function toBool(v: unknown): boolean {
 export function productColorOptions(product: CatalogProduct): { code: string; name: string; sku: string }[] {
   const designerColors = (product.colors ?? []).filter((c) => c && c.code);
   const designerByCode = new Map(designerColors.map((c) => [c.code as string, c]));
-  // A representative authoritative SKU. Real SKUs carry size + variant segments
+  // A representative authoritative SKU: the FIRST designer color's defaultSku (in
+  // catalog order — deterministic). Real SKUs carry size + variant segments
   // (e.g. "10072-sm-canyon-white_cord_1_4_feet") that a bare {id}-{size}-{color}
   // derivation would drop, so we build missing-color SKUs by swapping the color
-  // segment of a real defaultSku and preserving everything else.
+  // segment of this template and preserving everything else. The default variant
+  // config (cord/rod/finish) is a product-level default, uniform across colors,
+  // so any designer defaultSku is a valid template.
   const templateSku = designerColors.map((c) => c.defaultSku).find((s): s is string => !!s);
 
   const skuForColor = (code: string): string => {
     const authoritative = designerByCode.get(code)?.defaultSku;
     if (authoritative) return authoritative;
-    if (templateSku) return swapSkuColor(templateSku, code);
-    return deriveSku(product, code);
+    // Prefer swapping the color into a real SKU (keeps variant suffixes). If the
+    // template is malformed (can't be safely swapped), degrade to deriveSku.
+    const swapped = templateSku ? swapSkuColor(templateSku, code) : null;
+    return swapped ?? deriveSku(product, code);
   };
 
   const available = getColorsByProduct({
@@ -616,10 +621,14 @@ export function productColorOptions(product: CatalogProduct): { code: string; na
  * "10072-sm-canyon-white_cord_1_4_feet" → "10072-sm-carbon-white_cord_1_4_feet").
  * SKU shape is `{id}-{size}-{color}[-variant...]`; color is the 3rd segment
  * (size/color codes never contain "-"; variant segments use "_").
+ *
+ * Returns null when the template can't be safely swapped (fewer than 3 "-"
+ * segments — a malformed or unexpectedly-delimited SKU), so the caller can fall
+ * back to `deriveSku` instead of emitting a bad SKU.
  */
-export function swapSkuColor(templateSku: string, colorCode: string): string {
+export function swapSkuColor(templateSku: string, colorCode: string): string | null {
   const parts = templateSku.split('-');
-  if (parts.length < 3) return `${templateSku}-${colorCode}`;
+  if (parts.length < 3) return null;
   parts[2] = colorCode;
   return parts.join('-');
 }

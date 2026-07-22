@@ -78,4 +78,8 @@ describe('getColorsByProduct (ported palette)', () => {
   it('palette has 33 entries', () => {
     expect(PRODUCT_COLORS).toHaveLength(33);
   });
+
+  it('no color code contains a "-" (invariant relied on by SKU color-segment swapping)', () => {
+    for (const { code } of PRODUCT_COLORS) expect(code).not.toContain('-');
+  });
 });

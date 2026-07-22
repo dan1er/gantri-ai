@@ -837,6 +837,25 @@ describe('parsing + formatting helpers', () => {
       '123456-sm-snow-chrome_rod_finish-white_cord_color',
     );
     expect(swapSkuColor('10018-cm-snow', 'carbon')).toBe('10018-cm-carbon');
+    // Malformed / unexpectedly-delimited templates (< 3 "-" segments) → null so
+    // the caller falls back to deriveSku instead of emitting a bad SKU.
+    expect(swapSkuColor('10018-snow', 'carbon')).toBeNull();
+    expect(swapSkuColor('10072_sm_canyon_variant', 'carbon')).toBeNull();
+  });
+
+  it('productColorOptions falls back to deriveSku when the template SKU is malformed', () => {
+    // Designer defaultSku is malformed (no size segment) → non-designer colors
+    // must NOT inherit the bad shape; they fall back to {id}-{size}-{color}.
+    const p = {
+      id: 10018,
+      size: { code: 'cm' },
+      category: 'Table Light',
+      isPainted: true,
+      colors: [{ code: 'snow', name: 'Snow', defaultSku: '10018-snow' }], // malformed (2 segments)
+    } as unknown as CatalogProduct;
+    const opts = productColorOptions(p);
+    expect(opts.find((o) => o.code === 'snow')!.sku).toBe('10018-snow'); // authoritative kept as-is
+    expect(opts.find((o) => o.code === 'carbon')!.sku).toBe('10018-cm-carbon'); // safe fallback, not '10018-snow-carbon'
   });
 
   it('toBool coerces Postgres/Grafana booleans', () => {

@@ -5,6 +5,7 @@ import {
   buildCatalogSql,
   parseProductRow,
   expandRows,
+  productColorOptions,
   parsePgJsonArray,
   splitPgArrayLiteral,
   ensureObject,
@@ -36,7 +37,7 @@ function pgColorsLiteral(colors: Record<string, unknown>[]): string {
 const FIELDS = [
   'id', 'name', 'category', 'subCategory', 'designerName', 'status', 'type',
   'summary', 'description', 'leadTime', 'leadTimeOption',
-  'colors', 'size', 'specs', 'downloads', 'skuAssets',
+  'colors', 'size', 'specs', 'downloads', 'skuAssets', 'isPainted',
 ];
 
 function lagoRow(): unknown[] {
@@ -95,6 +96,10 @@ function lagoRow(): unknown[] {
       },
       '10018-cm-carbon': { whiteBackgroundPhotos: ['10018-cm-carbon--product-photos-def.jpg'] },
     },
+    // isPainted: false → color options fall back to the designer subset
+    // (snow/carbon), keeping this fixture's assertions focused. The full
+    // all-available-colors path is covered by paintedRow()/product-colors tests.
+    false,
   ];
 }
 
@@ -104,6 +109,7 @@ function giftCardRow(): unknown[] {
     null, null, null, null,
     '{}', // no colors
     null, null, null, null,
+    false, // isPainted
   ];
 }
 
@@ -125,6 +131,7 @@ function wirelessRow(): unknown[] {
     { price: 19800, bulb: 'LED PANEL, 130mm' },
     null,
     null,
+    false, // isPainted
   ];
 }
 
@@ -146,6 +153,31 @@ function wirelessTaskRow(): unknown[] {
     { price: 14800, bulb: 'LED PANEL, 110mm' },
     null,
     null,
+    false, // isPainted
+  ];
+}
+
+// A painted product (Table Light) — exercises the all-available-colors path:
+// getColorsByProduct returns the full storefront palette for the category.
+function paintedTableRow(): unknown[] {
+  return [
+    10018,
+    'Lago Compact',
+    'Table Light',
+    'Area',
+    'Temporal Studio',
+    'Active',
+    'Marketplace',
+    null,
+    null,
+    47,
+    '7-8 weeks',
+    pgColorsLiteral([{ code: 'snow', name: 'Snow', defaultSku: '10018-cm-snow' }]), // designer subset
+    { code: 'cm', name: 'Compact' },
+    { price: 24800, bulb: 'E26, T8, 94mm' },
+    null,
+    { '10018-cm-snow': { selectedWhiteBackgroundPhoto: '10018-cm-snow--abc.jpg' } },
+    true, // isPainted → all available colors
   ];
 }
 
@@ -319,7 +351,7 @@ describe('products.export_catalog', () => {
     expect(result.includedInternalCost).toBe(true);
   });
 
-  it('defaults to one row per product, aggregating all SKUs, colors and images', async () => {
+  it('defaults to one row per product, aggregating SKUs, colors and images one-per-line', async () => {
     const { connector } = makeConnector(async () => ({ fields: FIELDS, rows: [lagoRow()] }));
     // granularity omitted → schema default kicks in ('product').
     const parsedDefault = connector.tools[0].schema.parse({});
@@ -337,11 +369,12 @@ describe('products.export_catalog', () => {
     expect(rows).toHaveLength(1);
     const row = rows[0];
 
-    // Every SKU, color and full image URL aggregated into single "; "-joined cells.
-    expect(row.SKU).toBe('10018-cm-snow; 10018-cm-carbon');
-    expect(row.Color).toBe('Snow; Carbon');
+    // SKU / color / image URLs aggregated into single cells, one value per line
+    // (newline-separated). This fixture is non-painted → designer subset.
+    expect(row.SKU).toBe('10018-cm-snow\n10018-cm-carbon');
+    expect(row.Color).toBe('Snow\nCarbon');
     expect(row['Image URLs']).toBe(
-      'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10018/10018-cm-snow/product-photos/10018-cm-snow--product-photos-abc.jpg; ' +
+      'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10018/10018-cm-snow/product-photos/10018-cm-snow--product-photos-abc.jpg\n' +
         'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10018/10018-cm-carbon/product-photos/10018-cm-carbon--product-photos-def.jpg',
     );
     // Product-level fields stay singular: base list price + bare product URL
@@ -355,6 +388,38 @@ describe('products.export_catalog', () => {
     expect(row['Install Instructions URLs']).toBe(
       'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10018/downloads/10018-install-instructions_1740000000000.pdf',
     );
+  });
+
+  it('a PAINTED product lists ALL available colors (full palette), not just the designer subset', async () => {
+    const { connector } = makeConnector(async () => ({ fields: FIELDS, rows: [paintedTableRow()] }));
+    const result: any = await connector.tools[0].execute({
+      status: 'Active',
+      granularity: 'product',
+      includeInternalCost: false,
+    });
+    const row = parseCsv(result.attachment.content)[0];
+
+    const colors = row.Color.split('\n');
+    const skus = row.SKU.split('\n');
+    // Every available color for a painted Table Light, from getColorsByProduct
+    // (marketplace-parity set: trade included, gantri + archived excluded).
+    expect(colors).toEqual([
+      'Blossom', 'Canyon', 'Carbon', 'Cobalt', 'Meadow', 'Midnight', 'Mist', 'Mustard',
+      'Olive', 'Peach', 'Persimmon', 'Poppy', 'Sage', 'Sand', 'Sedona', 'Smoke', 'Snow',
+      'Spruce', 'Stone', 'Sunrise', 'Walnut',
+    ]);
+    // NOT just the designer subset (which was only Snow).
+    expect(colors.length).toBeGreaterThan(1);
+    // Archived + gantri-exclusive + wireless-only colors are excluded.
+    expect(colors).not.toContain('Coral'); // archived
+    expect(colors).not.toContain('Gantri Green'); // gantri-exclusive
+    expect(colors).not.toContain('Lichen'); // wireless-only
+    // One SKU per color, aligned; the designer color keeps its authoritative
+    // defaultSku, the rest are derived {id}-{size}-{code}.
+    expect(skus).toHaveLength(colors.length);
+    expect(skus).toContain('10018-cm-snow'); // designer defaultSku
+    expect(skus).toContain('10018-cm-carbon'); // derived
+    expect(skus).toContain('10018-cm-blossompink'); // derived
   });
 
   it('colorless products still export as one product row (empty SKU/Color cells)', async () => {
@@ -703,5 +768,33 @@ describe('parsing + formatting helpers', () => {
     // sheets (the field the old marker code never touched).
     expect(p.downloads?.instructions).toEqual(['10018-install-instructions_1740000000000.pdf']);
     expect(p.skuAssets?.['10018-cm-snow']?.cutSheet).toBe('10018-cm-snow-cut-sheet_1779271198808.pdf');
+    expect(p.isPainted).toBe(false);
+  });
+
+  it('productColorOptions returns all available colors (painted) or the designer subset (fallback)', () => {
+    // Painted → full palette for the category, each with a SKU (designer
+    // defaultSku where known, else derived).
+    const painted = {
+      id: 10018,
+      size: { code: 'cm' },
+      category: 'Table Light',
+      isPainted: true,
+      colors: [{ code: 'snow', name: 'Snow', defaultSku: '10018-cm-snow' }],
+    } as unknown as CatalogProduct;
+    const opts = productColorOptions(painted);
+    expect(opts.length).toBeGreaterThan(1);
+    const snow = opts.find((o) => o.code === 'snow')!;
+    expect(snow.sku).toBe('10018-cm-snow'); // authoritative defaultSku
+    const carbon = opts.find((o) => o.code === 'carbon')!;
+    expect(carbon.name).toBe('Carbon');
+    expect(carbon.sku).toBe('10018-cm-carbon'); // derived
+    expect(opts.some((o) => o.code === 'gantri')).toBe(false); // gantri excluded
+    expect(opts.some((o) => o.code === 'coral')).toBe(false); // archived excluded
+
+    // Non-painted → falls back to the designer subset, unchanged.
+    const nonPainted = { ...painted, isPainted: false } as unknown as CatalogProduct;
+    expect(productColorOptions(nonPainted)).toEqual([
+      { code: 'snow', name: 'Snow', sku: '10018-cm-snow' },
+    ]);
   });
 });

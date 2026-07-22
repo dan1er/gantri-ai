@@ -6,6 +6,8 @@ import {
   parseProductRow,
   expandRows,
   productColorOptions,
+  swapSkuColor,
+  toBool,
   parsePgJsonArray,
   splitPgArrayLiteral,
   ensureObject,
@@ -796,5 +798,49 @@ describe('parsing + formatting helpers', () => {
     expect(productColorOptions(nonPainted)).toEqual([
       { code: 'snow', name: 'Snow', sku: '10018-cm-snow' },
     ]);
+  });
+
+  it('productColorOptions preserves cord/rod variant segments when deriving SKUs', () => {
+    // A pendant whose default SKU carries a cord variant. Derived colors must
+    // keep that suffix (only the color segment changes) — not collapse to
+    // {id}-{size}-{color}.
+    const pendant = {
+      id: 10072,
+      size: { code: 'sm' },
+      category: 'Pendant Light',
+      isPainted: true,
+      colors: [{ code: 'canyon', name: 'Canyon', defaultSku: '10072-sm-canyon-white_cord_1_4_feet' }],
+    } as unknown as CatalogProduct;
+    const opts = productColorOptions(pendant);
+    expect(opts.find((o) => o.code === 'canyon')!.sku).toBe('10072-sm-canyon-white_cord_1_4_feet');
+    // carbon has no defaultSku → derived from the template, cord suffix intact.
+    expect(opts.find((o) => o.code === 'carbon')!.sku).toBe('10072-sm-carbon-white_cord_1_4_feet');
+    expect(opts.find((o) => o.code === 'sage')!.sku).toBe('10072-sm-sage-white_cord_1_4_feet');
+  });
+
+  it('productColorOptions encodes a missing size as "0" when there is no template SKU', () => {
+    // Painted, colors have codes but no defaultSku (no template), no size code.
+    const p = {
+      id: 500,
+      size: null,
+      category: 'Table Light',
+      isPainted: true,
+      colors: [],
+    } as unknown as CatalogProduct;
+    const opts = productColorOptions(p);
+    expect(opts.find((o) => o.code === 'snow')!.sku).toBe('500-0-snow');
+  });
+
+  it('swapSkuColor replaces only the color segment', () => {
+    expect(swapSkuColor('10072-sm-canyon-white_cord_1_4_feet', 'carbon')).toBe('10072-sm-carbon-white_cord_1_4_feet');
+    expect(swapSkuColor('123456-sm-carbon-chrome_rod_finish-white_cord_color', 'snow')).toBe(
+      '123456-sm-snow-chrome_rod_finish-white_cord_color',
+    );
+    expect(swapSkuColor('10018-cm-snow', 'carbon')).toBe('10018-cm-carbon');
+  });
+
+  it('toBool coerces Postgres/Grafana booleans', () => {
+    for (const t of [true, 't', 'true', 1, '1']) expect(toBool(t)).toBe(true);
+    for (const f of [false, 'f', 'false', 0, '0', null, undefined, '']) expect(toBool(f)).toBe(false);
   });
 });

@@ -52,6 +52,21 @@ describe('getColorsByProduct (ported palette)', () => {
     expect(withGantri).toContain('gantri');
   });
 
+  it('defaults allowGantriColors to true when omitted (mirrors upstream)', () => {
+    // Omitting the flag → gantri included (upstream default is true).
+    const codes = getColorsByProduct({ productId: 10018, isPainted: true, productCategory: 'Table Light', allowTradeColors: true }).map((c) => c.code);
+    expect(codes).toContain('gantri');
+    expect(codes).toHaveLength(22); // 21 marketplace-parity + gantri
+  });
+
+  it('only-on-categories colors are allowed when there is no category context', () => {
+    // No productCategory → the wireless-only colors remain valid options
+    // (matches upstream "no category → allow" branch).
+    const codes = getColorsByProduct({ productId: 99999, isPainted: true, ...base }).map((c) => c.code);
+    expect(codes).toContain('lichen');
+    expect(codes).toContain('manzanita');
+  });
+
   it('maps codes to storefront display names', () => {
     const colors = getColorsByProduct({ productId: 10018, isPainted: true, productCategory: 'Table Light', ...base });
     const byCode = Object.fromEntries(colors.map((c) => [c.code, c.name]));

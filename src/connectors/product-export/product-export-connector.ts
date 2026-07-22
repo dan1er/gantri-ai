@@ -572,9 +572,20 @@ export function toBool(v: unknown): boolean {
  * products), so such products never show fewer colors than before.
  */
 export function productColorOptions(product: CatalogProduct): { code: string; name: string; sku: string }[] {
-  const designerByCode = new Map(
-    (product.colors ?? []).filter((c) => c && c.code).map((c) => [c.code as string, c]),
-  );
+  const designerColors = (product.colors ?? []).filter((c) => c && c.code);
+  const designerByCode = new Map(designerColors.map((c) => [c.code as string, c]));
+  // A representative authoritative SKU. Real SKUs carry size + variant segments
+  // (e.g. "10072-sm-canyon-white_cord_1_4_feet") that a bare {id}-{size}-{color}
+  // derivation would drop, so we build missing-color SKUs by swapping the color
+  // segment of a real defaultSku and preserving everything else.
+  const templateSku = designerColors.map((c) => c.defaultSku).find((s): s is string => !!s);
+
+  const skuForColor = (code: string): string => {
+    const authoritative = designerByCode.get(code)?.defaultSku;
+    if (authoritative) return authoritative;
+    if (templateSku) return swapSkuColor(templateSku, code);
+    return deriveSku(product, code);
+  };
 
   const available = getColorsByProduct({
     productId: product.id,
@@ -585,21 +596,32 @@ export function productColorOptions(product: CatalogProduct): { code: string; na
   });
 
   if (available.length > 0) {
-    return available.map(({ code, name }) => ({
-      code,
-      name,
-      sku: designerByCode.get(code)?.defaultSku ?? deriveSku(product, code),
-    }));
+    return available.map(({ code, name }) => ({ code, name, sku: skuForColor(code) }));
   }
 
   // No palette colors (non-painted / unknown) → the designer subset, as before.
-  return (product.colors ?? [])
-    .filter((c) => c && (c.defaultSku || c.code))
+  return designerColors
+    .filter((c) => c.defaultSku || c.code)
     .map((c) => ({
       code: c.code ?? '',
       name: c.name ?? c.code ?? '',
-      sku: c.defaultSku ?? deriveSku(product, c.code ?? ''),
+      sku: c.defaultSku ?? skuForColor(c.code ?? ''),
     }));
+}
+
+/**
+ * Build a sibling SKU for `colorCode` from a representative authoritative SKU,
+ * replacing ONLY its color segment and preserving the id, size, and any trailing
+ * variant segments (cord/rod/finish, e.g.
+ * "10072-sm-canyon-white_cord_1_4_feet" → "10072-sm-carbon-white_cord_1_4_feet").
+ * SKU shape is `{id}-{size}-{color}[-variant...]`; color is the 3rd segment
+ * (size/color codes never contain "-"; variant segments use "_").
+ */
+export function swapSkuColor(templateSku: string, colorCode: string): string {
+  const parts = templateSku.split('-');
+  if (parts.length < 3) return `${templateSku}-${colorCode}`;
+  parts[2] = colorCode;
+  return parts.join('-');
 }
 
 /** Expand products into export rows per the requested granularity. */
@@ -636,11 +658,13 @@ export function expandRows(products: CatalogProduct[], granularity: 'sku' | 'pro
   return out;
 }
 
-/** Derive a SKU `{id}-{sizeCode}-{colorCode}` (Porter's scheme) — used when a
- *  color has no authoritative defaultSku on the product. */
+/** Derive a SKU `{id}-{sizeCode}-{colorCode}` (Porter's scheme; a missing size is
+ *  encoded as "0" to match gantri-components generateSku). Last-resort fallback,
+ *  used only when the product has no authoritative defaultSku to swap the color
+ *  into — so it cannot recover cord/rod/finish variant segments. */
 function deriveSku(product: CatalogProduct, colorCode: string): string {
-  const parts = [String(product.id), product.size?.code, colorCode].filter((p) => p != null && p !== '');
-  return parts.join('-');
+  const sizeCode = product.size?.code || '0';
+  return `${product.id}-${sizeCode}-${colorCode}`;
 }
 
 // ---------------------------------------------------------------------------

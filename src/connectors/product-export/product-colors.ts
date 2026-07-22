@@ -136,7 +136,11 @@ function isColorAvailableForProduct(entry: ProductColorEntry, props: GetColorsBy
  */
 export function getColorsByProduct(props: GetColorsByProductProps): AvailableColor[] {
   if (!props.isPainted) return [];
-  return PRODUCT_COLORS.filter((entry) => isColorAvailableForProduct(entry, props)).map((entry) => ({
+  // Upstream defaults allowGantriColors to true (an omitted flag includes the
+  // Gantri-brand color). Mirror that here; callers wanting marketplace parity
+  // pass false explicitly.
+  const resolved = { ...props, allowGantriColors: props.allowGantriColors ?? true };
+  return PRODUCT_COLORS.filter((entry) => isColorAvailableForProduct(entry, resolved)).map((entry) => ({
     code: entry.code,
     name: entry.shortColorName,
   }));

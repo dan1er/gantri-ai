@@ -14,7 +14,7 @@ import {
   escapeSql,
   decodeBulb,
   certification,
-  primaryImageUrl,
+  imageUrls,
   cutSheetUrl,
   instructionUrls,
   fullProductName,
@@ -36,7 +36,7 @@ function pgColorsLiteral(colors: Record<string, unknown>[]): string {
 const FIELDS = [
   'id', 'name', 'category', 'subCategory', 'designerName', 'status', 'type',
   'summary', 'description', 'leadTime', 'leadTimeOption',
-  'colors', 'size', 'specs', 'downloads', 'skuPrices', 'skuAssets',
+  'colors', 'size', 'specs', 'downloads', 'skuAssets',
 ];
 
 function lagoRow(): unknown[] {
@@ -87,7 +87,6 @@ function lagoRow(): unknown[] {
       models2D: [],
       models3D: [],
     },
-    { '10018-cm-carbon': 26800 },
     {
       // snow has a cached cut-sheet PDF filename; carbon does not (→ sibling fallback).
       '10018-cm-snow': {
@@ -104,7 +103,7 @@ function giftCardRow(): unknown[] {
     99, 'Gift Card', null, null, null, 'Active', 'Gift Card',
     null, null, null, null,
     '{}', // no colors
-    null, null, null, null, null,
+    null, null, null, null,
   ];
 }
 
@@ -126,7 +125,6 @@ function wirelessRow(): unknown[] {
     { price: 19800, bulb: 'LED PANEL, 130mm' },
     null,
     null,
-    null,
   ];
 }
 
@@ -146,7 +144,6 @@ function wirelessTaskRow(): unknown[] {
     pgColorsLiteral([{ code: 'carbon', name: 'Carbon', defaultSku: '10600-st-carbon' }]),
     { code: 'st', name: 'Standard' },
     { price: 14800, bulb: 'LED PANEL, 110mm' },
-    null,
     null,
     null,
   ];
@@ -187,10 +184,12 @@ describe('products.export_catalog', () => {
     expect(headers).not.toContain('Royalty (%)');
     expect(headers).toEqual(
       expect.arrayContaining([
-        'SKU', 'List Price (USD)', 'Product URL', 'Return Policy', 'Bulb Type', 'Certification', 'Image URL',
+        'SKU', 'List Price (USD)', 'Product URL', 'Return Policy', 'Bulb Type', 'Certification', 'Image URLs',
         'CRI', 'Voltage', 'Dimmer Type', 'Cut Sheet URL', 'Install Instructions URLs',
       ]),
     );
+    // Images are a single "; "-joined full-URL column (no per-image fan-out).
+    expect(headers).toContain('Image URLs');
     // Old availability markers are gone — replaced by URL-bearing columns.
     expect(headers).not.toContain('Cut Sheet');
     expect(headers).not.toContain('Install Instructions');
@@ -200,10 +199,9 @@ describe('products.export_catalog', () => {
     expect(snow).toBeTruthy();
     expect(carbon).toBeTruthy();
 
-    // specs.price (24800c → 248.00) for the base SKU…
+    // specs.price (24800c → 248.00) — uniform across colors (no per-SKU override).
     expect(snow['List Price (USD)']).toBe('248.00');
-    // …and the per-SKU skuPrices override (26800c → 268.00) for carbon.
-    expect(carbon['List Price (USD)']).toBe('268.00');
+    expect(carbon['List Price (USD)']).toBe('248.00');
 
     // Composed display name = `name + " " + category` (Porter's fullProductName),
     // not the bare `Products.name`. Designer stays in its own column.
@@ -257,11 +255,11 @@ describe('products.export_catalog', () => {
     expect(snow['Shipping Box Weight (lb)']).toBe('');
     // Certification derived from category (Table Light = plug-in).
     expect(snow.Certification).toBe('SGS for UL and CSA');
-    // Image URL built from existing skuAssets photo (no manual Google Drive link).
-    expect(snow['Image URL']).toBe(
+    // Image URLs cell = the full Cloudinary URL(s) from skuAssets photos.
+    expect(snow['Image URLs']).toBe(
       'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10018/10018-cm-snow/product-photos/10018-cm-snow--product-photos-abc.jpg',
     );
-    expect(carbon['Image URL']).toBe(
+    expect(carbon['Image URLs']).toBe(
       'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10018/10018-cm-carbon/product-photos/10018-cm-carbon--product-photos-def.jpg',
     );
     // Material with embedded comma + newline survives the CSV round-trip.
@@ -321,17 +319,57 @@ describe('products.export_catalog', () => {
     expect(result.includedInternalCost).toBe(true);
   });
 
-  it('collapses to one row per product at product granularity', async () => {
+  it('defaults to one row per product, aggregating all SKUs, colors and images', async () => {
     const { connector } = makeConnector(async () => ({ fields: FIELDS, rows: [lagoRow()] }));
+    // granularity omitted → schema default kicks in ('product').
+    const parsedDefault = connector.tools[0].schema.parse({});
+    expect((parsedDefault as any).granularity).toBe('product');
+
+    const result: any = await connector.tools[0].execute({
+      status: 'Active',
+      granularity: 'product',
+      includeInternalCost: false,
+    });
+    expect(result.granularity).toBe('product');
+    expect(result.rowsExported).toBe(1);
+
+    const rows = parseCsv(result.attachment.content);
+    expect(rows).toHaveLength(1);
+    const row = rows[0];
+
+    // Every SKU, color and full image URL aggregated into single "; "-joined cells.
+    expect(row.SKU).toBe('10018-cm-snow; 10018-cm-carbon');
+    expect(row.Color).toBe('Snow; Carbon');
+    expect(row['Image URLs']).toBe(
+      'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10018/10018-cm-snow/product-photos/10018-cm-snow--product-photos-abc.jpg; ' +
+        'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10018/10018-cm-carbon/product-photos/10018-cm-carbon--product-photos-def.jpg',
+    );
+    // Product-level fields stay singular: base list price + bare product URL
+    // (no ?sku= query).
+    expect(row['List Price (USD)']).toBe('248.00');
+    expect(row['Product URL']).toBe('https://www.gantri.com/products/10018');
+    // Cut sheet + install instructions are product-level docs → still one URL each.
+    expect(row['Cut Sheet URL']).toBe(
+      'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10018/10018-cm-snow/10018-cm-snow-cut-sheet_1779271198808.pdf',
+    );
+    expect(row['Install Instructions URLs']).toBe(
+      'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10018/downloads/10018-install-instructions_1740000000000.pdf',
+    );
+  });
+
+  it('colorless products still export as one product row (empty SKU/Color cells)', async () => {
+    const { connector } = makeConnector(async () => ({ fields: FIELDS, rows: [giftCardRow()] }));
     const result: any = await connector.tools[0].execute({
       status: 'Active',
       granularity: 'product',
       includeInternalCost: false,
     });
     expect(result.rowsExported).toBe(1);
-    const rows = parseCsv(result.attachment.content);
-    expect(rows).toHaveLength(1);
-    expect(rows[0].SKU).toBe('');
+    const row = parseCsv(result.attachment.content)[0];
+    expect(row['Product Name']).toBe('Gift Card');
+    expect(row.SKU).toBe('');
+    expect(row.Color).toBe('');
+    expect(row['Image URLs']).toBe('');
   });
 
   it('returns NO_PRODUCTS when the filter matches nothing', async () => {
@@ -418,7 +456,9 @@ describe('SQL builder', () => {
     expect(sql).toContain(`category = 'O''Hare Light'`);
     expect(sql).toContain('id IN (1, 2, 3)');
     expect(sql).toContain(`name ILIKE '%Lu''a%'`);
-    expect(sql).toContain('"skuPrices"');
+    expect(sql).toContain('"skuAssets"');
+    // Deprecated per-SKU price overrides are no longer selected.
+    expect(sql).not.toContain('skuPrices');
   });
 
   it('omits the status clause for status=all', () => {
@@ -489,18 +529,12 @@ describe('parsing + formatting helpers', () => {
     expect(dollars(null)).toBe('');
   });
 
-  it('listPrice prefers a positive skuPrices override over specs.price', () => {
-    const p = {
-      specs: { price: 24800 },
-      skuPrices: { '10018-cm-carbon': 26800, '10018-cm-zero': 0 },
-    } as unknown as CatalogProduct;
-    expect(listPrice(p, '10018-cm-snow')).toBe('248.00'); // no override → base
-    expect(listPrice(p, '10018-cm-carbon')).toBe('268.00'); // override
-    expect(listPrice(p, '10018-cm-zero')).toBe('248.00'); // zero override ignored
-
-    // No price set (e.g. accessories with specs.price 0 / null) → blank.
-    expect(listPrice({ specs: { price: 0 }, skuPrices: null } as unknown as CatalogProduct, 'x')).toBe('');
-    expect(listPrice({ specs: {}, skuPrices: null } as unknown as CatalogProduct, 'x')).toBe('');
+  it('listPrice reads specs.price (uniform across colors), blank when unset', () => {
+    expect(listPrice({ specs: { price: 24800 } } as unknown as CatalogProduct)).toBe('248.00');
+    // No price set (e.g. accessories with specs.price 0 / null) → blank, not "0.00".
+    expect(listPrice({ specs: { price: 0 } } as unknown as CatalogProduct)).toBe('');
+    expect(listPrice({ specs: {} } as unknown as CatalogProduct)).toBe('');
+    expect(listPrice({ specs: null } as unknown as CatalogProduct)).toBe('');
   });
 
   it('productUrl uses the bare id form with an optional sku query', () => {
@@ -562,8 +596,8 @@ describe('parsing + formatting helpers', () => {
     expect(certification(null)).toBe('');
   });
 
-  it('primaryImageUrl builds a Cloudinary URL from skuAssets, blank when absent', () => {
-    const p = {
+  it('imageUrls returns the single SKU photo URL at sku granularity', () => {
+    const product = {
       id: 10018,
       skuAssets: {
         '10018-cm-snow': { selectedWhiteBackgroundPhoto: 'x.jpg' },
@@ -571,12 +605,33 @@ describe('parsing + formatting helpers', () => {
         '10018-cm-bare': {},
       },
     } as unknown as CatalogProduct;
-    expect(primaryImageUrl(p, '10018-cm-snow')).toBe(
-      'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10018/10018-cm-snow/product-photos/x.jpg',
-    );
-    expect(primaryImageUrl(p, '10018-cm-fog')).toContain('/10018-cm-fog/product-photos/y.jpg');
-    expect(primaryImageUrl(p, '10018-cm-bare')).toBe('');
-    expect(primaryImageUrl(p, '')).toBe('');
+    const base = 'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10018';
+    // sku granularity: ctx.skus undefined → only the ctx.sku's photos.
+    expect(imageUrls({ product, sku: '10018-cm-snow' } as any)).toEqual([`${base}/10018-cm-snow/product-photos/x.jpg`]);
+    expect(imageUrls({ product, sku: '10018-cm-fog' } as any)).toEqual([`${base}/10018-cm-fog/product-photos/y.jpg`]);
+    expect(imageUrls({ product, sku: '10018-cm-bare' } as any)).toEqual([]);
+    expect(imageUrls({ product, sku: '' } as any)).toEqual([]);
+  });
+
+  it('imageUrls unions every SKU photo URL at product granularity, deduped and order-stable', () => {
+    const product = {
+      id: 10018,
+      skuAssets: {
+        // selected also appears in the gallery → deduped to one URL.
+        '10018-cm-snow': { selectedWhiteBackgroundPhoto: 'a.jpg', whiteBackgroundPhotos: ['a.jpg', 'b.jpg'] },
+        '10018-cm-fog': { whiteBackgroundPhotos: ['c.jpg'] },
+        '10018-cm-bare': {}, // no photos → contributes nothing
+      },
+    } as unknown as CatalogProduct;
+    const base = 'https://res.cloudinary.com/gantri/image/upload/dynamic-assets/gantri/products/10018';
+    // product granularity is signalled by ctx.skus being present (any array).
+    expect(imageUrls({ product, sku: '', skus: [] } as any)).toEqual([
+      `${base}/10018-cm-snow/product-photos/a.jpg`,
+      `${base}/10018-cm-snow/product-photos/b.jpg`,
+      `${base}/10018-cm-fog/product-photos/c.jpg`,
+    ]);
+    // No skuAssets → no URLs.
+    expect(imageUrls({ product: { id: 1, skuAssets: null }, sku: '', skus: [] } as any)).toEqual([]);
   });
 
   it('cutSheetUrl builds a Cloudinary PDF URL from the cached filename, with sibling fallback', () => {
@@ -642,7 +697,6 @@ describe('parsing + formatting helpers', () => {
     expect(p.designerName).toBe('Temporal Studio');
     expect(p.colors).toHaveLength(2);
     expect(p.specs?.price).toBe(24800);
-    expect(p.skuPrices).toEqual({ '10018-cm-carbon': 26800 });
     // Regression guard: the json `downloads`/`skuAssets` columns come back from
     // Grafana as already-parsed nested objects — ensureObject must pass them
     // through intact so the URL builders can read instructions + cached cut

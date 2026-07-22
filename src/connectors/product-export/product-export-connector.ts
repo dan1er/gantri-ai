@@ -21,9 +21,14 @@ import { logger } from '../../logger.js';
  * additions + manual data entry in FactoryOS and light up automatically once
  * those columns exist.
  *
- * Why one tool (not `grafana.sql` + `reports.attach_file`): the SKU fan-out
- * (Postgres `colors` text[] of JSON strings → one row per color), the nested
- * `specs` JSON extraction, the cents→dollars price conversion, and the exact
+ * Output is ONE row per product by default: the SKU, Color and Image URLs
+ * columns each aggregate every variant into a single "; "-joined cell (all SKUs,
+ * all colors, and the full URL of every product photo we have). `granularity:
+ * 'sku'` instead emits one row per color/SKU variant.
+ *
+ * Why one tool (not `grafana.sql` + `reports.attach_file`): the SKU/color/image
+ * aggregation (Postgres `colors` text[] of JSON strings), the nested `specs`
+ * JSON extraction, the cents→dollars price conversion, and the exact
  * partner-safe column ordering are all deterministic and easy to get subtly
  * wrong if left to the LLM. Keeping it server-side guarantees a stable,
  * correct CSV every time.
@@ -133,8 +138,11 @@ const Args = z.object({
     .describe('Optional case-insensitive substring match on product name.'),
   granularity: z
     .enum(['sku', 'product'])
-    .default('sku')
-    .describe('"sku" (default) = one row per color/SKU (matches "all SKUs per product"); "product" = one row per product.'),
+    .default('product')
+    .describe(
+      '"product" (default) = ONE row per product, with every SKU, every color and every image URL aggregated into single "; "-joined cells. ' +
+        '"sku" = one row per color/SKU variant (a separate row for each color).',
+    ),
   includeInternalCost: z
     .boolean()
     .default(false)
@@ -190,8 +198,6 @@ export interface CatalogProduct {
   size: { code?: string; name?: string } | null;
   specs: SpecsShape | null;
   downloads: DownloadsShape | null;
-  /** Per-SKU price overrides (cents), keyed by sku. Base price stays specs.price. */
-  skuPrices: Record<string, number> | null;
   /** Per-SKU asset filenames (photos), keyed by sku. Used to build image URLs. */
   skuAssets: Record<string, SkuAssetShape> | null;
   colors: ColorShape[];
@@ -218,12 +224,19 @@ export interface BulbInfo {
   included: string;
 }
 
-/** One expanded export row (product × sku). */
+/** One expanded export row. In 'sku' granularity it is a single product×sku
+ *  pair; in 'product' granularity it is one product with `skus`/`colorNames`
+ *  carrying every variant, aggregated into single cells by the columns. */
 interface RowContext {
   product: CatalogProduct;
   sku: string;
   colorName: string;
   bulb: BulbInfo;
+  /** Present only at 'product' granularity: every SKU / color of the product,
+   *  in catalog order. Their presence is what flips the SKU/Color/Image columns
+   *  from single-value to aggregated. */
+  skus?: string[];
+  colorNames?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -243,10 +256,12 @@ const BASE_COLUMNS: ColumnDef[] = [
   { header: 'Category', value: (c) => c.product.category ?? '' },
   { header: 'Sub Category', value: (c) => c.product.subCategory ?? '' },
   { header: 'Size', value: (c) => c.product.size?.name ?? '' },
-  { header: 'SKU', value: (c) => c.sku },
-  { header: 'Color', value: (c) => c.colorName },
+  // At 'product' granularity these hold every SKU / color of the product,
+  // "; "-joined into one cell; at 'sku' granularity, the single variant.
+  { header: 'SKU', value: (c) => (c.skus ? c.skus.join('; ') : c.sku) },
+  { header: 'Color', value: (c) => (c.colorNames ? c.colorNames.join('; ') : c.colorName) },
   { header: 'Status', value: (c) => c.product.status ?? '' },
-  { header: 'List Price (USD)', value: (c) => listPrice(c.product, c.sku) },
+  { header: 'List Price (USD)', value: (c) => listPrice(c.product) },
   { header: 'Lead Time', value: (c) => leadTime(c.product) },
   { header: 'Summary', value: (c) => c.product.summary ?? '' },
   { header: 'Description', value: (c) => c.product.description ?? '' },
@@ -308,7 +323,9 @@ const BASE_COLUMNS: ColumnDef[] = [
   { header: 'Warranty', value: () => WHOLESALE_DEFAULTS.warranty },
   { header: 'Country of Origin', value: () => WHOLESALE_DEFAULTS.countryOfOrigin },
   { header: 'Product URL', value: (c) => productUrl(c.product.id, c.sku) },
-  { header: 'Image URL', value: (c) => primaryImageUrl(c.product, c.sku) },
+  // Full image URLs, "; "-joined. At 'product' granularity: every photo across
+  // all of the product's SKUs; at 'sku' granularity: the single SKU's photo(s).
+  { header: 'Image URLs', value: (c) => imageUrls(c).join('; ') },
   { header: 'Cut Sheet URL', value: (c) => cutSheetUrl(c.product, c.sku) },
   { header: 'Install Instructions URLs', value: (c) => instructionUrls(c.product) },
 ];
@@ -340,9 +357,9 @@ export class ProductExportConnector implements Connector {
       description: [
         'Export Gantri product catalog data as a downloadable CSV attachment. Use this whenever the user asks for a product spec sheet / catalog / price list / "product data to share with a wholesale partner" / "export our products as a CSV".',
         '',
-        'Each row is one SKU (color variant) by default — i.e. "all SKUs per product". Columns: product name, designer, category, size, SKU, color, status, list price (USD), lead time, summary, description, material, recommended + compatible bulbs, dimensions, footprint, backplate, cord length, weight, return policy, warranty, country of origin, product URL, image URL, and browser-clickable cut-sheet + install-instruction PDF URLs.',
+        'ONE row per product by default — the SKU, Color and Image URLs columns each aggregate ALL of the product\'s variants into a single "; "-joined cell (every SKU, every color, and the full URL of every product photo we have). Columns: product name, designer, category, size, SKU(s), color(s), status, list price (USD), lead time, summary, description, material, recommended + compatible bulbs, dimensions, footprint, backplate, cord length, weight, return policy, warranty, country of origin, product URL, image URLs, and browser-clickable cut-sheet + install-instruction PDF URLs.',
         '',
-        'Filters: `status` (Active default, or "all"), `category` (single name or array — see below), `productIds` (explicit allow-list), `productNameContains`, `granularity` ("sku" default | "product").',
+        'Filters: `status` (Active default, or "all"), `category` (single name or array — see below), `productIds` (explicit allow-list), `productNameContains`, `granularity` ("product" default = one row per product | "sku" = one row per color/SKU variant).',
         '',
         'CATEGORIES: `category` accepts a single category name OR an array of names — all exported into ONE CSV. Valid categories: Accessory, Clamp Light, Floor Light, Gift Card, Pendant Light, Table Light, Wall Light, Wall Sconce, Flush Mount, Wireless Floor Lantern, Wireless Mini Light, Wireless Table Light, Wireless Task Light. "Wireless lights" is NOT a single category — it spans four; export them together, e.g. "our wireless lights" → ONE call with category: ["Wireless Floor Lantern","Wireless Mini Light","Wireless Table Light","Wireless Task Light"].',
         '',
@@ -481,7 +498,7 @@ export function buildCatalogSql(args: Args): string {
 SELECT
   id, name, category, "subCategory", "designerName", status, type,
   summary, description, "leadTime", "leadTimeOption",
-  colors, size, specs, downloads, "skuPrices", "skuAssets"
+  colors, size, specs, downloads, "skuAssets"
 FROM "Products"
 ${where}
 ORDER BY category NULLS LAST, name
@@ -513,7 +530,6 @@ export function parseProductRow(fields: string[], row: unknown[]): CatalogProduc
     size: ensureObject(at('size')) as CatalogProduct['size'],
     specs: ensureObject(at('specs')) as SpecsShape | null,
     downloads: ensureObject(at('downloads')) as DownloadsShape | null,
-    skuPrices: ensureObject(at('skuPrices')) as Record<string, number> | null,
     skuAssets: ensureObject(at('skuAssets')) as Record<string, SkuAssetShape> | null,
     colors: parsePgJsonArray(at('colors')) as ColorShape[],
   };
@@ -524,11 +540,22 @@ export function expandRows(products: CatalogProduct[], granularity: 'sku' | 'pro
   const out: RowContext[] = [];
   for (const product of products) {
     const bulb = decodeBulb(product.specs?.bulb);
+    const colors = product.colors.filter((c) => c && (c.defaultSku || c.code));
+
     if (granularity === 'product') {
-      out.push({ product, sku: '', colorName: '', bulb });
+      // One row per product. Aggregate every SKU and color into the row so the
+      // SKU/Color columns render them all (the Image column pulls every photo
+      // straight from skuAssets). `skus`/`colorNames` are always set here — even
+      // empty for colorless products (gift cards) — so the columns switch to
+      // aggregate mode. sku/colorName stay '' so price/URL helpers use the
+      // product-level (base) values.
+      const skus = colors.map((color) => color.defaultSku ?? deriveSku(product, color));
+      const colorNames = colors.map((color) => color.name ?? color.code ?? '').filter((n) => n !== '');
+      out.push({ product, sku: '', colorName: '', bulb, skus, colorNames });
       continue;
     }
-    const colors = product.colors.filter((c) => c && (c.defaultSku || c.code));
+
+    // 'sku' granularity: one row per color/SKU variant.
     if (colors.length === 0) {
       // No color variants (gift cards, some accessories) — still emit the
       // product as a single row rather than dropping it.
@@ -561,17 +588,15 @@ export function dollars(cents: number | null): string {
 }
 
 /**
- * Resolve a SKU's retail list price (USD string). Source of truth is
- * `specs.price` (cents) — the team-verified canonical retail price — with a
- * per-SKU override from `skuPrices[sku]` when present (size/color price
- * modifiers). Top-level `Products.price` is intentionally NOT used (legacy
- * field, populated on only ~6 products). See prompts.ts pricing note.
+ * Resolve a product's retail list price (USD string) from `specs.price` (cents),
+ * the team-verified canonical retail price. Top-level `Products.price` is
+ * intentionally NOT used (legacy field, populated on only ~6 products), and
+ * per-SKU price overrides are deprecated (they no longer exist) — price is
+ * uniform across a product's colors. Blank when no price is set (null or 0 —
+ * e.g. accessories), never "0.00".
  */
-export function listPrice(p: CatalogProduct, sku: string): string {
-  const override = sku && p.skuPrices ? numOrNull(p.skuPrices[sku]) : null;
-  const base = numOrNull(p.specs?.price ?? null);
-  const cents = override != null && override > 0 ? override : base;
-  // Treat null or 0 as "no price set" (e.g. accessories) — blank, not "0.00".
+export function listPrice(p: CatalogProduct): string {
+  const cents = numOrNull(p.specs?.price ?? null);
   if (cents == null || cents <= 0) return '';
   return dollars(cents);
 }
@@ -680,19 +705,41 @@ export function certification(category: string | null): string {
 }
 
 /**
- * Primary product image URL for a SKU, built from the existing `skuAssets`
- * photo filenames. Pattern verified against the live PDP. Returns blank when
- * the SKU has no white-background photo.
+ * The product-photo URLs for a row, in order and deduped. Built from the
+ * existing `skuAssets` white-background photos (the selected photo plus the
+ * gallery), Cloudinary URL pattern verified against the live PDP.
+ *
+ * - 'product' granularity (ctx.skus present): EVERY photo across ALL of the
+ *   product's SKUs — "all the images we have".
+ * - 'sku' granularity: just the given SKU's photo(s).
  */
-export function primaryImageUrl(product: CatalogProduct, sku: string): string {
-  if (!sku) return '';
-  const asset = product.skuAssets?.[sku];
-  if (!asset) return '';
-  const fileName =
-    asset.selectedWhiteBackgroundPhoto ||
-    (Array.isArray(asset.whiteBackgroundPhotos) ? asset.whiteBackgroundPhotos[0] : null);
-  if (!fileName) return '';
-  return `${IMAGE_URL_BASE}/${product.id}/${sku}/product-photos/${fileName}`;
+export function imageUrls(ctx: RowContext): string[] {
+  const { product } = ctx;
+  const assets = product.skuAssets;
+  if (!assets) return [];
+  const aggregate = ctx.skus != null; // product granularity → every SKU's photos
+  const skus = aggregate ? Object.keys(assets) : ctx.sku ? [ctx.sku] : [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const sku of skus) {
+    const asset = assets[sku];
+    if (!asset) continue;
+    const fileNames: string[] = [];
+    if (asset.selectedWhiteBackgroundPhoto) fileNames.push(asset.selectedWhiteBackgroundPhoto);
+    if (Array.isArray(asset.whiteBackgroundPhotos)) {
+      for (const f of asset.whiteBackgroundPhotos) {
+        if (typeof f === 'string' && f.length > 0) fileNames.push(f);
+      }
+    }
+    for (const name of fileNames) {
+      const url = `${IMAGE_URL_BASE}/${product.id}/${sku}/product-photos/${name}`;
+      if (!seen.has(url)) {
+        seen.add(url);
+        out.push(url);
+      }
+    }
+  }
+  return out;
 }
 
 export function productUrl(id: number, sku: string): string {

@@ -152,6 +152,7 @@ describe('computeRcaDigest', () => {
       task: t,
       subtasks,
       doneAt: doneAt ?? { at: t.completed_at ?? t.modified_at ?? '', approximate: !t.completed_at },
+      owners: { dev: 'Eduardo Aranda', qa: 'Matthew Fite' },
     };
   }
 
@@ -292,8 +293,7 @@ describe('renderRcaDigest', () => {
     name: o.name ?? 'Bug: Cannot cancel full order',
     url: o.url ?? 'https://app.asana.com/0/1210754051061529/1',
     type: o.type ?? 'Bug',
-    assigneeName: o.assigneeName ?? 'Matthew Fite',
-    assigneeEmail: o.assigneeEmail ?? 'matt@gantri.com',
+    owners: o.owners ?? { dev: 'Eduardo Aranda', qa: 'Matthew Fite' },
     doneAt: o.doneAt ?? '2026-07-25T12:00:00Z',
     doneAtApproximate: o.doneAtApproximate ?? false,
     daysSinceDone: o.daysSinceDone ?? 3,
@@ -302,26 +302,55 @@ describe('renderRcaDigest', () => {
   });
 
   it('returns null when nothing is outstanding', () => {
-    expect(renderRcaDigest({ slotKey: 's', entries: [], scanned: 10 }, () => null)).toBeNull();
+    expect(renderRcaDigest({ slotKey: 's', entries: [], scanned: 10 }, (n) => n)).toBeNull();
   });
 
   it('asks for the fix up front', () => {
-    const text = renderRcaDigest({ slotKey: 's', entries: [entry({})], scanned: 10 }, () => null)!;
+    const text = renderRcaDigest({ slotKey: 's', entries: [entry({})], scanned: 10 }, (n) => n)!;
     expect(text).toContain('1 bug was closed without a root cause analysis');
     expect(text).toContain('*Please fill in the missing RCA as soon as you can*');
   });
 
-  it('names which half is missing rather than the raw subtask name', () => {
+  it('names which half is missing and who owes it', () => {
     const text = renderRcaDigest(
       {
         slotKey: 's',
         entries: [entry({ openRcas: [rca('Engineering Escape RCA'), rca('QA Escape RCA')] })],
         scanned: 1,
       },
-      () => '<@U123>',
-    );
-    expect(text).toContain('missing: Engineering RCA and QA RCA');
-    expect(text).toContain('Bug · closed 3d ago · assignee: <@U123>');
+      (n) => (n === 'Matthew Fite' ? '<@U_MATT>' : n),
+    )!;
+    // The dev who wrote the code owes the engineering half…
+    expect(text).toContain('❌ Engineering RCA — Eduardo Aranda');
+    // …and the QA who signed it off owes theirs.
+    expect(text).toContain('❌ QA RCA — <@U_MATT>');
+    // The ticket line no longer names a single "assignee" for the whole thing.
+    expect(text).not.toContain('assignee');
+  });
+
+  it('names nobody when the board history does not say', () => {
+    const text = renderRcaDigest(
+      {
+        slotKey: 's',
+        entries: [
+          entry({ openRcas: [rca('Engineering Escape RCA')], owners: { dev: null, qa: null } }),
+        ],
+        scanned: 1,
+      },
+      (n) => n,
+    )!;
+    expect(text).toContain('❌ Engineering RCA');
+    expect(text).not.toContain('—  ');
+  });
+
+  it('names nobody for the legacy undifferentiated subtask', () => {
+    const text = renderRcaDigest(
+      { slotKey: 's', entries: [entry({ openRcas: [rca('Root cause analysis')] })], scanned: 1 },
+      (n) => n,
+    )!;
+    // It names no discipline, so guessing an owner would point at the wrong person.
+    expect(text).toContain('❌ Root cause analysis');
+    expect(text).not.toContain('Root cause analysis — ');
   });
 
   it('links each missing RCA straight to its subtask', () => {
@@ -338,11 +367,10 @@ describe('renderRcaDigest', () => {
         ],
         scanned: 1,
       },
-      () => null,
-    );
-    expect(text).toContain(
-      'missing: <https://app.asana.com/1/w/task/11|Engineering RCA> and <https://app.asana.com/1/w/task/22|QA RCA>',
-    );
+      (n) => n,
+    )!;
+    expect(text).toContain('❌ <https://app.asana.com/1/w/task/11|Engineering RCA>');
+    expect(text).toContain('❌ <https://app.asana.com/1/w/task/22|QA RCA>');
   });
 
   it('credits the half that is already filled in', () => {
@@ -352,33 +380,23 @@ describe('renderRcaDigest', () => {
         entries: [entry({ openRcas: [rca('QA Escape RCA')], doneRcas: [rca('Engineering Escape RCA')] })],
         scanned: 1,
       },
-      () => null,
+      (n) => n,
     )!;
-    expect(text).toContain('missing: QA RCA');
-    expect(text).toContain('✅ already done: Engineering RCA');
+    expect(text).toContain('❌ QA RCA');
+    expect(text).toContain('✅ Engineering RCA — done');
   });
 
   it('omits the already-done line when the same half is also open', () => {
-    // A ticket can carry duplicate subtasks — one ticked, one not. It is still
-    // missing, so claiming it is done would be wrong.
     const text = renderRcaDigest(
       {
         slotKey: 's',
         entries: [entry({ openRcas: [rca('QA Escape RCA')], doneRcas: [rca('QA Escape RCA')] })],
         scanned: 1,
       },
-      () => null,
+      (n) => n,
     )!;
-    expect(text).toContain('missing: QA RCA');
-    expect(text).not.toContain('already done');
-  });
-
-  it('falls back to the board name for the legacy undifferentiated subtask', () => {
-    const text = renderRcaDigest(
-      { slotKey: 's', entries: [entry({ openRcas: [rca('Root cause analysis')] })], scanned: 1 },
-      () => null,
-    )!;
-    expect(text).toContain('missing: Root cause analysis');
+    expect(text).toContain('❌ QA RCA');
+    expect(text).not.toContain('✅');
   });
 
   it('deduplicates halves that appear twice on the same ticket', () => {
@@ -388,24 +406,22 @@ describe('renderRcaDigest', () => {
         entries: [entry({ openRcas: [rca('Engineering Escape RCA'), rca('Engineering RCA')] })],
         scanned: 1,
       },
-      () => null,
+      (n) => n,
     )!;
-    expect(text).toContain('missing: Engineering RCA');
-    // Deduped: one label, so no "X and Y" join.
-    expect(text).not.toContain(' and ');
+    expect(text.match(/Engineering RCA/g)).toHaveLength(1);
   });
 
   it('escapes Slack link-label metacharacters in ticket names', () => {
     const text = renderRcaDigest(
       { slotKey: 's', entries: [entry({ name: 'Bug: <script> & "quotes"' })], scanned: 1 },
-      () => null,
+      (n) => n,
     );
     expect(text).toContain('Bug: &lt;script&gt; &amp; "quotes"');
   });
 
   it('collapses the tail past 20 tickets', () => {
     const entries = Array.from({ length: 23 }, (_, i) => entry({ taskGid: String(i), daysSinceDone: i }));
-    const text = renderRcaDigest({ slotKey: 's', entries, scanned: 100 }, () => null)!;
+    const text = renderRcaDigest({ slotKey: 's', entries, scanned: 100 }, (n) => n)!;
     expect(text).toContain('23 bugs were closed without a root cause analysis');
     expect(text).toContain('…and 3 more.');
   });
@@ -415,7 +431,10 @@ describe('RcaDigestReporter', () => {
   function harness(opts: {
     tasks: AsanaTask[];
     subtasks: Record<string, { name: string; completed: boolean }[]>;
-    stories?: Record<string, { gid: string; created_at: string; resource_subtype: string; text: string }[]>;
+    stories?: Record<
+      string,
+      { gid: string; created_at: string; resource_subtype: string; text: string; created_by?: { name: string } }[]
+    >;
     existing?: boolean;
     now?: Date;
     startAtMs?: number;
@@ -438,7 +457,7 @@ describe('RcaDigestReporter', () => {
       channelId: 'C_SOFTWARE',
       startAtMs: opts.startAtMs,
       now: () => opts.now ?? NOW,
-      resolveSlackIdsByEmail: async () => new Map([['matt@gantri.com', 'U_MATT']]),
+      resolveSlackIdsByName: async () => new Map([['matthew fite', 'U_MATT']]),
     });
     return { reporter, postMessage, insert, client };
   }
@@ -446,12 +465,23 @@ describe('RcaDigestReporter', () => {
   it('posts the digest and records the slot', async () => {
     const { reporter, postMessage, insert } = harness({
       tasks: [
-        task({ gid: 'b1', name: 'Bug: broken checkout', assignee: { gid: 'u', name: 'Matthew Fite', email: 'matt@gantri.com' } }),
+        task({ gid: 'b1', name: 'Bug: broken checkout' }),
         task({ gid: 'f1', name: 'Add early access signup', custom_fields: typeField('1211288498996175', 'Feature') }),
       ],
       subtasks: {
         b1: [{ name: 'QA Escape RCA', completed: false }],
         f1: [{ name: 'Root cause analysis', completed: false }],
+      },
+      stories: {
+        b1: [
+          {
+            gid: 's1',
+            created_at: '2026-07-25T10:00:00Z',
+            resource_subtype: 'section_changed',
+            created_by: { name: 'Matthew Fite' },
+            text: 'Matthew Fite moved this task from "QA Review" to "Done" in Software Board',
+          },
+        ],
       },
     });
 
@@ -579,14 +609,76 @@ describe('RcaDigestReporter', () => {
     expect(postMessage).not.toHaveBeenCalled();
   });
 
-  it('falls back to the Asana name when the assignee has no Slack account', async () => {
+  it('falls back to the plain Asana name when the owner has no Slack account', async () => {
     const { reporter, postMessage } = harness({
-      tasks: [task({ gid: 'b1', assignee: { gid: 'u', name: 'Jen Doe', email: 'jen@gantri.com' } })],
+      tasks: [task({ gid: 'b1' })],
       subtasks: { b1: [{ name: 'QA Escape RCA', completed: false }] },
+      stories: {
+        b1: [
+          {
+            gid: 's1',
+            created_at: '2026-07-25T10:00:00Z',
+            resource_subtype: 'section_changed',
+            created_by: { name: 'Jen Doe' },
+            text: 'Jen Doe moved this task from "QA Review" to "Done" in Software Board',
+          },
+        ],
+      },
     });
 
     await reporter.maybeSend();
 
     expect(postMessage.mock.calls[0][0].text).toContain('Jen Doe');
+  });
+
+  it('requests the story author — without it no owner can ever be resolved', async () => {
+    const { reporter, client } = harness({
+      tasks: [task({ gid: 'b1' })],
+      subtasks: { b1: [{ name: 'QA Escape RCA', completed: false }] },
+    });
+
+    await reporter.maybeSend();
+
+    const optFields = (client.getTaskStories as unknown as { mock: { calls: [string, string][] } })
+      .mock.calls[0][1];
+    expect(optFields).toContain('created_by.name');
+  });
+
+  it('reads the dev and the QA off the board history, not the assignee', async () => {
+    const { reporter, postMessage } = harness({
+      // Assigned to QA at the end, as every verified bug is — naming them next to
+      // the engineering half would point at the wrong person.
+      tasks: [task({ gid: 'b1', assignee: { gid: 'u', name: 'Matthew Fite' } })],
+      subtasks: {
+        b1: [
+          { name: 'Engineering Escape RCA', completed: false },
+          { name: 'QA Escape RCA', completed: false },
+        ],
+      },
+      stories: {
+        b1: [
+          {
+            gid: 's1',
+            created_at: '2026-07-25T09:00:00Z',
+            resource_subtype: 'section_changed',
+            created_by: { name: 'Eduardo Aranda' },
+            text: 'Eduardo Aranda moved this task from "In Progress" to "Code Review" in Software Board',
+          },
+          {
+            gid: 's2',
+            created_at: '2026-07-25T10:00:00Z',
+            resource_subtype: 'section_changed',
+            created_by: { name: 'Matthew Fite' },
+            text: 'Matthew Fite moved this task from "Verification Lane" to "Done" in Software Board',
+          },
+        ],
+      },
+    });
+
+    await reporter.maybeSend();
+
+    const text = postMessage.mock.calls[0][0].text as string;
+    expect(text).toContain('❌ Engineering RCA — Eduardo Aranda');
+    expect(text).toContain('❌ QA RCA — <@U_MATT>');
   });
 });

@@ -12,6 +12,7 @@ import {
 } from '../board-config.js';
 import { parseSectionMove } from '../story-analyzer.js';
 import { hasTickedBox, hasWrittenContent } from './rca-template.js';
+import { resolveRcaOwners, type RcaOwners } from './rca-owners.js';
 import { logger } from '../../../logger.js';
 
 /**
@@ -51,8 +52,6 @@ const OPT_FIELDS_TASK = [
   'completed_at',
   'modified_at',
   'num_subtasks',
-  'assignee.name',
-  'assignee.email',
   'custom_fields.gid',
   'custom_fields.enum_value.gid',
   'custom_fields.enum_value.name',
@@ -61,8 +60,10 @@ const OPT_FIELDS_TASK = [
 
 const OPT_FIELDS_SUBTASK = 'name,completed,notes,permalink_url,attachments';
 
-/** Just enough to find the section move that landed a ticket in Done. */
-const OPT_FIELDS_STORY = 'created_at,resource_subtype,text';
+/** Enough to find the section move that landed a ticket in Done AND to attribute
+ *  each handoff. `created_by.name` is not optional here: without it every story
+ *  author is undefined and no RCA owner can ever be resolved. */
+const OPT_FIELDS_STORY = 'created_at,created_by.name,resource_subtype,text';
 
 /** The Done section's display name, as it appears in section-move story text. */
 const DONE_SECTION_NAME = 'Done';
@@ -234,8 +235,9 @@ export interface RcaDigestEntry {
   url: string;
   /** Type custom-field option name, or null when the ticket has no Type set. */
   type: string | null;
-  assigneeName: string | null;
-  assigneeEmail: string | null;
+  /** Who owes each half, read from the board history — NOT the ticket assignee,
+   *  which is whoever verified it last and so is always QA. */
+  owners: RcaOwners;
   /** When the ticket reached Done, ISO. */
   doneAt: string;
   /** True when `doneAt` is the last-modified fallback (the ticket sits in the
@@ -304,6 +306,8 @@ export interface RcaCandidate {
   subtasks: SubtaskLike[];
   /** The resolved done timestamp — exact where the board history allows. */
   doneAt: DoneAt;
+  /** Who owes each half of the analysis. */
+  owners: RcaOwners;
 }
 
 /** Assemble the payload from candidates already paired with their subtasks and a
@@ -317,7 +321,7 @@ export function computeRcaDigest(
   cutoffMs: number,
 ): RcaDigestPayload {
   const entries: RcaDigestEntry[] = [];
-  for (const { task, subtasks, doneAt: done } of candidates) {
+  for (const { task, subtasks, doneAt: done, owners } of candidates) {
     const { open: openRcas, done: doneRcas } = partitionRcaSubtasks(subtasks);
     if (openRcas.length === 0) continue;
     // Re-applied here and not only in the scan gate: the exact done timestamp is
@@ -328,8 +332,7 @@ export function computeRcaDigest(
       name: task.name,
       url: asanaTaskUrl(task.gid),
       type: typeNameOf(task),
-      assigneeName: task.assignee?.name ?? null,
-      assigneeEmail: task.assignee?.email ?? null,
+      owners,
       doneAt: done.at,
       doneAtApproximate: done.approximate,
       daysSinceDone: Math.max(0, Math.floor((now.getTime() - Date.parse(done.at)) / DAY_MS)),
@@ -357,13 +360,6 @@ function rcaLink(rca: RcaSubtask): string {
   return rca.url ? `<${rca.url}|${label}>` : label;
 }
 
-/** "a", "a and b", "a, b and c" — reads like a sentence, which is what the
- *  "what's missing" line is. */
-function joinNatural(parts: string[]): string {
-  if (parts.length <= 1) return parts[0] ?? '';
-  return `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
-}
-
 /** Deduplicate by rendered label — a ticket can carry both the legacy "Root
  *  Cause" subtask and the newer per-discipline pair. */
 function uniqueBy(rcas: RcaSubtask[], key: (r: RcaSubtask) => string): RcaSubtask[] {
@@ -383,7 +379,7 @@ function uniqueBy(rcas: RcaSubtask[], key: (r: RcaSubtask) => string): RcaSubtas
  */
 export function renderRcaDigest(
   payload: RcaDigestPayload,
-  mentionFor: (entry: RcaDigestEntry) => string | null,
+  mentionFor: (personName: string) => string,
 ): string | null {
   const { entries } = payload;
   if (entries.length === 0) return null;
@@ -392,29 +388,27 @@ export function renderRcaDigest(
   const noun = entries.length === 1 ? 'bug was' : 'bugs were';
   lines.push(`🔍 *RCA follow-ups* — ${entries.length} ${noun} closed without a root cause analysis`);
   lines.push(
-    '*Please fill in the missing RCA as soon as you can* — each one below links straight to the subtask.',
+    '*Please fill in the missing RCA as soon as you can* — each one links straight to the subtask.',
   );
   lines.push('');
 
   for (const e of entries.slice(0, MAX_RENDERED)) {
     const meta = [e.type, ageLabel(e)].filter(Boolean).join(' · ');
-    // Labelled, because the assignee on a bug ticket is often whoever filed or
-    // verified it rather than whoever owes the engineering half of the analysis.
-    const who = mentionFor(e);
-    lines.push(`• <${e.url}|${slackEscape(e.name)}> — ${meta}${who ? ` · assignee: ${who}` : ''}`);
+    lines.push(`• <${e.url}|${slackEscape(e.name)}> — ${meta}`);
 
-    // Name the missing half explicitly. "Engineering RCA and QA RCA" tells the
-    // reader whose turn it is; "open: Root Cause" did not.
-    const missing = uniqueBy(e.openRcas, rcaLabel);
-    lines.push(`    ↳ missing: ${joinNatural(missing.map(rcaLink))}`);
+    // One line per missing half, each naming WHO owes it: the dev who wrote the
+    // code owes the engineering half, the QA who signed it off owes theirs.
+    for (const rca of uniqueBy(e.openRcas, rcaLabel)) {
+      const owner = ownerFor(rca, e.owners);
+      lines.push(`    ❌ ${rcaLink(rca)}${owner ? ` — ${mentionFor(owner)}` : ''}`);
+    }
 
     // Credit whatever is already in, so a half-done ticket does not read as if
     // nobody has written anything.
-    const alreadyDone = uniqueBy(e.doneRcas, rcaLabel).filter(
-      (d) => !missing.some((m) => rcaLabel(m) === rcaLabel(d)),
-    );
-    if (alreadyDone.length > 0) {
-      lines.push(`       ✅ already done: ${joinNatural(alreadyDone.map((d) => slackEscape(rcaLabel(d))))}`);
+    const missingLabels = new Set(e.openRcas.map(rcaLabel));
+    const alreadyDone = uniqueBy(e.doneRcas, rcaLabel).filter((d) => !missingLabels.has(rcaLabel(d)));
+    for (const d of alreadyDone) {
+      lines.push(`    ✅ ${slackEscape(rcaLabel(d))} — done`);
     }
   }
 
@@ -422,6 +416,14 @@ export function renderRcaDigest(
     lines.push(`• _…and ${entries.length - MAX_RENDERED} more._`);
   }
   return lines.join('\n');
+}
+
+/** Who owes this half. The legacy undifferentiated subtask names no discipline,
+ *  so nobody is named for it rather than guessing at the wrong person. */
+function ownerFor(rca: RcaSubtask, owners: RcaOwners): string | null {
+  if (rca.kind === 'engineering') return owners.dev;
+  if (rca.kind === 'qa') return owners.qa;
+  return null;
 }
 
 /** Slack link labels break on raw `<`, `>` and `&`. */
@@ -443,9 +445,10 @@ export interface RcaDigestDeps {
    *  no matter how wide the rolling window is. This is what keeps the rollout
    *  from opening with a wall of historical backlog. */
   startAtMs?: number;
-  /** Asana assignee email → Slack user id, for @-mentions. Optional: without it
-   *  the digest falls back to the assignee's Asana display name. */
-  resolveSlackIdsByEmail?: () => Promise<Map<string, string>>;
+  /** Asana display name → Slack user id, for @-mentions. Owners come out of the
+   *  board history as names (Asana story text carries no email), so the mapping
+   *  is by name. Anyone unmapped is rendered as their plain Asana name. */
+  resolveSlackIdsByName?: () => Promise<Map<string, string>>;
   now?: () => Date;
 }
 
@@ -474,10 +477,9 @@ export class RcaDigestReporter {
 
     const payload = await this.collect(slotKey, now);
     const mentions = await this.mentionMap();
-    const text = renderRcaDigest(payload, (e) => {
-      const slackId = e.assigneeEmail ? mentions.get(e.assigneeEmail.toLowerCase()) : undefined;
-      if (slackId) return `<@${slackId}>`;
-      return e.assigneeName;
+    const text = renderRcaDigest(payload, (name) => {
+      const slackId = mentions.get(name.trim().toLowerCase());
+      return slackId ? `<@${slackId}>` : name;
     });
 
     if (text) {
@@ -524,11 +526,16 @@ export class RcaDigestReporter {
     );
     const candidates = tasks.filter((t) => this.isCandidate(t, cutoff));
     const paired = await mapWithConcurrency(candidates, SUBTASK_CONCURRENCY, async (task) => {
-      const [subtasks, doneAt] = await Promise.all([
+      const [subtasks, stories] = await Promise.all([
         this.subtasksOf(task),
-        this.resolveDoneAt(task),
+        this.storiesOf(task),
       ]);
-      return { task, subtasks, doneAt };
+      return {
+        task,
+        subtasks,
+        doneAt: this.resolveDoneAt(task, stories),
+        owners: resolveRcaOwners(stories),
+      };
     });
     return computeRcaDigest(slotKey, tasks.length, paired, now, cutoff);
   }
@@ -564,32 +571,36 @@ export class RcaDigestReporter {
     return subtasks;
   }
 
-  /**
-   * Pin down when the ticket actually reached Done. `completed_at` is exact and
-   * needs no extra call. For a ticket parked in the Done section WITHOUT the
-   * completion checkbox, the cheap stand-in is `modified_at` — which dates the
-   * ticket by its last edit, so a long-parked ticket someone merely touched this
-   * morning would clear a same-day cutoff. Those tickets get a stories read and
-   * the real "moved … to Done" timestamp.
-   */
-  private async resolveDoneAt(task: AsanaTask): Promise<DoneAt> {
-    const cheap = doneTimestamp(task)!; // isCandidate already rejected the null case
-    if (!cheap.approximate) return cheap;
+  /** The ticket's full story history — one read that serves both the done
+   *  timestamp and the dev/QA owner resolution. */
+  private async storiesOf(task: AsanaTask): Promise<AsanaStory[]> {
     try {
-      const stories = await this.deps.client.getTaskStories(task.gid, OPT_FIELDS_STORY);
-      const movedAt = lastMoveToDoneAt(stories);
-      if (movedAt) return { at: movedAt, approximate: false };
+      return await this.deps.client.getTaskStories(task.gid, OPT_FIELDS_STORY);
     } catch (err) {
       logger.warn(
         { taskGid: task.gid, err: err instanceof Error ? err.message : String(err) },
         'rca_digest_story_fetch_failed',
       );
+      return [];
     }
-    return cheap;
   }
 
-  /** Closed-bug gate. Cheap and I/O-free, so the expensive subtask fan-out only
-   *  runs over tickets that could possibly owe an RCA. */
+  /**
+   * Pin down when the ticket actually reached Done. `completed_at` is exact. For
+   * a ticket parked in the Done section WITHOUT the completion checkbox, the
+   * cheap stand-in is `modified_at` — which dates the ticket by its last edit, so
+   * a long-parked ticket someone merely touched this morning would clear a
+   * same-day cutoff. Those use the real "moved … to Done" story instead.
+   */
+  private resolveDoneAt(task: AsanaTask, stories: AsanaStory[]): DoneAt {
+    const cheap = doneTimestamp(task)!; // isCandidate already rejected the null case
+    if (!cheap.approximate) return cheap;
+    const movedAt = lastMoveToDoneAt(stories);
+    return movedAt ? { at: movedAt, approximate: false } : cheap;
+  }
+
+  /** Closed-bug gate. Cheap and I/O-free, so the expensive per-ticket fan-out
+   *  only runs over tickets that could possibly owe an RCA. */
   private isCandidate(task: AsanaTask, cutoffMs: number): boolean {
     if (isFeatureTemplateTask(task)) return false;
     if (!task.completed && !isInDone(task)) return false;
@@ -602,9 +613,9 @@ export class RcaDigestReporter {
   }
 
   private async mentionMap(): Promise<Map<string, string>> {
-    if (!this.deps.resolveSlackIdsByEmail) return new Map();
+    if (!this.deps.resolveSlackIdsByName) return new Map();
     try {
-      return await this.deps.resolveSlackIdsByEmail();
+      return await this.deps.resolveSlackIdsByName();
     } catch (err) {
       logger.warn(
         { err: err instanceof Error ? err.message : String(err) },

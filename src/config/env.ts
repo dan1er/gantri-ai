@@ -27,6 +27,11 @@ const envSchema = z.object({
   // How far back the RCA digest looks. Bugs closed longer ago than this drop off
   // the list instead of being nagged about forever.
   RCA_LOOKBACK_DAYS: z.coerce.number().int().positive().default(30),
+  // Hard floor for the RCA digest: bugs that reached Done before this instant are
+  // never listed, whatever the rolling window says. Defaults to the rollout —
+  // 2026-07-28 08:00 America/New_York — so the feature starts from the day it
+  // shipped instead of opening with a wall of historical backlog.
+  RCA_START_AT: z.string().datetime({ offset: true }).default('2026-07-28T08:00:00-04:00'),
   // Comma-separated Slack user IDs allowed to drive /preview and /deploy from
   // their DM with the bot (in addition to the ops channel). Empty = ops only.
   DEVOPS_DM_USER_IDS: z.string().optional(),

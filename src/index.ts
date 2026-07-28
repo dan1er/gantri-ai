@@ -893,6 +893,10 @@ async function main() {
   // no LLM, only Asana plus a channel to post to.
   let rcaRunner: RcaDigestRunner | undefined;
   const rcaChannelId = env.RCA_DIGEST_CHANNEL_ID ?? env.SOFTWARE_CHANNEL_ID;
+  const rcaStartAtMs = Date.parse(env.RCA_START_AT);
+  if (Number.isNaN(rcaStartAtMs)) {
+    throw new Error(`RCA_START_AT is not a valid datetime: ${env.RCA_START_AT}`);
+  }
   if (asanaClient && rcaChannelId) {
     const rcaReporter = new RcaDigestReporter({
       client: asanaClient,
@@ -900,6 +904,7 @@ async function main() {
       slack: app.client,
       channelId: rcaChannelId,
       lookbackDays: env.RCA_LOOKBACK_DAYS,
+      startAtMs: rcaStartAtMs,
       // Asana assignee email → Slack id, so the digest @-mentions the owner when
       // we know them and falls back to their Asana name when we don't.
       resolveSlackIdsByEmail: async () => {

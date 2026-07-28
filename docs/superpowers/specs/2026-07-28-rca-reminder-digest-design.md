@@ -130,19 +130,56 @@ safe to pre-filter the board scan with before spending a stories read.
 ## Output
 
 ```
-🔍 *RCA follow-ups* — 1 bug was closed without a root cause analysis
-*Please fill in the missing RCA as soon as you can* — each one below links straight to the subtask.
+🔍 *RCA follow-ups* — 2 bugs were closed without a root cause analysis
+*Please fill in the missing RCA as soon as you can* — each one links straight to the subtask.
 
-• <asana|Bug: Regression: Regular Products Incorrectly Displayed as Preorders…> — Regression · in Done today · assignee: @matt
-    ↳ missing: <asana|Engineering RCA> and <asana|QA RCA>
-       ✅ already done: Root Cause
+• <asana|Hot-Fix: Unable to process a return due to tracking number issue> — Hotfix · closed 5d ago
+    ❌ <asana|Engineering RCA> — Eduardo Aranda
+    ❌ <asana|QA RCA> — @matt
+    ✅ Root Cause Analysis — done
 ```
 
-Each missing half is **named** (`Engineering RCA` / `QA RCA`) rather than shown
-as its raw subtask name, and **links directly to the subtask** so nobody has to
-hunt for it inside the ticket. Whatever is already written gets credited, so a
-half-done ticket does not read as if nobody wrote anything. The legacy
-undifferentiated subtask keeps its own board name, since it names no discipline.
+One line per missing half, each **named** (`Engineering RCA` / `QA RCA`) rather
+than shown as its raw subtask name, **linked straight to the subtask**, and
+attributed to **whoever owes that half**. Whatever is already written is
+credited, so a half-done ticket does not read as if nobody wrote anything. The
+legacy undifferentiated subtask keeps its own board name and gets no owner —
+it names no discipline, so guessing would point at the wrong person.
+
+### Who owes each half
+
+Not the ticket assignee. A bug is reassigned all the way down the chain as it
+moves — on one real ticket: Francisco → Eduardo → Josh → Matt — so the FINAL
+assignee is whoever verified it, i.e. QA, every time. Naming them next to a
+missing Engineering RCA points at the wrong person. The RCA subtasks themselves
+carry no assignee at all.
+
+The board history answers it unambiguously:
+
+| Owner | Read from |
+|---|---|
+| **dev** | whoever last moved the ticket INTO Code Review (falls back to whoever moved it out of In Progress / Rework) |
+| **QA** | whoever last moved it OUT of a verification stage into Done / Ready To Deploy |
+
+Section moves are used rather than the `assigned` stories because assignment text
+is not machine-readable — Asana renders self-assignment as "assigned to you",
+where "you" is the PAT owner, not the actual person.
+
+Details that matter:
+- Verification stages are matched on the section NAME (`/\bqa\b|verification|post
+  release/i`), not a gid list. The delivery-tier rollout added a
+  "🔴 Verification Lane" that no constant knows about.
+- Asana's own automation moves tickets too; "Asana" is never named as an owner.
+- The LAST qualifying mover wins, so when a ticket bounces back for rework the
+  person who actually finished it owes the write-up.
+- A ticket that went straight to Done by one person gets no QA owner — the dev is
+  not credited as their own reviewer.
+- Either owner can be null. A bug filed directly into Done has no handoffs to
+  read, and naming nobody beats naming the wrong person.
+
+The owner is @-mentioned when their Asana display name matches an
+`authorized_users` row, and rendered as a plain name otherwise (the board history
+names people, it does not email them).
 
 Oldest closure first — the ticket that has gone unanalysed longest is the one
 most likely to be forgotten. Capped at 20 rendered tickets with a `+N more` tail.

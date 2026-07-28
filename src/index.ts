@@ -905,15 +905,16 @@ async function main() {
       channelId: rcaChannelId,
       lookbackDays: env.RCA_LOOKBACK_DAYS,
       startAtMs: rcaStartAtMs,
-      // Asana assignee email → Slack id, so the digest @-mentions the owner when
-      // we know them and falls back to their Asana name when we don't.
-      resolveSlackIdsByEmail: async () => {
+      // Asana display name → Slack id, so the digest @-mentions each RCA's owner
+      // when we know them and falls back to their Asana name when we don't. Keyed
+      // by name because the board history names people, it does not email them.
+      resolveSlackIdsByName: async () => {
         const users = await usersRepo.listAll();
-        const byEmail = new Map<string, string>();
+        const byName = new Map<string, string>();
         for (const u of users) {
-          if (u.email) byEmail.set(u.email.toLowerCase(), u.slackUserId);
+          if (u.name) byName.set(u.name.trim().toLowerCase(), u.slackUserId);
         }
-        return byEmail;
+        return byName;
       },
     });
     rcaRunner = new RcaDigestRunner({ reporter: rcaReporter });

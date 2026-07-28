@@ -208,23 +208,19 @@ export function rcaKind(name: string): RcaKind {
   return 'general';
 }
 
-/** Split a task's RCA subtasks into not-yet-written and already-written, in board
- *  order. Both halves matter to the message: the empty ones are the ask, and the
- *  filled ones let it say "the other half is already in" instead of implying
- *  nothing has been written. */
-export function partitionRcaSubtasks(subtasks: SubtaskLike[]): {
-  open: RcaSubtask[];
-  done: RcaSubtask[];
-} {
+/** A task's RCA subtasks that nobody has written yet, in board order. Empty when
+ *  the task has no RCA subtasks at all, or when every one of them is filled in.
+ *  The filled ones are not carried anywhere: the message asks for what is
+ *  missing and says nothing about what is already done. */
+export function openRcaSubtasks(subtasks: SubtaskLike[]): RcaSubtask[] {
   const open: RcaSubtask[] = [];
-  const done: RcaSubtask[] = [];
   for (const s of subtasks) {
     const name = (s.name ?? '').trim();
     if (!isRcaName(name)) continue;
-    const rca: RcaSubtask = { name, kind: rcaKind(name), url: s.permalink_url ?? null };
-    (isRcaFilledIn(s) ? done : open).push(rca);
+    if (isRcaFilledIn(s)) continue;
+    open.push({ name, kind: rcaKind(name), url: s.permalink_url ?? null });
   }
-  return { open, done };
+  return open;
 }
 
 // --- Digest computation (pure) ----------------------------------------------
@@ -244,11 +240,8 @@ export interface RcaDigestEntry {
    *  Done section but nobody ticked the completion checkbox). */
   doneAtApproximate: boolean;
   daysSinceDone: number;
-  /** RCA subtasks still unchecked — the ask. */
+  /** RCA subtasks nobody has written yet — the ask. */
   openRcas: RcaSubtask[];
-  /** RCA subtasks already filled in, so the message can credit the half that is
-   *  done instead of implying the whole analysis is missing. */
-  doneRcas: RcaSubtask[];
 }
 
 export interface RcaDigestPayload {
@@ -322,7 +315,7 @@ export function computeRcaDigest(
 ): RcaDigestPayload {
   const entries: RcaDigestEntry[] = [];
   for (const { task, subtasks, doneAt: done, owners } of candidates) {
-    const { open: openRcas, done: doneRcas } = partitionRcaSubtasks(subtasks);
+    const openRcas = openRcaSubtasks(subtasks);
     if (openRcas.length === 0) continue;
     // Re-applied here and not only in the scan gate: the exact done timestamp is
     // resolved AFTER the cheap pre-filter, and it can only move earlier.
@@ -337,7 +330,6 @@ export function computeRcaDigest(
       doneAtApproximate: done.approximate,
       daysSinceDone: Math.max(0, Math.floor((now.getTime() - Date.parse(done.at)) / DAY_MS)),
       openRcas,
-      doneRcas,
     });
   }
   // Oldest first: the ticket that has been sitting unanalysed the longest is the
@@ -401,14 +393,6 @@ export function renderRcaDigest(
     for (const rca of uniqueBy(e.openRcas, rcaLabel)) {
       const owner = ownerFor(rca, e.owners);
       lines.push(`    ❌ ${rcaLink(rca)}${owner ? ` — ${mentionFor(owner)}` : ''}`);
-    }
-
-    // Credit whatever is already in, so a half-done ticket does not read as if
-    // nobody has written anything.
-    const missingLabels = new Set(e.openRcas.map(rcaLabel));
-    const alreadyDone = uniqueBy(e.doneRcas, rcaLabel).filter((d) => !missingLabels.has(rcaLabel(d)));
-    for (const d of alreadyDone) {
-      lines.push(`    ✅ ${slackEscape(rcaLabel(d))} — done`);
     }
   }
 

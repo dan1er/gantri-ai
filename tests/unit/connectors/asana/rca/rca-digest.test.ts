@@ -5,7 +5,7 @@ import {
   computeRcaDigest,
   dueSlotKey,
   lastMoveToDoneAt,
-  partitionRcaSubtasks,
+  openRcaSubtasks,
   rcaKind,
   renderRcaDigest,
   type RcaDigestEntry,
@@ -92,9 +92,9 @@ describe('isBugTask', () => {
   });
 });
 
-describe('partitionRcaSubtasks', () => {
+describe('openRcaSubtasks', () => {
   it('matches every spelling the board has used', () => {
-    const { open } = partitionRcaSubtasks([
+    const open = openRcaSubtasks([
       { name: 'Engineering Escape RCA', completed: false },
       { name: 'QA Escape RCA', completed: false },
       { name: 'Root cause analysis', completed: false },
@@ -103,35 +103,35 @@ describe('partitionRcaSubtasks', () => {
     expect(open.map((o) => o.kind)).toEqual(['engineering', 'qa', 'general', 'general']);
   });
 
-  it('ignores unrelated subtasks and files completed ones under done', () => {
-    const { open, done } = partitionRcaSubtasks([
-      { name: 'Engineering Escape RCA', completed: true },
-      { name: 'QA Escape RCA', completed: true },
-      { name: 'Notes for QA', completed: false },
-      { name: 'Deploy to staging', completed: false },
-    ]);
-    expect(open).toEqual([]);
-    expect(done.map((d) => d.kind)).toEqual(['engineering', 'qa']);
+  it('ignores unrelated subtasks and anything already filled in', () => {
+    expect(
+      openRcaSubtasks([
+        { name: 'Engineering Escape RCA', completed: true },
+        { name: 'QA Escape RCA', completed: true },
+        { name: 'Notes for QA', completed: false },
+        { name: 'Deploy to staging', completed: false },
+      ]),
+    ).toEqual([]);
   });
 
-  it('separates the half that is open from the half that is done', () => {
-    const { open, done } = partitionRcaSubtasks([
-      { name: 'Engineering Escape RCA', completed: true },
-      { name: 'QA Escape RCA', completed: false },
-    ]);
-    expect(open).toEqual([{ name: 'QA Escape RCA', kind: 'qa', url: null }]);
-    expect(done.map((d) => d.name)).toEqual(['Engineering Escape RCA']);
+  it('returns only the half that is still open', () => {
+    expect(
+      openRcaSubtasks([
+        { name: 'Engineering Escape RCA', completed: true },
+        { name: 'QA Escape RCA', completed: false },
+      ]),
+    ).toEqual([{ name: 'QA Escape RCA', kind: 'qa', url: null }]);
   });
 
   it('carries the subtask permalink through', () => {
-    const { open } = partitionRcaSubtasks([
+    const open = openRcaSubtasks([
       { name: 'QA Escape RCA', completed: false, permalink_url: 'https://app.asana.com/1/w/task/9' },
     ]);
     expect(open[0].url).toBe('https://app.asana.com/1/w/task/9');
   });
 
   it('trims the stray whitespace real subtask names carry', () => {
-    expect(partitionRcaSubtasks([{ name: 'Root cause analysis ', completed: false }]).open[0].name).toBe(
+    expect(openRcaSubtasks([{ name: 'Root cause analysis ', completed: false }])[0].name).toBe(
       'Root cause analysis',
     );
   });
@@ -298,7 +298,6 @@ describe('renderRcaDigest', () => {
     doneAtApproximate: o.doneAtApproximate ?? false,
     daysSinceDone: o.daysSinceDone ?? 3,
     openRcas: o.openRcas ?? [rca('Engineering Escape RCA')],
-    doneRcas: o.doneRcas ?? [],
   });
 
   it('returns null when nothing is outstanding', () => {
@@ -373,29 +372,13 @@ describe('renderRcaDigest', () => {
     expect(text).toContain('❌ <https://app.asana.com/1/w/task/22|QA RCA>');
   });
 
-  it('credits the half that is already filled in', () => {
+  it('says nothing about the halves that are already done', () => {
     const text = renderRcaDigest(
-      {
-        slotKey: 's',
-        entries: [entry({ openRcas: [rca('QA Escape RCA')], doneRcas: [rca('Engineering Escape RCA')] })],
-        scanned: 1,
-      },
+      { slotKey: 's', entries: [entry({ openRcas: [rca('QA Escape RCA')] })], scanned: 1 },
       (n) => n,
     )!;
     expect(text).toContain('❌ QA RCA');
-    expect(text).toContain('✅ Engineering RCA — done');
-  });
-
-  it('omits the already-done line when the same half is also open', () => {
-    const text = renderRcaDigest(
-      {
-        slotKey: 's',
-        entries: [entry({ openRcas: [rca('QA Escape RCA')], doneRcas: [rca('QA Escape RCA')] })],
-        scanned: 1,
-      },
-      (n) => n,
-    )!;
-    expect(text).toContain('❌ QA RCA');
+    // The digest is a list of what is outstanding, not a status report.
     expect(text).not.toContain('✅');
   });
 

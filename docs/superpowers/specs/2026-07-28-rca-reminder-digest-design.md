@@ -136,15 +136,17 @@ safe to pre-filter the board scan with before spending a stories read.
 • <asana|Hot-Fix: Unable to process a return due to tracking number issue> — Hotfix · closed 5d ago
     ❌ <asana|Engineering RCA> — Eduardo Aranda
     ❌ <asana|QA RCA> — @matt
-    ✅ Root Cause Analysis — done
 ```
 
 One line per missing half, each **named** (`Engineering RCA` / `QA RCA`) rather
 than shown as its raw subtask name, **linked straight to the subtask**, and
-attributed to **whoever owes that half**. Whatever is already written is
-credited, so a half-done ticket does not read as if nobody wrote anything. The
-legacy undifferentiated subtask keeps its own board name and gets no owner —
-it names no discipline, so guessing would point at the wrong person.
+attributed to **whoever owes that half**. The legacy undifferentiated subtask
+keeps its own board name and gets no owner — it names no discipline, so guessing
+would point at the wrong person.
+
+Nothing is said about the halves that are already written. The digest is a list
+of what is outstanding, not a status report — a ✅ line per finished RCA is
+noise on a message whose whole job is the ask.
 
 ### Who owes each half
 

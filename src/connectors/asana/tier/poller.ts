@@ -16,6 +16,7 @@ import { decideTier, DOMAIN_BASE_TIER } from './decide.js';
 import { renderTierComment } from './comment.js';
 import type { AuthoritativePass, AuthoritativeResult } from './authoritative-pass.js';
 import type { RubricSource, Rubric } from './rubric-source.js';
+import { mapWithConcurrency } from '../concurrency.js';
 import { logger } from '../../../logger.js';
 
 /**
@@ -506,17 +507,3 @@ const FALLBACK_RUBRIC: Rubric = { promptText: '', version: 0, tableMap: DOMAIN_B
 
 /** Re-export so the poll runner can type a record without a deep import. */
 export type { TierClassificationRecord };
-
-/** Run `fn` over `items` with at most `limit` in flight. */
-async function mapWithConcurrency<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
-  let next = 0;
-  const workerCount = Math.min(limit, items.length);
-  const workers = Array.from({ length: workerCount }, async () => {
-    for (;;) {
-      const i = next++;
-      if (i >= items.length) break;
-      await fn(items[i]);
-    }
-  });
-  await Promise.all(workers);
-}

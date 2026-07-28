@@ -20,6 +20,13 @@ const envSchema = z.object({
   // posts a review request here so reviewers get pinged with context. Optional —
   // unset disables the feature (one boot-time warn).
   SOFTWARE_CHANNEL_ID: z.string().optional(),
+  // Channel for the twice-daily RCA reminder digest (closed bugs whose
+  // root-cause-analysis subtasks are still unchecked). Defaults to
+  // SOFTWARE_CHANNEL_ID; set only to post it somewhere else.
+  RCA_DIGEST_CHANNEL_ID: z.string().optional(),
+  // How far back the RCA digest looks. Bugs closed longer ago than this drop off
+  // the list instead of being nagged about forever.
+  RCA_LOOKBACK_DAYS: z.coerce.number().int().positive().default(30),
   // Comma-separated Slack user IDs allowed to drive /preview and /deploy from
   // their DM with the bot (in addition to the ops channel). Empty = ops only.
   DEVOPS_DM_USER_IDS: z.string().optional(),

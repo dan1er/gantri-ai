@@ -61,8 +61,16 @@ export interface AsanaTask {
   created_at?: string;
   modified_at?: string;
   permalink_url?: string;
+  /** Set when the task is complete — populated when opt_fields includes
+   *  `completed_at`. Null on tasks that were never checked off. */
+  completed_at?: string | null;
+  /** Subtask count — populated when opt_fields includes `num_subtasks`. Lets a
+   *  batch job skip the per-task subtask read when there is nothing to read. */
+  num_subtasks?: number;
   /** Task description — populated when opt_fields includes `notes`. */
   notes?: string;
+  /** Populated when opt_fields includes `assignee.name` / `assignee.email`. */
+  assignee?: AsanaUser | null;
   custom_fields?: AsanaCustomFieldValue[];
   /** Only populated for subtasks (opt_fields includes created_by.name). */
   created_by?: AsanaStoryUser | null;

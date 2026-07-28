@@ -67,6 +67,9 @@ import { ReviewRequestNotifier } from './connectors/asana/tier/review-request.js
 import { TierClassificationsRepo } from './storage/repositories/tier-classifications.js';
 import { TierWeeklyReportsRepo } from './storage/repositories/tier-weekly-reports.js';
 import { TierPrChecksRepo } from './storage/repositories/tier-pr-checks.js';
+import { RcaDigestReporter } from './connectors/asana/rca/rca-digest.js';
+import { RcaDigestRunner } from './connectors/asana/rca/rca-runner.js';
+import { RcaDigestsRepo } from './storage/repositories/rca-digests.js';
 import { SendgridConnector } from './connectors/sendgrid/connector.js';
 import { SendgridApiClient } from './connectors/sendgrid/client.js';
 import { buildSearchConsoleConnector } from './connectors/gsc/connector.js';
@@ -884,6 +887,46 @@ async function main() {
     });
   }
 
+  // RCA reminder digest. Posts the list of closed bugs whose root-cause-analysis
+  // subtasks are still unchecked to the software channel at 08:00 and 16:00 ET.
+  // Independent of the tier classifier — it needs no prompt, no GitHub token and
+  // no LLM, only Asana plus a channel to post to.
+  let rcaRunner: RcaDigestRunner | undefined;
+  const rcaChannelId = env.RCA_DIGEST_CHANNEL_ID ?? env.SOFTWARE_CHANNEL_ID;
+  if (asanaClient && rcaChannelId) {
+    const rcaReporter = new RcaDigestReporter({
+      client: asanaClient,
+      repo: new RcaDigestsRepo(supabase),
+      slack: app.client,
+      channelId: rcaChannelId,
+      lookbackDays: env.RCA_LOOKBACK_DAYS,
+      // Asana assignee email → Slack id, so the digest @-mentions the owner when
+      // we know them and falls back to their Asana name when we don't.
+      resolveSlackIdsByEmail: async () => {
+        const users = await usersRepo.listAll();
+        const byEmail = new Map<string, string>();
+        for (const u of users) {
+          if (u.email) byEmail.set(u.email.toLowerCase(), u.slackUserId);
+        }
+        return byEmail;
+      },
+    });
+    rcaRunner = new RcaDigestRunner({ reporter: rcaReporter });
+
+    // Forces a digest attempt for smoke tests. Honours the same idempotency
+    // ledger, so a slot already delivered stays delivered.
+    receiver.router.post('/internal/run-rca-digest', async (req, res) => {
+      const auth = req.header('x-internal-secret');
+      if (!process.env.INTERNAL_SHARED_SECRET || auth !== process.env.INTERNAL_SHARED_SECRET) {
+        return res.status(403).json({ ok: false, error: 'forbidden' });
+      }
+      const result = await rcaRunner!.tick();
+      res.json({ ok: true, result });
+    });
+  } else if (asanaClient) {
+    logger.warn('rca digest disabled — set SOFTWARE_CHANNEL_ID (or RCA_DIGEST_CHANNEL_ID)');
+  }
+
   // POST /internal/recompile-report — admin-only endpoint to recompile a report spec.
   // Body: { slug: string; intent: string; actorSlackId?: string }
   // Header: x-internal-secret
@@ -933,6 +976,14 @@ async function main() {
     // is actually running — this is the exact signal the deploy canary watches.
     moduleStatus.tier = tierPromptVersion!;
     logger.info('delivery tier runner started');
+  }
+
+  if (rcaRunner) {
+    rcaRunner.start();
+    // Same clobber tripwire as `tier`: report the module only once its runner is
+    // actually running, so /internal/build reflects what got wired, not what the
+    // code contains.
+    moduleStatus.rcaDigest = true;
   }
 
   if (devopsEnabled && gh) {

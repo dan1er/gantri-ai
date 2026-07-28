@@ -46,6 +46,44 @@ export const TYPE_ESCAPES_OPTION_GID = '1216455780657179';
  *  Matched case-insensitively against the Type enum option's display name. */
 export const TIER_EXCLUDED_TYPE_NAMES: readonly string[] = ['Not a Bug', 'Qa Work', 'Research'];
 
+/** Type enum options that mean "this ticket is a defect" — the ones that owe a
+ *  root-cause analysis once they close. `Hotfix (not really)` and
+ *  `Hotfix-Feature` are deliberately absent: both label fast-tracked feature
+ *  work, not a defect. Validated against the live board on 2026-07-28. */
+export const BUG_TYPE_OPTION_GIDS: readonly string[] = [
+  '1211288498996172', // P0
+  '1211288498996173', // Hotfix
+  '1211288498996176', // Bug
+  '1211288498996177', // Regression
+  TYPE_QA_ESCAPE_OPTION_GID,
+  TYPE_ESCAPES_OPTION_GID,
+];
+
+/** The `Not a Bug` Type option. Explicitly excluded even when the title reads
+ *  like a defect ("Not A Bug: Shippo Error …") — the field is the human verdict. */
+export const TYPE_NOT_A_BUG_OPTION_GID = '1211288498996178';
+
+/** Title shapes that read as a defect. Only consulted when the Type field is
+ *  EMPTY — a large share of the board's bugs are filed without a Type, and the
+ *  team's naming convention ("Bug: …", "Hot-Fix: …", "Regression: …") is the
+ *  only signal left. A set Type always wins over the title. */
+const BUG_TITLE_RE = /^\s*(bug|hot[\s-]?fix|regression|p0)\b/i;
+const NOT_A_BUG_TITLE_RE = /^\s*not[\s-]?a[\s-]?bug\b/i;
+
+/** True when a Software Board task is a defect that owes an RCA. Reads the Type
+ *  custom field first and falls back to the title convention only when Type is
+ *  unset. */
+export function isBugTask(task: {
+  name?: string;
+  custom_fields?: { gid: string; enum_value?: { gid: string } | null }[];
+}): boolean {
+  const optionGid = (task.custom_fields ?? []).find((f) => f.gid === TYPE_FIELD_GID)?.enum_value?.gid;
+  if (optionGid) return BUG_TYPE_OPTION_GIDS.includes(optionGid);
+  const name = task.name ?? '';
+  if (NOT_A_BUG_TITLE_RE.test(name)) return false;
+  return BUG_TITLE_RE.test(name);
+}
+
 /** Custom field "Delivery Tier" and its three enum options (T0/T1/T2). The
  *  delivery-tier auto-classifier writes one of these option gids to the field.
  *  Validated against the live board on 2026-07-14. */
@@ -137,6 +175,19 @@ export function isInCodeReview(task: {
   memberships?: { project?: { gid?: string } | null; section?: { gid?: string } | null }[];
 }): boolean {
   return (task.memberships ?? []).some((m) => m.section?.gid === CODE_REVIEW_SECTION_GID);
+}
+
+/** The board's terminal section. A ticket parked here has shipped, whether or
+ *  not anyone also ticked the Asana "complete" checkbox. */
+export const DONE_SECTION_GID = SECTION_GIDS.Done;
+
+/** True when a task currently sits in the board's Done section. Same membership
+ *  read as `isInCodeReview` (section gids are globally unique, so a task on
+ *  several boards cannot false-positive here). */
+export function isInDone(task: {
+  memberships?: { project?: { gid?: string } | null; section?: { gid?: string } | null }[];
+}): boolean {
+  return (task.memberships ?? []).some((m) => m.section?.gid === DONE_SECTION_GID);
 }
 
 /** The two sections that represent an active QA stage. A section move whose

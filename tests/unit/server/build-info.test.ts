@@ -46,6 +46,7 @@ describe('createModuleStatus / renderBuildInfo', () => {
       reports: true,
       devops: false,
       flcReview: false,
+      rcaDigest: false,
     });
   });
 
@@ -56,7 +57,7 @@ describe('createModuleStatus / renderBuildInfo', () => {
     expect(info).toEqual({
       sha: 's',
       builtAt: 'b',
-      modules: { tier: 3, productExport: false, reports: true, devops: false, flcReview: false },
+      modules: { tier: 3, productExport: false, reports: true, devops: false, flcReview: false, rcaDigest: false },
     });
   });
 
@@ -93,6 +94,7 @@ describe('GET /internal/build handler', () => {
       reports: true,
       devops: false,
       flcReview: false,
+      rcaDigest: false,
     });
   });
 

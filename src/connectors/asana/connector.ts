@@ -5,6 +5,7 @@ import { zodToJsonSchema } from '../base/zod-to-json-schema.js';
 import { DateRangeArg, normalizeDateRange } from '../base/date-range.js';
 import { logger } from '../../logger.js';
 import { AsanaApiClient } from './client.js';
+import { mapWithConcurrency } from './concurrency.js';
 import {
   BOARD_NAME,
   SOFTWARE_BOARD_PROJECT_GID,
@@ -411,20 +412,4 @@ export class AsanaConnector implements Connector {
 function rate(numerator: number, denominator: number): number {
   if (denominator === 0) return 0;
   return Math.round((numerator / denominator) * 1000) / 10;
-}
-
-/** Run `fn` over `items` with at most `limit` in flight, preserving order. */
-async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const results: R[] = new Array(items.length);
-  let next = 0;
-  const workerCount = Math.min(limit, items.length);
-  const workers = Array.from({ length: workerCount }, async () => {
-    for (;;) {
-      const i = next++;
-      if (i >= items.length) break;
-      results[i] = await fn(items[i]);
-    }
-  });
-  await Promise.all(workers);
-  return results;
 }

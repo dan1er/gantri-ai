@@ -32,6 +32,8 @@ export interface ModuleStatus {
   reports: boolean;
   devops: boolean;
   flcReview: boolean;
+  /** The twice-daily RCA reminder digest runner. */
+  rcaDigest: boolean;
 }
 
 export interface BuildInfo extends BuildStamp {
@@ -76,7 +78,14 @@ export function loadBuildStamp(explicitPath?: string): BuildStamp {
 
 /** Fresh module ledger: everything off except the always-on reports runner. */
 export function createModuleStatus(): ModuleStatus {
-  return { tier: false, productExport: false, reports: true, devops: false, flcReview: false };
+  return {
+    tier: false,
+    productExport: false,
+    reports: true,
+    devops: false,
+    flcReview: false,
+    rcaDigest: false,
+  };
 }
 
 /** Assemble the `/internal/build` payload from a stamp + the live module ledger. */

@@ -980,6 +980,10 @@ async function main() {
 
   if (rcaRunner) {
     rcaRunner.start();
+    // Same clobber tripwire as `tier`: report the module only once its runner is
+    // actually running, so /internal/build reflects what got wired, not what the
+    // code contains.
+    moduleStatus.rcaDigest = true;
   }
 
   if (devopsEnabled && gh) {

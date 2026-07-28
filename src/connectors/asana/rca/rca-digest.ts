@@ -11,6 +11,7 @@ import {
   isInDone,
 } from '../board-config.js';
 import { parseSectionMove } from '../story-analyzer.js';
+import { hasTickedBox, hasWrittenContent } from './rca-template.js';
 import { logger } from '../../../logger.js';
 
 /**
@@ -58,7 +59,7 @@ const OPT_FIELDS_TASK = [
   'memberships.section.gid',
 ].join(',');
 
-const OPT_FIELDS_SUBTASK = 'name,completed';
+const OPT_FIELDS_SUBTASK = 'name,completed,notes,permalink_url,attachments';
 
 /** Just enough to find the section move that landed a ticket in Done. */
 const OPT_FIELDS_STORY = 'created_at,resource_subtype,text';
@@ -122,10 +123,79 @@ const RCA_NAME_RE = /\brca\b|root\s*cause/i;
 
 export type RcaKind = 'engineering' | 'qa' | 'general';
 
-export interface OpenRca {
+/** One RCA subtask of a ticket, open or done. */
+export interface RcaSubtask {
   /** The subtask name as it reads on the board. */
   name: string;
   kind: RcaKind;
+  /** Direct Asana link to the subtask, so the message lands people on the exact
+   *  thing to fill in rather than on the parent ticket. */
+  url: string | null;
+}
+
+/** The shape the digest reads off an Asana subtask. */
+export interface SubtaskLike {
+  gid?: string;
+  name?: string;
+  completed?: boolean;
+  /** The analysis itself — this is where the team actually writes it. */
+  notes?: string;
+  permalink_url?: string;
+  attachments?: unknown[];
+  /** Set by the reporter for subtasks that look empty on the cheap fields: true
+   *  when a stories read found the analysis was written as a comment instead. */
+  hasComment?: boolean;
+}
+
+/** True when a subtask name is one of the RCA subtasks (any of the spellings). */
+export function isRcaName(name: string | undefined): boolean {
+  return RCA_NAME_RE.test(name ?? '');
+}
+
+/**
+ * Has this RCA actually been filled in?
+ *
+ * Neither "the box is ticked" nor "it has a description" answers this, and both
+ * are wrong in opposite directions. Measured against the live board on
+ * 2026-07-28: of 21 RCA subtasks on bugs closed in the previous 60 days, ZERO
+ * had the Asana completion checkbox ticked — so a checkbox rule flags every
+ * finished analysis as missing. Yet the `Engineering Escape RCA` / `QA Escape
+ * RCA` subtasks arrive carrying 1,300–1,900 characters of template scaffolding —
+ * so a "has text" rule clears every pristine one.
+ *
+ * What actually counts as work, any one of:
+ *   - the Asana completion checkbox ticked;
+ *   - a marked checklist box (`[x]`, `[X]`, `[+]`) — the template ships them all
+ *     blank, and this signal survives any rewording of the template;
+ *   - a line of text that is not template boilerplate — someone typed into the
+ *     blanks (this is how the legacy free-form "Root Cause" subtask is filled);
+ *   - an attachment (two real RCAs are just "See PDF below" plus the PDF);
+ *   - a comment — checked separately by the caller, because it costs a request.
+ *
+ * No quality bar. Grading an RCA by length would nag people who did the work,
+ * which is the exact failure this is meant to avoid.
+ */
+export function isRcaFilledIn(s: SubtaskLike): boolean {
+  if (s.completed) return true;
+  const notes = s.notes ?? '';
+  if (hasTickedBox(notes)) return true;
+  if (hasWrittenContent(notes)) return true;
+  if ((s.attachments ?? []).length > 0) return true;
+  return s.hasComment === true;
+}
+
+/** True when a task's story list contains at least one human comment. */
+export function hasComment(stories: AsanaStory[]): boolean {
+  return stories.some((s) => s.resource_subtype === 'comment_added');
+}
+
+/** How each half of the analysis is named in the message. The legacy single
+ *  subtask names neither discipline, so its own board name is the clearest
+ *  pointer we have. */
+export function rcaLabel(rca: RcaSubtask): string {
+  if (rca.kind === 'engineering') return 'Engineering RCA';
+  if (rca.kind === 'qa') return 'QA RCA';
+  return rca.name;
 }
 
 /** Classify an RCA subtask by which half of the analysis it covers. Anything
@@ -137,12 +207,23 @@ export function rcaKind(name: string): RcaKind {
   return 'general';
 }
 
-/** The unchecked RCA subtasks of a task, in board order. Empty when the task has
- *  no RCA subtasks at all, or when every one of them is already done. */
-export function openRcaSubtasks(subtasks: { name?: string; completed?: boolean }[]): OpenRca[] {
-  return subtasks
-    .filter((s) => RCA_NAME_RE.test(s.name ?? '') && !s.completed)
-    .map((s) => ({ name: (s.name ?? '').trim(), kind: rcaKind(s.name ?? '') }));
+/** Split a task's RCA subtasks into not-yet-written and already-written, in board
+ *  order. Both halves matter to the message: the empty ones are the ask, and the
+ *  filled ones let it say "the other half is already in" instead of implying
+ *  nothing has been written. */
+export function partitionRcaSubtasks(subtasks: SubtaskLike[]): {
+  open: RcaSubtask[];
+  done: RcaSubtask[];
+} {
+  const open: RcaSubtask[] = [];
+  const done: RcaSubtask[] = [];
+  for (const s of subtasks) {
+    const name = (s.name ?? '').trim();
+    if (!isRcaName(name)) continue;
+    const rca: RcaSubtask = { name, kind: rcaKind(name), url: s.permalink_url ?? null };
+    (isRcaFilledIn(s) ? done : open).push(rca);
+  }
+  return { open, done };
 }
 
 // --- Digest computation (pure) ----------------------------------------------
@@ -161,7 +242,11 @@ export interface RcaDigestEntry {
    *  Done section but nobody ticked the completion checkbox). */
   doneAtApproximate: boolean;
   daysSinceDone: number;
-  openRcas: OpenRca[];
+  /** RCA subtasks still unchecked — the ask. */
+  openRcas: RcaSubtask[];
+  /** RCA subtasks already filled in, so the message can credit the half that is
+   *  done instead of implying the whole analysis is missing. */
+  doneRcas: RcaSubtask[];
 }
 
 export interface RcaDigestPayload {
@@ -216,7 +301,7 @@ function typeNameOf(task: AsanaTask): string | null {
 
 export interface RcaCandidate {
   task: AsanaTask;
-  subtasks: { name?: string; completed?: boolean }[];
+  subtasks: SubtaskLike[];
   /** The resolved done timestamp — exact where the board history allows. */
   doneAt: DoneAt;
 }
@@ -233,7 +318,7 @@ export function computeRcaDigest(
 ): RcaDigestPayload {
   const entries: RcaDigestEntry[] = [];
   for (const { task, subtasks, doneAt: done } of candidates) {
-    const openRcas = openRcaSubtasks(subtasks);
+    const { open: openRcas, done: doneRcas } = partitionRcaSubtasks(subtasks);
     if (openRcas.length === 0) continue;
     // Re-applied here and not only in the scan gate: the exact done timestamp is
     // resolved AFTER the cheap pre-filter, and it can only move earlier.
@@ -249,6 +334,7 @@ export function computeRcaDigest(
       doneAtApproximate: done.approximate,
       daysSinceDone: Math.max(0, Math.floor((now.getTime() - Date.parse(done.at)) / DAY_MS)),
       openRcas,
+      doneRcas,
     });
   }
   // Oldest first: the ticket that has been sitting unanalysed the longest is the
@@ -265,8 +351,29 @@ function ageLabel(entry: RcaDigestEntry): string {
   return entry.doneAtApproximate ? `in Done ${d === 0 ? 'today' : `${d}d`}` : base;
 }
 
-function rcaLabel(rca: OpenRca): string {
-  return rca.name;
+/** Slack link to a subtask, or its bare label when Asana gave us no permalink. */
+function rcaLink(rca: RcaSubtask): string {
+  const label = slackEscape(rcaLabel(rca));
+  return rca.url ? `<${rca.url}|${label}>` : label;
+}
+
+/** "a", "a and b", "a, b and c" — reads like a sentence, which is what the
+ *  "what's missing" line is. */
+function joinNatural(parts: string[]): string {
+  if (parts.length <= 1) return parts[0] ?? '';
+  return `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
+}
+
+/** Deduplicate by rendered label — a ticket can carry both the legacy "Root
+ *  Cause" subtask and the newer per-discipline pair. */
+function uniqueBy(rcas: RcaSubtask[], key: (r: RcaSubtask) => string): RcaSubtask[] {
+  const seen = new Set<string>();
+  return rcas.filter((r) => {
+    const k = key(r);
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
 }
 
 /**
@@ -282,8 +389,11 @@ export function renderRcaDigest(
   if (entries.length === 0) return null;
 
   const lines: string[] = [];
-  const noun = entries.length === 1 ? 'bug' : 'bugs';
-  lines.push(`🔍 *RCA follow-ups* — ${entries.length} closed ${noun} still owe a root cause analysis`);
+  const noun = entries.length === 1 ? 'bug was' : 'bugs were';
+  lines.push(`🔍 *RCA follow-ups* — ${entries.length} ${noun} closed without a root cause analysis`);
+  lines.push(
+    '*Please fill in the missing RCA as soon as you can* — each one below links straight to the subtask.',
+  );
   lines.push('');
 
   for (const e of entries.slice(0, MAX_RENDERED)) {
@@ -292,7 +402,20 @@ export function renderRcaDigest(
     // verified it rather than whoever owes the engineering half of the analysis.
     const who = mentionFor(e);
     lines.push(`• <${e.url}|${slackEscape(e.name)}> — ${meta}${who ? ` · assignee: ${who}` : ''}`);
-    lines.push(`    ↳ open: ${e.openRcas.map(rcaLabel).join(', ')}`);
+
+    // Name the missing half explicitly. "Engineering RCA and QA RCA" tells the
+    // reader whose turn it is; "open: Root Cause" did not.
+    const missing = uniqueBy(e.openRcas, rcaLabel);
+    lines.push(`    ↳ missing: ${joinNatural(missing.map(rcaLink))}`);
+
+    // Credit whatever is already in, so a half-done ticket does not read as if
+    // nobody has written anything.
+    const alreadyDone = uniqueBy(e.doneRcas, rcaLabel).filter(
+      (d) => !missing.some((m) => rcaLabel(m) === rcaLabel(d)),
+    );
+    if (alreadyDone.length > 0) {
+      lines.push(`       ✅ already done: ${joinNatural(alreadyDone.map((d) => slackEscape(rcaLabel(d))))}`);
+    }
   }
 
   if (entries.length > MAX_RENDERED) {
@@ -410,9 +533,10 @@ export class RcaDigestReporter {
     return computeRcaDigest(slotKey, tasks.length, paired, now, cutoff);
   }
 
-  private async subtasksOf(task: AsanaTask): Promise<{ name?: string; completed?: boolean }[]> {
+  private async subtasksOf(task: AsanaTask): Promise<SubtaskLike[]> {
+    let subtasks: SubtaskLike[];
     try {
-      return await this.deps.client.getTaskSubtasks(task.gid, OPT_FIELDS_SUBTASK);
+      subtasks = await this.deps.client.getTaskSubtasks(task.gid, OPT_FIELDS_SUBTASK);
     } catch (err) {
       logger.warn(
         { taskGid: task.gid, err: err instanceof Error ? err.message : String(err) },
@@ -420,6 +544,24 @@ export class RcaDigestReporter {
       );
       return [];
     }
+    // Confirm before accusing: an RCA that looks empty on the cheap fields may
+    // still have been written as a comment. Only those get the extra read, so the
+    // cost is bounded by the number of tickets we are about to flag — and a
+    // failure here leaves the subtask flagged (the visible, correctable outcome)
+    // rather than silently clearing it.
+    const suspect = subtasks.filter((s) => isRcaName(s.name) && !isRcaFilledIn(s) && s.gid);
+    await mapWithConcurrency(suspect, SUBTASK_CONCURRENCY, async (s) => {
+      try {
+        const stories = await this.deps.client.getTaskStories(s.gid!, OPT_FIELDS_STORY);
+        s.hasComment = hasComment(stories);
+      } catch (err) {
+        logger.warn(
+          { subtaskGid: s.gid, err: err instanceof Error ? err.message : String(err) },
+          'rca_digest_subtask_stories_failed',
+        );
+      }
+    });
+    return subtasks;
   }
 
   /**

@@ -5,10 +5,11 @@ import {
   computeRcaDigest,
   dueSlotKey,
   lastMoveToDoneAt,
-  openRcaSubtasks,
+  partitionRcaSubtasks,
   rcaKind,
   renderRcaDigest,
   type RcaDigestEntry,
+  type RcaSubtask,
 } from '../../../../../src/connectors/asana/rca/rca-digest.js';
 import { isBugTask, SECTION_GIDS, TYPE_FIELD_GID } from '../../../../../src/connectors/asana/board-config.js';
 import type { AsanaApiClient, AsanaTask } from '../../../../../src/connectors/asana/client.js';
@@ -91,9 +92,9 @@ describe('isBugTask', () => {
   });
 });
 
-describe('openRcaSubtasks', () => {
+describe('partitionRcaSubtasks', () => {
   it('matches every spelling the board has used', () => {
-    const open = openRcaSubtasks([
+    const { open } = partitionRcaSubtasks([
       { name: 'Engineering Escape RCA', completed: false },
       { name: 'QA Escape RCA', completed: false },
       { name: 'Root cause analysis', completed: false },
@@ -102,27 +103,35 @@ describe('openRcaSubtasks', () => {
     expect(open.map((o) => o.kind)).toEqual(['engineering', 'qa', 'general', 'general']);
   });
 
-  it('ignores completed RCAs and unrelated subtasks', () => {
-    expect(
-      openRcaSubtasks([
-        { name: 'Engineering Escape RCA', completed: true },
-        { name: 'QA Escape RCA', completed: true },
-        { name: 'Notes for QA', completed: false },
-        { name: 'Deploy to staging', completed: false },
-      ]),
-    ).toEqual([]);
+  it('ignores unrelated subtasks and files completed ones under done', () => {
+    const { open, done } = partitionRcaSubtasks([
+      { name: 'Engineering Escape RCA', completed: true },
+      { name: 'QA Escape RCA', completed: true },
+      { name: 'Notes for QA', completed: false },
+      { name: 'Deploy to staging', completed: false },
+    ]);
+    expect(open).toEqual([]);
+    expect(done.map((d) => d.kind)).toEqual(['engineering', 'qa']);
   });
 
-  it('reports the half that is still open when only one is done', () => {
-    const open = openRcaSubtasks([
+  it('separates the half that is open from the half that is done', () => {
+    const { open, done } = partitionRcaSubtasks([
       { name: 'Engineering Escape RCA', completed: true },
       { name: 'QA Escape RCA', completed: false },
     ]);
-    expect(open).toEqual([{ name: 'QA Escape RCA', kind: 'qa' }]);
+    expect(open).toEqual([{ name: 'QA Escape RCA', kind: 'qa', url: null }]);
+    expect(done.map((d) => d.name)).toEqual(['Engineering Escape RCA']);
+  });
+
+  it('carries the subtask permalink through', () => {
+    const { open } = partitionRcaSubtasks([
+      { name: 'QA Escape RCA', completed: false, permalink_url: 'https://app.asana.com/1/w/task/9' },
+    ]);
+    expect(open[0].url).toBe('https://app.asana.com/1/w/task/9');
   });
 
   it('trims the stray whitespace real subtask names carry', () => {
-    expect(openRcaSubtasks([{ name: 'Root cause analysis ', completed: false }])[0].name).toBe(
+    expect(partitionRcaSubtasks([{ name: 'Root cause analysis ', completed: false }]).open[0].name).toBe(
       'Root cause analysis',
     );
   });
@@ -272,6 +281,12 @@ describe('lastMoveToDoneAt', () => {
 });
 
 describe('renderRcaDigest', () => {
+  const rca = (name: string, url: string | null = null): RcaSubtask => ({
+    name,
+    kind: name.match(/engineering/i) ? 'engineering' : name.match(/\bqa\b/i) ? 'qa' : 'general',
+    url,
+  });
+
   const entry = (o: Partial<RcaDigestEntry>): RcaDigestEntry => ({
     taskGid: o.taskGid ?? '1',
     name: o.name ?? 'Bug: Cannot cancel full order',
@@ -282,22 +297,102 @@ describe('renderRcaDigest', () => {
     doneAt: o.doneAt ?? '2026-07-25T12:00:00Z',
     doneAtApproximate: o.doneAtApproximate ?? false,
     daysSinceDone: o.daysSinceDone ?? 3,
-    openRcas: o.openRcas ?? [{ name: 'Engineering Escape RCA', kind: 'engineering' }],
+    openRcas: o.openRcas ?? [rca('Engineering Escape RCA')],
+    doneRcas: o.doneRcas ?? [],
   });
 
   it('returns null when nothing is outstanding', () => {
     expect(renderRcaDigest({ slotKey: 's', entries: [], scanned: 10 }, () => null)).toBeNull();
   });
 
-  it('lists each ticket with its open RCAs and the resolved mention', () => {
+  it('asks for the fix up front', () => {
+    const text = renderRcaDigest({ slotKey: 's', entries: [entry({})], scanned: 10 }, () => null)!;
+    expect(text).toContain('1 bug was closed without a root cause analysis');
+    expect(text).toContain('*Please fill in the missing RCA as soon as you can*');
+  });
+
+  it('names which half is missing rather than the raw subtask name', () => {
     const text = renderRcaDigest(
-      { slotKey: 's', entries: [entry({})], scanned: 10 },
+      {
+        slotKey: 's',
+        entries: [entry({ openRcas: [rca('Engineering Escape RCA'), rca('QA Escape RCA')] })],
+        scanned: 1,
+      },
       () => '<@U123>',
     );
-    expect(text).toContain('1 closed bug still owe');
-    expect(text).toContain('<https://app.asana.com/0/1210754051061529/1|Bug: Cannot cancel full order>');
+    expect(text).toContain('missing: Engineering RCA and QA RCA');
     expect(text).toContain('Bug · closed 3d ago · assignee: <@U123>');
-    expect(text).toContain('↳ open: Engineering Escape RCA');
+  });
+
+  it('links each missing RCA straight to its subtask', () => {
+    const text = renderRcaDigest(
+      {
+        slotKey: 's',
+        entries: [
+          entry({
+            openRcas: [
+              rca('Engineering Escape RCA', 'https://app.asana.com/1/w/task/11'),
+              rca('QA Escape RCA', 'https://app.asana.com/1/w/task/22'),
+            ],
+          }),
+        ],
+        scanned: 1,
+      },
+      () => null,
+    );
+    expect(text).toContain(
+      'missing: <https://app.asana.com/1/w/task/11|Engineering RCA> and <https://app.asana.com/1/w/task/22|QA RCA>',
+    );
+  });
+
+  it('credits the half that is already filled in', () => {
+    const text = renderRcaDigest(
+      {
+        slotKey: 's',
+        entries: [entry({ openRcas: [rca('QA Escape RCA')], doneRcas: [rca('Engineering Escape RCA')] })],
+        scanned: 1,
+      },
+      () => null,
+    )!;
+    expect(text).toContain('missing: QA RCA');
+    expect(text).toContain('✅ already done: Engineering RCA');
+  });
+
+  it('omits the already-done line when the same half is also open', () => {
+    // A ticket can carry duplicate subtasks — one ticked, one not. It is still
+    // missing, so claiming it is done would be wrong.
+    const text = renderRcaDigest(
+      {
+        slotKey: 's',
+        entries: [entry({ openRcas: [rca('QA Escape RCA')], doneRcas: [rca('QA Escape RCA')] })],
+        scanned: 1,
+      },
+      () => null,
+    )!;
+    expect(text).toContain('missing: QA RCA');
+    expect(text).not.toContain('already done');
+  });
+
+  it('falls back to the board name for the legacy undifferentiated subtask', () => {
+    const text = renderRcaDigest(
+      { slotKey: 's', entries: [entry({ openRcas: [rca('Root cause analysis')] })], scanned: 1 },
+      () => null,
+    )!;
+    expect(text).toContain('missing: Root cause analysis');
+  });
+
+  it('deduplicates halves that appear twice on the same ticket', () => {
+    const text = renderRcaDigest(
+      {
+        slotKey: 's',
+        entries: [entry({ openRcas: [rca('Engineering Escape RCA'), rca('Engineering RCA')] })],
+        scanned: 1,
+      },
+      () => null,
+    )!;
+    expect(text).toContain('missing: Engineering RCA');
+    // Deduped: one label, so no "X and Y" join.
+    expect(text).not.toContain(' and ');
   });
 
   it('escapes Slack link-label metacharacters in ticket names', () => {
@@ -311,7 +406,7 @@ describe('renderRcaDigest', () => {
   it('collapses the tail past 20 tickets', () => {
     const entries = Array.from({ length: 23 }, (_, i) => entry({ taskGid: String(i), daysSinceDone: i }));
     const text = renderRcaDigest({ slotKey: 's', entries, scanned: 100 }, () => null)!;
-    expect(text).toContain('23 closed bugs still owe');
+    expect(text).toContain('23 bugs were closed without a root cause analysis');
     expect(text).toContain('…and 3 more.');
   });
 });

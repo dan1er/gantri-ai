@@ -55,10 +55,10 @@ A ticket is listed when **all** of these hold:
    When `Type` is **empty** — ~40% of recently-closed board tickets — the title
    convention decides (`Bug:`, `Hot-Fix:`, `Regression:`, `P0`), with
    `Not A Bug:` excluded. A set `Type` always beats the title.
-3. **Has an open RCA subtask** — at least one incomplete subtask whose name
-   matches `/\brca\b|root\s*cause/i`. The board has accumulated several
-   spellings (`Engineering Escape RCA`, `QA Escape RCA`, `Root cause analysis`,
-   `Root Cause`), so the match is on the concept, not one exact string.
+3. **Has an RCA subtask nobody has filled in** — see the next section. Subtask
+   names are matched on the concept (`/\brca\b|root\s*cause/i`) because the board
+   carries several spellings (`Engineering Escape RCA`, `QA Escape RCA`,
+   `Root cause analysis`, `Root Cause`).
 4. **Reached Done at or after the cutoff.** The cutoff is the LATER of two
    bounds:
    - a **hard floor** (`RCA_START_AT`, default 2026-07-28 08:00 America/New_York
@@ -72,6 +72,44 @@ A ticket is listed when **all** of these hold:
 A bug closed with **no** RCA subtask at all is *not* listed. That is a different
 gap (the template was never applied) and would need a different fix — creating
 the subtasks rather than reminding about them.
+
+### What counts as "filled in"
+
+Measured against the live board on 2026-07-28, both obvious answers are wrong:
+
+- **Not the Asana completion checkbox.** Of 21 RCA subtasks on bugs closed in the
+  previous 60 days, **zero** were ticked. This team does not use the checkbox. A
+  checkbox rule flags every finished analysis as missing.
+- **Not "has a description" either.** The `Engineering Escape RCA` / `QA Escape
+  RCA` subtasks arrive carrying 1,300–1,900 characters of template — headings,
+  instruction sentences, and a list of `[ ]` options. A length rule clears every
+  pristine one. "Has prose" is no better: the instructions *are* prose.
+
+So the RCA counts as worked when **any** of these hold:
+
+| Signal | Why |
+|---|---|
+| Asana completion checkbox ticked | Still honoured when someone does use it |
+| A marked checklist box — `[x]`, `[X]`, `[+]`, `[✓]` | The template ships every box blank, so one tick is proof of work |
+| A line that is not template boilerplate | Someone typed an answer into the blanks; this is how the legacy free-form `Root Cause` subtask gets filled |
+| An attachment | Two real RCAs are literally "See PDF below" plus the PDF |
+| A comment | The analysis written as a comment instead — costs a request, so it is only checked for subtasks that already look empty |
+
+Boilerplate is recognised against a captured copy of the two templates in
+`rca-template.ts`. Asana's template API cannot supply it — `GET
+/task_templates/<gid>` for the Bug Template returns `subtasks: []`.
+
+**Template drift is handled two ways**, because "the capture goes stale" is a
+when-not-if:
+1. The ticked-box signal does not depend on the capture at all — it survives a
+   complete rewording.
+2. A line that is only a label (`Target date:`) never counts as written content,
+   captured or not. This is not theoretical: during validation a single
+   `Target date:` heading present in the live template but missing from the
+   capture silently cleared two pristine RCAs.
+
+No quality bar is applied. Grading an RCA by length would nag people who did the
+work — the exact failure this feature exists to avoid.
 
 ### Dating the closure
 
@@ -92,13 +130,19 @@ safe to pre-filter the board scan with before spending a stories read.
 ## Output
 
 ```
-🔍 *RCA follow-ups* — 12 closed bugs still owe a root cause analysis
+🔍 *RCA follow-ups* — 1 bug was closed without a root cause analysis
+*Please fill in the missing RCA as soon as you can* — each one below links straight to the subtask.
 
-• <asana link|Hotfix - Multiple refunds applied on Stripe> — Hotfix · closed 22d ago · assignee: @matt
-    ↳ open: Root cause analysis
-• <asana link|Hot-Fix: Unable to process a return…> — Hotfix · closed 4d ago · assignee: @matt
-    ↳ open: Engineering Escape RCA, QA Escape RCA
+• <asana|Bug: Regression: Regular Products Incorrectly Displayed as Preorders…> — Regression · in Done today · assignee: @matt
+    ↳ missing: <asana|Engineering RCA> and <asana|QA RCA>
+       ✅ already done: Root Cause
 ```
+
+Each missing half is **named** (`Engineering RCA` / `QA RCA`) rather than shown
+as its raw subtask name, and **links directly to the subtask** so nobody has to
+hunt for it inside the ticket. Whatever is already written gets credited, so a
+half-done ticket does not read as if nobody wrote anything. The legacy
+undifferentiated subtask keeps its own board name, since it names no discipline.
 
 Oldest closure first — the ticket that has gone unanalysed longest is the one
 most likely to be forgotten. Capped at 20 rendered tickets with a `+N more` tail.

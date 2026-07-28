@@ -59,17 +59,35 @@ A ticket is listed when **all** of these hold:
    matches `/\brca\b|root\s*cause/i`. The board has accumulated several
    spellings (`Engineering Escape RCA`, `QA Escape RCA`, `Root cause analysis`,
    `Root Cause`), so the match is on the concept, not one exact string.
-4. **Closed within the lookback window** — 30 days by default
-   (`RCA_LOOKBACK_DAYS`). Without a statute of limitations the digest would nag
-   about tickets from 2022 forever.
+4. **Reached Done at or after the cutoff.** The cutoff is the LATER of two
+   bounds:
+   - a **hard floor** (`RCA_START_AT`, default 2026-07-28 08:00 America/New_York
+     — the rollout instant). Danny's call: the digest starts from the day it
+     shipped rather than opening with a wall of historical backlog. The first
+     live scan found 12 qualifying bugs going back 22 days; with the floor it
+     found 2.
+   - a **rolling window** (`RCA_LOOKBACK_DAYS`, default 30). Once the floor ages
+     past the window the window takes over, so nothing is nagged about forever.
 
 A bug closed with **no** RCA subtask at all is *not* listed. That is a different
 gap (the template was never applied) and would need a different fix — creating
 the subtasks rather than reminding about them.
 
-`completed_at` dates the closure; tickets parked in Done without the checkbox
-fall back to `modified_at`, and the rendered age hedges accordingly ("in Done
-3d" rather than "closed 3d ago").
+### Dating the closure
+
+`completed_at` is exact and free. Tickets **parked in the Done section without
+the completion checkbox** have no such stamp, and `modified_at` alone is wrong
+for a tight cutoff: it dates the ticket by its last EDIT, so a ticket parked in
+Done last week would clear a same-day floor just because someone touched it this
+morning.
+
+Those tickets get a stories read, and the timestamp of the most recent
+`moved … to "Done" in Software Board` story is used instead. `modified_at`
+survives only as the last resort when no such story exists, and the rendered age
+hedges when it does ("in Done 3d" rather than "closed 3d ago").
+
+`modified_at` is still a valid *upper bound* on the move, which is what makes it
+safe to pre-filter the board scan with before spending a stories read.
 
 ## Output
 
@@ -99,7 +117,8 @@ whole board on every tick for the rest of the slot.
 | Key | Default | Meaning |
 |---|---|---|
 | `RCA_DIGEST_CHANNEL_ID` | `SOFTWARE_CHANNEL_ID` | Where the digest posts |
-| `RCA_LOOKBACK_DAYS` | 30 | How far back closed bugs are chased |
+| `RCA_LOOKBACK_DAYS` | 30 | Rolling window: how far back closed bugs are chased |
+| `RCA_START_AT` | `2026-07-28T08:00:00-04:00` | Hard floor; nothing that reached Done earlier is ever listed |
 
 `POST /internal/run-rca-digest` (guarded by `x-internal-secret`) forces an
 attempt for smoke tests. It honours the ledger, so an already-delivered slot

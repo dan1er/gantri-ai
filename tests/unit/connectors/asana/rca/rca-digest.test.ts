@@ -4,6 +4,7 @@ import {
   RcaDigestReporter,
   computeRcaDigest,
   dueSlotKey,
+  lastMoveToDoneAt,
   openRcaSubtasks,
   rcaKind,
   renderRcaDigest,
@@ -132,52 +133,141 @@ describe('openRcaSubtasks', () => {
 });
 
 describe('computeRcaDigest', () => {
+  /** Pair a task with subtasks + the done timestamp the collector would resolve. */
+  function cand(
+    t: AsanaTask,
+    subtasks: { name?: string; completed?: boolean }[],
+    doneAt?: { at: string; approximate: boolean },
+  ) {
+    return {
+      task: t,
+      subtasks,
+      doneAt: doneAt ?? { at: t.completed_at ?? t.modified_at ?? '', approximate: !t.completed_at },
+    };
+  }
+
   it('keeps only tasks with an open RCA and sorts oldest-closed first', () => {
     const payload = computeRcaDigest(
       '2026-07-28:08',
       120,
       [
-        {
-          task: task({ gid: 'recent', completed_at: '2026-07-27T12:00:00Z' }),
-          subtasks: [{ name: 'Engineering Escape RCA', completed: false }],
-        },
-        {
-          task: task({ gid: 'old', completed_at: '2026-07-10T12:00:00Z' }),
-          subtasks: [{ name: 'Root cause analysis', completed: false }],
-        },
-        {
-          task: task({ gid: 'clean' }),
-          subtasks: [{ name: 'Engineering Escape RCA', completed: true }],
-        },
-        { task: task({ gid: 'no-rca' }), subtasks: [{ name: 'Notes for QA', completed: false }] },
+        cand(task({ gid: 'recent', completed_at: '2026-07-27T12:00:00Z' }), [
+          { name: 'Engineering Escape RCA', completed: false },
+        ]),
+        cand(task({ gid: 'old', completed_at: '2026-07-10T12:00:00Z' }), [
+          { name: 'Root cause analysis', completed: false },
+        ]),
+        cand(task({ gid: 'clean' }), [{ name: 'Engineering Escape RCA', completed: true }]),
+        cand(task({ gid: 'no-rca' }), [{ name: 'Notes for QA', completed: false }]),
       ],
       NOW,
+      0,
     );
     expect(payload.entries.map((e) => e.taskGid)).toEqual(['old', 'recent']);
     expect(payload.entries[0].daysSinceDone).toBe(18);
     expect(payload.scanned).toBe(120);
   });
 
-  it('falls back to modified_at for tickets parked in Done without the checkbox', () => {
+  it('drops anything that reached Done before the cutoff', () => {
+    const cutoff = Date.parse('2026-07-28T12:00:00Z'); // 08:00 NY today
+    const payload = computeRcaDigest(
+      '2026-07-28:08',
+      2,
+      [
+        cand(task({ gid: 'before', completed_at: '2026-07-28T11:59:00Z' }), [
+          { name: 'QA Escape RCA', completed: false },
+        ]),
+        cand(task({ gid: 'after', completed_at: '2026-07-28T12:01:00Z' }), [
+          { name: 'QA Escape RCA', completed: false },
+        ]),
+      ],
+      NOW,
+      cutoff,
+    );
+    expect(payload.entries.map((e) => e.taskGid)).toEqual(['after']);
+  });
+
+  it('uses the resolved done time, not modified_at, against the cutoff', () => {
+    const cutoff = Date.parse('2026-07-28T12:00:00Z');
     const payload = computeRcaDigest(
       '2026-07-28:08',
       1,
       [
-        {
-          task: task({
+        // Parked in Done two days ago; edited this morning. modified_at would
+        // clear the cutoff — the real section-move timestamp does not.
+        cand(
+          task({
+            gid: 'parked-then-edited',
+            completed: false,
+            completed_at: null,
+            modified_at: '2026-07-28T13:00:00Z',
+            memberships: [{ section: { gid: DONE_SECTION } }],
+          }),
+          [{ name: 'QA Escape RCA', completed: false }],
+          { at: '2026-07-26T12:00:00Z', approximate: false },
+        ),
+      ],
+      NOW,
+      cutoff,
+    );
+    expect(payload.entries).toEqual([]);
+  });
+
+  it('carries the approximate flag through for tickets with no move history', () => {
+    const payload = computeRcaDigest(
+      '2026-07-28:08',
+      1,
+      [
+        cand(
+          task({
             gid: 'parked',
             completed: false,
             completed_at: null,
             modified_at: '2026-07-26T12:00:00Z',
             memberships: [{ section: { gid: DONE_SECTION } }],
           }),
-          subtasks: [{ name: 'QA Escape RCA', completed: false }],
-        },
+          [{ name: 'QA Escape RCA', completed: false }],
+          { at: '2026-07-26T12:00:00Z', approximate: true },
+        ),
       ],
       NOW,
+      0,
     );
     expect(payload.entries[0].doneAtApproximate).toBe(true);
     expect(payload.entries[0].daysSinceDone).toBe(2);
+  });
+});
+
+describe('lastMoveToDoneAt', () => {
+  const story = (subtype: string, text: string, at: string) => ({
+    gid: 'g',
+    created_at: at,
+    resource_subtype: subtype,
+    text,
+  });
+
+  it('picks the most recent move INTO Done', () => {
+    expect(
+      lastMoveToDoneAt([
+        story('section_changed', 'Matt moved this task from "QA Review" to "Done" in Software Board', '2026-07-20T10:00:00Z'),
+        story('section_changed', 'Matt moved this task from "Done" to "Rework" in Software Board', '2026-07-22T10:00:00Z'),
+        story('section_changed', 'Matt moved this task from "Rework" to "Done" in Software Board', '2026-07-26T10:00:00Z'),
+      ]),
+    ).toBe('2026-07-26T10:00:00Z');
+  });
+
+  it('ignores comments, other sections, and moves on other boards', () => {
+    expect(
+      lastMoveToDoneAt([
+        story('comment_added', 'moved this task from "A" to "Done" in Software Board', '2026-07-26T10:00:00Z'),
+        story('section_changed', 'Matt moved this task from "QA Review" to "Ready To Deploy" in Software Board', '2026-07-26T10:00:00Z'),
+        story('section_changed', 'Matt moved this task from "A" to "Done" in Marketing Board', '2026-07-26T10:00:00Z'),
+      ]),
+    ).toBeNull();
+  });
+
+  it('is null when the task has no stories at all', () => {
+    expect(lastMoveToDoneAt([])).toBeNull();
   });
 });
 
@@ -227,12 +317,20 @@ describe('renderRcaDigest', () => {
 });
 
 describe('RcaDigestReporter', () => {
-  function harness(opts: { tasks: AsanaTask[]; subtasks: Record<string, { name: string; completed: boolean }[]>; existing?: boolean; now?: Date }) {
+  function harness(opts: {
+    tasks: AsanaTask[];
+    subtasks: Record<string, { name: string; completed: boolean }[]>;
+    stories?: Record<string, { gid: string; created_at: string; resource_subtype: string; text: string }[]>;
+    existing?: boolean;
+    now?: Date;
+    startAtMs?: number;
+  }) {
     const postMessage = vi.fn().mockResolvedValue({ ok: true });
     const insert = vi.fn().mockResolvedValue(undefined);
     const client = {
       getProjectTasksUnbounded: vi.fn().mockResolvedValue(opts.tasks),
       getTaskSubtasks: vi.fn(async (gid: string) => opts.subtasks[gid] ?? []),
+      getTaskStories: vi.fn(async (gid: string) => opts.stories?.[gid] ?? []),
     } as unknown as AsanaApiClient;
     const repo = {
       get: vi.fn().mockResolvedValue(opts.existing ? { slotKey: 'x' } : null),
@@ -243,6 +341,7 @@ describe('RcaDigestReporter', () => {
       repo,
       slack: { chat: { postMessage } } as unknown as WebClient,
       channelId: 'C_SOFTWARE',
+      startAtMs: opts.startAtMs,
       now: () => opts.now ?? NOW,
       resolveSlackIdsByEmail: async () => new Map([['matt@gantri.com', 'U_MATT']]),
     });
@@ -326,6 +425,59 @@ describe('RcaDigestReporter', () => {
     const { reporter, postMessage } = harness({
       tasks: [task({ gid: 'open', completed: false, completed_at: null, modified_at: '2026-07-27T12:00:00Z' })],
       subtasks: { open: [{ name: 'Engineering Escape RCA', completed: false }] },
+    });
+
+    expect(await reporter.maybeSend()).toMatchObject({ sent: false, reason: 'all_clear' });
+    expect(postMessage).not.toHaveBeenCalled();
+  });
+
+  it('never lists a bug that reached Done before the hard floor', async () => {
+    const { reporter, postMessage } = harness({
+      // Closed a minute before today's 08:00 NY floor.
+      tasks: [task({ gid: 'yesterday', completed_at: '2026-07-28T11:59:00Z' })],
+      subtasks: { yesterday: [{ name: 'QA Escape RCA', completed: false }] },
+      startAtMs: Date.parse('2026-07-28T12:00:00Z'),
+    });
+
+    expect(await reporter.maybeSend()).toMatchObject({ sent: false, reason: 'all_clear' });
+    expect(postMessage).not.toHaveBeenCalled();
+  });
+
+  it('lists a bug that reached Done after the floor', async () => {
+    const { reporter, postMessage } = harness({
+      tasks: [task({ gid: 'today', name: 'Bug: fresh one', completed_at: '2026-07-28T13:00:00Z' })],
+      subtasks: { today: [{ name: 'Engineering Escape RCA', completed: false }] },
+      startAtMs: Date.parse('2026-07-28T12:00:00Z'),
+    });
+
+    expect(await reporter.maybeSend()).toMatchObject({ sent: true, tickets: 1 });
+    expect(postMessage.mock.calls[0][0].text).toContain('Bug: fresh one');
+  });
+
+  it('dates a Done-parked ticket by its section move, not its last edit', async () => {
+    const { reporter, postMessage } = harness({
+      tasks: [
+        task({
+          gid: 'parked',
+          completed: false,
+          completed_at: null,
+          // Edited this morning, so modified_at clears the floor on its own.
+          modified_at: '2026-07-28T13:30:00Z',
+          memberships: [{ section: { gid: DONE_SECTION } }],
+        }),
+      ],
+      subtasks: { parked: [{ name: 'QA Escape RCA', completed: false }] },
+      stories: {
+        parked: [
+          {
+            gid: 's1',
+            created_at: '2026-07-20T10:00:00Z',
+            resource_subtype: 'section_changed',
+            text: 'Matt moved this task from "QA Review" to "Done" in Software Board',
+          },
+        ],
+      },
+      startAtMs: Date.parse('2026-07-28T12:00:00Z'),
     });
 
     expect(await reporter.maybeSend()).toMatchObject({ sent: false, reason: 'all_clear' });

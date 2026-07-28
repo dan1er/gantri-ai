@@ -1,5 +1,5 @@
 import type { WebClient } from '@slack/web-api';
-import type { AsanaApiClient, AsanaTask } from '../client.js';
+import type { AsanaApiClient, AsanaStory, AsanaTask } from '../client.js';
 import type { RcaDigestsRepo } from '../../../storage/repositories/rca-digests.js';
 import { mapWithConcurrency } from '../concurrency.js';
 import {
@@ -10,6 +10,7 @@ import {
   isFeatureTemplateTask,
   isInDone,
 } from '../board-config.js';
+import { parseSectionMove } from '../story-analyzer.js';
 import { logger } from '../../../logger.js';
 
 /**
@@ -58,6 +59,12 @@ const OPT_FIELDS_TASK = [
 ].join(',');
 
 const OPT_FIELDS_SUBTASK = 'name,completed';
+
+/** Just enough to find the section move that landed a ticket in Done. */
+const OPT_FIELDS_STORY = 'created_at,resource_subtype,text';
+
+/** The Done section's display name, as it appears in section-move story text. */
+const DONE_SECTION_NAME = 'Done';
 
 // --- Slot scheduling (pure) -------------------------------------------------
 
@@ -164,13 +171,42 @@ export interface RcaDigestPayload {
   scanned: number;
 }
 
-/** When a ticket reached Done. `completed_at` is authoritative; tickets parked in
- *  the Done section without the completion checkbox fall back to `modified_at`,
- *  flagged so the rendered age can hedge. */
-export function doneTimestamp(task: AsanaTask): { at: string; approximate: boolean } | null {
+export interface DoneAt {
+  at: string;
+  /** True when `at` is the last-modified fallback rather than a real completion
+   *  or section-move timestamp — the rendered age hedges accordingly. */
+  approximate: boolean;
+}
+
+/**
+ * A CHEAP upper bound on when a ticket reached Done, with no extra API call.
+ * `completed_at` is exact. A ticket parked in the Done section without the
+ * completion checkbox has no such stamp, and `modified_at` stands in — it is a
+ * genuine upper bound (a move cannot postdate the last modification), which is
+ * what makes it safe to pre-filter on before the exact resolution below.
+ */
+export function doneTimestamp(task: AsanaTask): DoneAt | null {
   if (task.completed_at) return { at: task.completed_at, approximate: false };
   if (task.modified_at) return { at: task.modified_at, approximate: true };
   return null;
+}
+
+/**
+ * The timestamp of the most recent "moved … to Done" story on a task, or null
+ * when the board history has none. This is the exact answer for tickets parked
+ * in Done without the completion checkbox, where `modified_at` would otherwise
+ * date the ticket by its last EDIT — enough to sneak a long-parked ticket past a
+ * same-day cutoff just because someone touched it this morning.
+ */
+export function lastMoveToDoneAt(stories: AsanaStory[]): string | null {
+  let latest: string | null = null;
+  for (const s of stories) {
+    if (s.resource_subtype !== 'section_changed' || !s.created_at) continue;
+    const move = parseSectionMove(s.text);
+    if (move?.to !== DONE_SECTION_NAME) continue;
+    if (!latest || Date.parse(s.created_at) > Date.parse(latest)) latest = s.created_at;
+  }
+  return latest;
 }
 
 function typeNameOf(task: AsanaTask): string | null {
@@ -178,20 +214,30 @@ function typeNameOf(task: AsanaTask): string | null {
   return cf?.enum_value?.name ?? null;
 }
 
-/** Assemble the payload from tasks already paired with their subtasks. Pure, so
- *  the whole selection rule is testable without touching Asana. */
+export interface RcaCandidate {
+  task: AsanaTask;
+  subtasks: { name?: string; completed?: boolean }[];
+  /** The resolved done timestamp — exact where the board history allows. */
+  doneAt: DoneAt;
+}
+
+/** Assemble the payload from candidates already paired with their subtasks and a
+ *  resolved done timestamp. Pure, so the whole selection rule — including the
+ *  cutoff — is testable without touching Asana. */
 export function computeRcaDigest(
   slotKey: string,
   scanned: number,
-  candidates: { task: AsanaTask; subtasks: { name?: string; completed?: boolean }[] }[],
+  candidates: RcaCandidate[],
   now: Date,
+  cutoffMs: number,
 ): RcaDigestPayload {
   const entries: RcaDigestEntry[] = [];
-  for (const { task, subtasks } of candidates) {
+  for (const { task, subtasks, doneAt: done } of candidates) {
     const openRcas = openRcaSubtasks(subtasks);
     if (openRcas.length === 0) continue;
-    const done = doneTimestamp(task);
-    if (!done) continue;
+    // Re-applied here and not only in the scan gate: the exact done timestamp is
+    // resolved AFTER the cheap pre-filter, and it can only move earlier.
+    if (Date.parse(done.at) < cutoffMs) continue;
     entries.push({
       taskGid: task.gid,
       name: task.name,
@@ -270,6 +316,10 @@ export interface RcaDigestDeps {
   channelId: string;
   /** Bugs closed longer ago than this are dropped. Default 30 days. */
   lookbackDays?: number;
+  /** Hard floor: nothing that reached Done before this instant is ever listed,
+   *  no matter how wide the rolling window is. This is what keeps the rollout
+   *  from opening with a wall of historical backlog. */
+  startAtMs?: number;
   /** Asana assignee email → Slack user id, for @-mentions. Optional: without it
    *  the digest falls back to the assignee's Asana display name. */
   resolveSlackIdsByEmail?: () => Promise<Map<string, string>>;
@@ -329,10 +379,20 @@ export class RcaDigestReporter {
     };
   }
 
-  /** Scan the board and pair every candidate with its subtasks. */
-  private async collect(slotKey: string, now: Date): Promise<RcaDigestPayload> {
+  /**
+   * The instant before which nothing is listed: the later of the rolling
+   * lookback window and the hard rollout floor. The floor dominates right after
+   * launch (no historical backlog wall); once it ages past the window, the
+   * window takes over and bounds how long a ticket can be nagged about.
+   */
+  cutoffMs(now: Date): number {
     const lookbackMs = (this.deps.lookbackDays ?? DEFAULT_LOOKBACK_DAYS) * DAY_MS;
-    const cutoff = now.getTime() - lookbackMs;
+    return Math.max(now.getTime() - lookbackMs, this.deps.startAtMs ?? 0);
+  }
+
+  /** Scan the board and pair every candidate with its subtasks and done time. */
+  private async collect(slotKey: string, now: Date): Promise<RcaDigestPayload> {
+    const cutoff = this.cutoffMs(now);
     // Unbounded: the board keeps completed tasks, so the 50-page cap would drop
     // exactly the recently-closed tickets this digest is about.
     const tasks = await this.deps.client.getProjectTasksUnbounded(
@@ -341,18 +401,49 @@ export class RcaDigestReporter {
     );
     const candidates = tasks.filter((t) => this.isCandidate(t, cutoff));
     const paired = await mapWithConcurrency(candidates, SUBTASK_CONCURRENCY, async (task) => {
-      try {
-        const subtasks = await this.deps.client.getTaskSubtasks(task.gid, OPT_FIELDS_SUBTASK);
-        return { task, subtasks };
-      } catch (err) {
-        logger.warn(
-          { taskGid: task.gid, err: err instanceof Error ? err.message : String(err) },
-          'rca_digest_subtask_fetch_failed',
-        );
-        return { task, subtasks: [] };
-      }
+      const [subtasks, doneAt] = await Promise.all([
+        this.subtasksOf(task),
+        this.resolveDoneAt(task),
+      ]);
+      return { task, subtasks, doneAt };
     });
-    return computeRcaDigest(slotKey, tasks.length, paired, now);
+    return computeRcaDigest(slotKey, tasks.length, paired, now, cutoff);
+  }
+
+  private async subtasksOf(task: AsanaTask): Promise<{ name?: string; completed?: boolean }[]> {
+    try {
+      return await this.deps.client.getTaskSubtasks(task.gid, OPT_FIELDS_SUBTASK);
+    } catch (err) {
+      logger.warn(
+        { taskGid: task.gid, err: err instanceof Error ? err.message : String(err) },
+        'rca_digest_subtask_fetch_failed',
+      );
+      return [];
+    }
+  }
+
+  /**
+   * Pin down when the ticket actually reached Done. `completed_at` is exact and
+   * needs no extra call. For a ticket parked in the Done section WITHOUT the
+   * completion checkbox, the cheap stand-in is `modified_at` — which dates the
+   * ticket by its last edit, so a long-parked ticket someone merely touched this
+   * morning would clear a same-day cutoff. Those tickets get a stories read and
+   * the real "moved … to Done" timestamp.
+   */
+  private async resolveDoneAt(task: AsanaTask): Promise<DoneAt> {
+    const cheap = doneTimestamp(task)!; // isCandidate already rejected the null case
+    if (!cheap.approximate) return cheap;
+    try {
+      const stories = await this.deps.client.getTaskStories(task.gid, OPT_FIELDS_STORY);
+      const movedAt = lastMoveToDoneAt(stories);
+      if (movedAt) return { at: movedAt, approximate: false };
+    } catch (err) {
+      logger.warn(
+        { taskGid: task.gid, err: err instanceof Error ? err.message : String(err) },
+        'rca_digest_story_fetch_failed',
+      );
+    }
+    return cheap;
   }
 
   /** Closed-bug gate. Cheap and I/O-free, so the expensive subtask fan-out only

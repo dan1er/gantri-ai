@@ -78,6 +78,29 @@ export async function loadCronjobs(gh: GithubDispatcher, env: CronEnv): Promise<
     : cronsCache.base;
 }
 
+/** "Post created order actions" / "post_created_order_actions" → "post-created-order-actions". */
+export function normalizeCronQuery(text: string): string {
+  return text.trim().toLowerCase().replace(/[\s_]+/g, '-');
+}
+
+/**
+ * Resolve typed text to a cron in the catalog. Exact only (k8s name or display
+ * name) — the shorthand runs against production without a confirm step, so a
+ * near-miss must never silently fire the wrong job.
+ */
+export function matchCronEntry(crons: CronEntry[], text: string): CronEntry | undefined {
+  const q = normalizeCronQuery(text);
+  return crons.find((c) => c.name === q) ?? crons.find((c) => normalizeCronQuery(c.display) === q);
+}
+
+/** Close matches to offer back when the typed name doesn't resolve. */
+export function suggestCrons(crons: CronEntry[], text: string, limit = 5): CronEntry[] {
+  const q = normalizeCronQuery(text);
+  return crons
+    .filter((c) => c.name.includes(q) || normalizeCronQuery(c.display).includes(q))
+    .slice(0, limit);
+}
+
 export function buildCronModal(env: CronEnv = 'staging') {
   const opt = (text: string, value: string) => ({ text: { type: 'plain_text' as const, text }, value });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Slack block union
@@ -144,6 +167,12 @@ export function registerCronCommand(app: App, deps: CronCommandDeps): void {
     const decision = decideCommandChannel('/cron', deps.opsChannelId, deps.dmUserIds, body.channel_id, body.user_id);
     if (!decision.allowed) {
       await respond({ response_type: 'ephemeral', text: decision.message });
+      return;
+    }
+    // `/cron <name>` is the express lane: no modal, straight to production.
+    const text = (body.text ?? '').trim();
+    if (text) {
+      await runCronShorthand(deps, text, body.user_id, body.channel_id, respond);
       return;
     }
     await client.views.open({
@@ -282,6 +311,46 @@ export function registerCronCommand(app: App, deps: CronCommandDeps): void {
     await ack();
     await respond({ replace_original: true, text: '🚫 Cron run cancelled.' });
   });
+}
+
+/**
+ * `/cron <name>` runs that cron on production immediately — typing the name is
+ * the confirmation, so the modal and the prod confirm button are both skipped.
+ * Anything that doesn't resolve to a real production CronJob comes back as an
+ * ephemeral with close matches instead of dispatching.
+ */
+async function runCronShorthand(
+  deps: CronCommandDeps,
+  text: string,
+  userId: string,
+  channel: string,
+  respond: (msg: { response_type: 'ephemeral'; text: string }) => Promise<unknown>,
+): Promise<void> {
+  let crons: CronEntry[];
+  try {
+    crons = await loadCronjobs(deps.gh, 'production');
+  } catch (err) {
+    logger.warn({ err: String((err as Error)?.message ?? err) }, 'cron list load failed');
+    await respond({
+      response_type: 'ephemeral',
+      text: "✗ Couldn't read porter's cron catalog. Run `/cron` with no arguments to use the picker.",
+    });
+    return;
+  }
+  const entry = matchCronEntry(crons, text);
+  if (!entry) {
+    const near = suggestCrons(crons, text);
+    await respond({
+      response_type: 'ephemeral',
+      text:
+        `No production cron named \`${normalizeCronQuery(text)}\`. ` +
+        (near.length
+          ? `Did you mean ${near.map((c) => `\`${c.name}\``).join(', ')}?`
+          : 'Run `/cron` with no arguments to pick from the list.'),
+    });
+    return;
+  }
+  await createCronJobAndPost(deps, { environment: 'production', cronjob: entry.name }, userId, channel);
 }
 
 async function createCronJobAndPost(

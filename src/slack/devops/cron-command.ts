@@ -326,6 +326,7 @@ async function runCronShorthand(
   channel: string,
   respond: (msg: { response_type: 'ephemeral'; text: string }) => Promise<unknown>,
 ): Promise<void> {
+  logger.info({ by: userId, channel, text }, 'cron shorthand requested');
   let crons: CronEntry[];
   try {
     crons = await loadCronjobs(deps.gh, 'production');

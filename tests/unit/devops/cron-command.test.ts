@@ -1,6 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
 import { advanceCronJob } from '../../../src/devops/cron-provisioner.js';
-import { buildCronModal, parseCronSubmission, loadCronjobs } from '../../../src/slack/devops/cron-command.js';
+import {
+  buildCronModal, parseCronSubmission, loadCronjobs,
+  normalizeCronQuery, matchCronEntry, suggestCrons,
+} from '../../../src/slack/devops/cron-command.js';
 import { renderJobBlocks } from '../../../src/devops/messages.js';
 import type { Job } from '../../../src/devops/types.js';
 
@@ -89,6 +92,37 @@ describe('cron modal', () => {
     expect(parseCronSubmission(v as any)).toEqual({
       environment: 'preview', cronjob: 'post-created-order-actions', previewSlug: 'as-2306',
     });
+  });
+});
+
+describe('/cron <name> shorthand', () => {
+  const crons = [
+    { name: 'post-created-order-actions', display: 'Post created order actions' },
+    { name: 'post-shipped-order-actions', display: 'Post shipped order actions' },
+    { name: 'send-gift-cards', display: 'Send gift cards', description: 'Emails gift cards' },
+    { name: 'calc-usage-discarded-inv', display: 'Calculate usage & discarded inventories' },
+  ];
+
+  it('normalizes spaces and underscores to the k8s name shape', () => {
+    expect(normalizeCronQuery('  Post Created Order Actions ')).toBe('post-created-order-actions');
+    expect(normalizeCronQuery('send_gift_cards')).toBe('send-gift-cards');
+  });
+
+  it('matches on the k8s name or the display name', () => {
+    expect(matchCronEntry(crons, 'post-created-order-actions')?.name).toBe('post-created-order-actions');
+    expect(matchCronEntry(crons, 'Send gift cards')?.name).toBe('send-gift-cards');
+  });
+
+  it('refuses partial matches so a near-miss never fires on production', () => {
+    expect(matchCronEntry(crons, 'post-created')).toBeUndefined();
+    expect(matchCronEntry(crons, 'gift')).toBeUndefined();
+  });
+
+  it('offers close matches for an unresolved name', () => {
+    expect(suggestCrons(crons, 'post').map((c) => c.name)).toEqual([
+      'post-created-order-actions', 'post-shipped-order-actions',
+    ]);
+    expect(suggestCrons(crons, 'nothing-like-this')).toEqual([]);
   });
 });
 

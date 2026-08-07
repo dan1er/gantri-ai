@@ -16,9 +16,10 @@ import { logger } from '../../logger.js';
  * spec sheet of our products during onboarding. This tool covers everything
  * Porter stores TODAY (name, SKUs, dimensions, materials, list price, lead
  * time, bulb info, product/image URLs, and browser-clickable cut-sheet +
- * install-instruction PDF URLs). The richer per-spec columns
- * the ticket asks for (structured wattage/lumens/CRI/color-temp, dimmable,
- * UL/ADA ratings, canopy dims, Google Drive photo link) require Porter schema
+ * install-instruction PDF URLs). Wireless products additionally export their
+ * PDP performance specs (max brightness, engine, battery, charging, IP44 —
+ * see WIRELESS_SPECS). The remaining per-spec columns the ticket asks for
+ * (UL/ADA ratings, canopy dims, Google Drive photo link) require Porter schema
  * additions + manual data entry in FactoryOS and light up automatically once
  * those columns exist.
  *
@@ -87,6 +88,28 @@ const WIRELESS_CATEGORIES = new Set([
 const HARDWIRED_CATEGORIES = new Set(['Flush Mount', 'Pendant Light', 'Wall Sconce']);
 
 /**
+ * Wireless-light spec values that are uniform across every wireless product,
+ * mirroring the PDP's specs section (mantle
+ * src/modules/shop/product/sections/specs/specs.tsx — the Wireless Launch
+ * brand copy). KEEP IN SYNC with mantle: when the PDP copy changes, mirror it
+ * here. Per-product wireless values (max brightness, engine, battery life,
+ * battery capacity) come from `specs` and are NOT listed here.
+ */
+export const WIRELESS_SPECS = {
+  /** Wireless lights have dual-mode color temp (Relax / Create). */
+  colorTemperature: '2700K (Relax) and 3000K (Create)',
+  ledRatedLife: 'Rated for 50,000 hours',
+  batteryLongevity: '1,000 charge cycles; 8+ years of daily use, backed by 3-year warranty',
+  charging: 'Gantri Charging Base, included',
+  smartHome: 'Works with Apple Home, Google Home, and Alexa via Matter — arriving Q1 2027',
+  durability: 'IP44 splash proof',
+} as const;
+
+function isWirelessProduct(product: CatalogProduct): boolean {
+  return WIRELESS_CATEGORIES.has(product.category ?? '');
+}
+
+/**
  * Decodes the `specs.bulb` SKU-format code (e.g. "E26, T8, 94mm") into the
  * human bulb description shown on the PDP. Ported verbatim from mantle's
  * `BULB_NAME_MAPPINGS` (src/modules/shop/product/sections/details/details.constants.ts).
@@ -135,11 +158,12 @@ const Args = z.object({
     .optional()
     .describe('Optional explicit product-id allow-list. When set, only these products are exported (status/category still apply).'),
   productNameContains: z
-    .string()
-    .min(1)
-    .max(100)
+    .union([z.string().min(1).max(100), z.array(z.string().min(1).max(100)).min(1).max(20)])
     .optional()
-    .describe('Optional case-insensitive substring match on product name.'),
+    .describe(
+      'Optional case-insensitive substring match on product name — a single term OR an array of terms (matched as OR), all exported into ONE CSV. ' +
+        'E.g. "the catalog for eave, pier and drift" → ONE call with productNameContains: ["eave","pier","drift"].',
+    ),
   granularity: z
     .enum(['sku', 'product'])
     .default('product')
@@ -178,6 +202,12 @@ interface SpecsShape {
   dimensions?: { width?: number; height?: number; depth?: number } | null;
   footPrint?: { width?: number; height?: number; depth?: number } | null;
   backplate?: { width?: number; height?: number } | null;
+  // Wireless-only performance specs (Helia engine), same fields the PDP
+  // Performance section reads. Absent on corded/hardwired products.
+  maxBrightnessInBoostModeLumens?: number | null;
+  engine?: string | null;
+  batteryLifeBrightModeHours?: number | null;
+  batteryCapacity?: number | null;
 }
 
 interface DownloadsShape {
@@ -279,12 +309,34 @@ const BASE_COLUMNS: ColumnDef[] = [
   { header: 'Description', value: (c) => c.product.description ?? '' },
   { header: 'Material', value: (c) => c.product.specs?.material ?? '' },
   { header: 'Bulb Code', value: (c) => c.product.specs?.bulb ?? '' },
-  { header: 'Bulb Type', value: (c) => c.bulb.type },
+  // Wireless lights use an integrated (non-replaceable) LED — the PDP renders
+  // its rated life inline with the light source, so the type carries it here.
+  {
+    header: 'Bulb Type',
+    value: (c) =>
+      isWirelessProduct(c.product) && c.bulb.type
+        ? `${c.bulb.type} (${WIRELESS_SPECS.ledRatedLife.toLowerCase()})`
+        : c.bulb.type,
+  },
   { header: 'Bulb Base', value: (c) => c.bulb.base },
   { header: 'Bulb Quantity', value: (c) => c.bulb.quantity },
   { header: 'Wattage', value: (c) => c.bulb.wattage },
-  { header: 'Lumens', value: (c) => c.bulb.lumens },
-  { header: 'Color Temperature', value: (c) => c.bulb.colorTemp },
+  // Wireless: the bulb code carries no lumens — the PDP shows
+  // specs.maxBrightnessInBoostModeLumens ("Max brightness N lumens") instead.
+  {
+    header: 'Lumens',
+    value: (c) => {
+      if (c.bulb.lumens) return c.bulb.lumens;
+      const max = c.product.specs?.maxBrightnessInBoostModeLumens;
+      return isWirelessProduct(c.product) && max && max > 0 ? String(max) : '';
+    },
+  },
+  // Wireless lights always have dual-mode color temp (Relax / Create) — a
+  // PDP-wide constant, regardless of what the bulb code decodes to.
+  {
+    header: 'Color Temperature',
+    value: (c) => (isWirelessProduct(c.product) ? WIRELESS_SPECS.colorTemperature : c.bulb.colorTemp),
+  },
   // Company-standard default: every Gantri light source is CRI 90. Applies to
   // any product with a bulb code; blank for accessories / gift cards.
   { header: 'CRI', value: (c) => (c.product.specs?.bulb ? WHOLESALE_DEFAULTS.cri : '') },
@@ -298,7 +350,10 @@ const BASE_COLUMNS: ColumnDef[] = [
         ? WHOLESALE_DEFAULTS.dimmerType
         : '',
   },
-  { header: 'Bulb Included', value: (c) => c.bulb.included },
+  {
+    header: 'Bulb Included',
+    value: (c) => (isWirelessProduct(c.product) && c.product.specs?.bulb ? 'Integrated (not replaceable)' : c.bulb.included),
+  },
   {
     header: 'Compatible Bulbs',
     value: (c) => (c.product.specs?.compatibleWith ?? []).filter(Boolean).join('; '),
@@ -313,6 +368,35 @@ const BASE_COLUMNS: ColumnDef[] = [
         ? WHOLESALE_DEFAULTS.voltage
         : '',
   },
+  // -------------------------------------------------------------------------
+  // Wireless performance block — mirrors the PDP Performance section. Blank
+  // for corded/hardwired products. Per-product values from `specs`; the rest
+  // is the uniform Wireless Launch brand copy in WIRELESS_SPECS.
+  // -------------------------------------------------------------------------
+  {
+    header: 'Light Engine',
+    value: (c) => (isWirelessProduct(c.product) && c.product.specs?.engine ? `Gantri Helia ${c.product.specs.engine}` : ''),
+  },
+  {
+    header: 'Battery Life',
+    value: (c) => {
+      const hours = c.product.specs?.batteryLifeBrightModeHours;
+      return isWirelessProduct(c.product) && typeof hours === 'number' && hours > 0
+        ? `${hours} hours in Bright mode`
+        : '';
+    },
+  },
+  {
+    header: 'Battery Capacity (Wh)',
+    value: (c) => {
+      const wh = c.product.specs?.batteryCapacity;
+      return isWirelessProduct(c.product) && typeof wh === 'number' && wh > 0 ? String(wh) : '';
+    },
+  },
+  { header: 'Battery Longevity', value: (c) => (isWirelessProduct(c.product) ? WIRELESS_SPECS.batteryLongevity : '') },
+  { header: 'Charging', value: (c) => (isWirelessProduct(c.product) ? WIRELESS_SPECS.charging : '') },
+  { header: 'Smart Home', value: (c) => (isWirelessProduct(c.product) ? WIRELESS_SPECS.smartHome : '') },
+  { header: 'Durability', value: (c) => (isWirelessProduct(c.product) ? WIRELESS_SPECS.durability : '') },
   { header: 'Dimensions (in, H x W x D)', value: (c) => dimsHWD(c.product.specs?.dimensions) },
   { header: 'Footprint (in, W x D)', value: (c) => footprintWD(c.product.specs?.footPrint) },
   { header: 'Backplate (in, W x H)', value: (c) => backplateWH(c.product.specs?.backplate) },
@@ -371,11 +455,13 @@ export class ProductExportConnector implements Connector {
         '',
         'ONE row per product by default — the SKU, Color and Image URLs columns each aggregate ALL of the product\'s variants into a single cell, one value per line. Color lists ALL colors the product can be ordered in (the full storefront palette set, not just the designer-picked subset), SKU the matching SKU per color, and Image URLs the full URL of every product photo. Columns: product name, designer, category, size, SKU(s), color(s), status, list price (USD), lead time, summary, description, material, recommended + compatible bulbs, dimensions, footprint, backplate, cord length, weight, return policy, warranty, country of origin, product URL, image URLs, and browser-clickable cut-sheet + install-instruction PDF URLs.',
         '',
-        'Filters: `status` (Active default, or "all"), `category` (single name or array — see below), `productIds` (explicit allow-list), `productNameContains`, `granularity` ("product" default = one row per product | "sku" = one row per color/SKU variant).',
+        'Filters: `status` (Active default, or "all"), `category` (single name or array — see below), `productIds` (explicit allow-list), `productNameContains` (single term or array, OR-matched — "catalog for eave, pier and drift" → ONE call with ["eave","pier","drift"]), `granularity` ("product" default = one row per product | "sku" = one row per color/SKU variant).',
         '',
         'CATEGORIES: `category` accepts a single category name OR an array of names — all exported into ONE CSV. Valid categories: Accessory, Clamp Light, Floor Light, Gift Card, Pendant Light, Table Light, Wall Light, Wall Sconce, Flush Mount, Wireless Floor Lantern, Wireless Mini Light, Wireless Table Light, Wireless Task Light. "Wireless lights" is NOT a single category — it spans four; export them together, e.g. "our wireless lights" → ONE call with category: ["Wireless Floor Lantern","Wireless Mini Light","Wireless Table Light","Wireless Task Light"].',
         '',
-        '⚠️ ALWAYS make exactly ONE export_catalog call per export request — pass multiple categories as an array. NEVER call it once per category: every call produces a separate CSV file in Slack.',
+        '⚠️ ALWAYS make exactly ONE export_catalog call per export request — pass multiple categories OR multiple name terms as arrays. NEVER call it once per category/name: every call produces a separate CSV file in Slack.',
+        '',
+        'WIRELESS LIGHTS: wireless products (Eave / Pier / Drift families) export their full performance specs, mirroring the PDP — max-brightness lumens, dual-mode color temperature (Relax/Create), light engine, battery life/capacity/longevity, charging, smart home, and IP44 durability. Corded/hardwired products leave those columns blank.',
         '',
         'PARTNER-SAFE BY DEFAULT: internal cost fields (manufacturer price, royalty) are EXCLUDED. Only set `includeInternalCost:true` for an internal pull, never for a partner-facing export.',
         '',
@@ -412,7 +498,7 @@ export class ProductExportConnector implements Connector {
 
     const products = rows.map((r) => parseProductRow(fields, r));
     if (products.length === 0) {
-      const categories = normalizeCategories(args.category);
+      const categories = normalizeTerms(args.category);
       return {
         ok: false,
         error: {
@@ -478,7 +564,7 @@ export function escapeSql(input: string): string {
  * category filter was supplied. Trims and drops empty entries so a stray blank
  * never produces a `category = ''` clause.
  */
-export function normalizeCategories(category: string | string[] | undefined): string[] | undefined {
+export function normalizeTerms(category: string | string[] | undefined): string[] | undefined {
   if (category == null) return undefined;
   const list = Array.isArray(category) ? category : [category];
   const cleaned = list.map((c) => c.trim()).filter((c) => c.length > 0);
@@ -490,7 +576,7 @@ export function buildCatalogSql(args: Args): string {
   if (args.status !== 'all') {
     conds.push(`status = '${escapeSql(args.status)}'`);
   }
-  const categories = normalizeCategories(args.category);
+  const categories = normalizeTerms(args.category);
   if (categories) {
     conds.push(
       categories.length === 1
@@ -502,8 +588,13 @@ export function buildCatalogSql(args: Args): string {
     // ints, validated by zod — safe to inline.
     conds.push(`id IN (${args.productIds.join(', ')})`);
   }
-  if (args.productNameContains) {
-    conds.push(`name ILIKE '%${escapeSql(args.productNameContains)}%'`);
+  const nameTerms = normalizeTerms(args.productNameContains);
+  if (nameTerms) {
+    conds.push(
+      nameTerms.length === 1
+        ? `name ILIKE '%${escapeSql(nameTerms[0])}%'`
+        : `(${nameTerms.map((t) => `name ILIKE '%${escapeSql(t)}%'`).join(' OR ')})`,
+    );
   }
   const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
   return `
@@ -902,7 +993,7 @@ export function instructionUrls(product: CatalogProduct): string {
 
 function exportFilename(args: Args): string {
   const parts = ['gantri-product-catalog'];
-  const categories = normalizeCategories(args.category);
+  const categories = normalizeTerms(args.category);
   if (categories) {
     // Single category → slug it; multiple → a stable, neutral label so the
     // filename stays short and doesn't misleadingly name just one category.

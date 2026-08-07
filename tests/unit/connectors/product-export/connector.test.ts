@@ -159,6 +159,39 @@ function wirelessTaskRow(): unknown[] {
   ];
 }
 
+// Mirrors a REAL wireless product row (Drift, id 10501): bulb is the free-form
+// "Integrated LED" label (NOT in BULB_NAME_MAPPINGS) and the Helia performance
+// fields live in specs — the shape the wireless collection actually has in
+// Porter prod.
+function wirelessIntegratedRow(): unknown[] {
+  return [
+    10501,
+    'Drift',
+    'Wireless Mini Light',
+    null,
+    'Gantri Studio',
+    'Active',
+    'Marketplace',
+    null,
+    null,
+    47,
+    '7-8 weeks',
+    pgColorsLiteral([{ code: 'lichen', name: 'Lichen', defaultSku: '10501-0-lichen' }]),
+    null,
+    {
+      price: 24800,
+      bulb: 'Integrated LED',
+      maxBrightnessInBoostModeLumens: 400,
+      engine: 'H1',
+      batteryLifeBrightModeHours: 16,
+      batteryCapacity: 47,
+    },
+    null,
+    null,
+    false, // isPainted (keeps the fixture on the designer-subset color path)
+  ];
+}
+
 // A painted product (Table Light) — exercises the all-available-colors path:
 // getColorsByProduct returns the full storefront palette for the category.
 function paintedTableRow(): unknown[] {
@@ -337,6 +370,58 @@ describe('products.export_catalog', () => {
     // via integrated touch/app control, not a wall Triac dimmer.
     expect(row.Voltage).toBe('');
     expect(row['Dimmer Type']).toBe('');
+  });
+
+  it('exports the wireless performance specs for an Integrated LED product, mirroring the PDP', async () => {
+    const { connector } = makeConnector(async () => ({
+      fields: FIELDS,
+      rows: [wirelessIntegratedRow(), lagoRow()],
+    }));
+    const result: any = await connector.tools[0].execute({
+      status: 'Active',
+      granularity: 'sku',
+      includeInternalCost: false,
+    });
+    const rows = parseCsv(result.attachment.content);
+    const drift = rows.find((r) => r['Product Name'] === 'Drift Wireless Mini Light')!;
+    expect(drift).toBeTruthy();
+
+    // "Integrated LED" is not in BULB_NAME_MAPPINGS — the wireless path must
+    // still surface the full light specs the PDP shows.
+    expect(drift['Bulb Code']).toBe('Integrated LED');
+    expect(drift['Bulb Type']).toBe('Integrated LED (rated for 50,000 hours)');
+    expect(drift['Bulb Included']).toBe('Integrated (not replaceable)');
+    expect(drift.Dimmable).toBe('Yes');
+    // Lumens from specs.maxBrightnessInBoostModeLumens (the bulb code has none).
+    expect(drift.Lumens).toBe('400');
+    // Dual-mode color temp is a wireless-wide constant.
+    expect(drift['Color Temperature']).toBe('2700K (Relax) and 3000K (Create)');
+    // Performance block from specs + Wireless Launch brand copy.
+    expect(drift['Light Engine']).toBe('Gantri Helia H1');
+    expect(drift['Battery Life']).toBe('16 hours in Bright mode');
+    expect(drift['Battery Capacity (Wh)']).toBe('47');
+    expect(drift['Battery Longevity']).toBe('1,000 charge cycles; 8+ years of daily use, backed by 3-year warranty');
+    expect(drift.Charging).toBe('Gantri Charging Base, included');
+    expect(drift['Smart Home']).toBe('Works with Apple Home, Google Home, and Alexa via Matter — arriving Q1 2027');
+    expect(drift.Durability).toBe('IP44 splash proof');
+    // Electrical defaults still gated off for battery-powered fixtures.
+    expect(drift.Voltage).toBe('');
+    expect(drift['Dimmer Type']).toBe('');
+    expect(drift.CRI).toBe('90');
+
+    // Corded products leave the whole wireless block blank — and keep their
+    // bulb-decode values untouched.
+    const lago = rows.find((r) => r.SKU === '10018-cm-snow')!;
+    expect(lago['Light Engine']).toBe('');
+    expect(lago['Battery Life']).toBe('');
+    expect(lago['Battery Capacity (Wh)']).toBe('');
+    expect(lago['Battery Longevity']).toBe('');
+    expect(lago.Charging).toBe('');
+    expect(lago['Smart Home']).toBe('');
+    expect(lago.Durability).toBe('');
+    expect(lago['Bulb Type']).toBe('E26 LED Dimmable Bulb (included)');
+    expect(lago['Bulb Included']).toBe('Yes');
+    expect(lago['Color Temperature']).toBe('2700K');
   });
 
   it('includes internal cost columns only when includeInternalCost is true', async () => {
@@ -538,6 +623,26 @@ describe('SQL builder', () => {
     const sql = buildCatalogSql({ status: 'Active', category: 'Table Light', granularity: 'sku', includeInternalCost: false });
     expect(sql).toContain(`category = 'Table Light'`);
     expect(sql).not.toContain('category IN');
+  });
+
+  it('OR-joins multiple productNameContains terms in ONE query', () => {
+    const sql = buildCatalogSql({
+      status: 'Active',
+      productNameContains: ['eave', 'pier', "dri'ft"],
+      granularity: 'product',
+      includeInternalCost: false,
+    });
+    expect(sql).toContain(`(name ILIKE '%eave%' OR name ILIKE '%pier%' OR name ILIKE '%dri''ft%')`);
+
+    // Single term keeps the simple form (back-compat with the string arg).
+    const single = buildCatalogSql({
+      status: 'Active',
+      productNameContains: 'eave',
+      granularity: 'product',
+      includeInternalCost: false,
+    });
+    expect(single).toContain(`name ILIKE '%eave%'`);
+    expect(single).not.toContain(' OR ');
   });
 
   it('uses category IN for multiple categories, each escaped', () => {

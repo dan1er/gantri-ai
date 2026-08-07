@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import Papa from 'papaparse';
 import { z } from 'zod';
 import type { Connector, ToolDef } from '../base/connector.js';
@@ -45,6 +46,11 @@ import { logger } from '../../logger.js';
  */
 export interface ProductExportConnectorDeps {
   grafana: GrafanaConnector;
+  /** Cloudinary prod-cloud API credentials (vault CLOUDINARY_API_KEY /
+   *  CLOUDINARY_API_SECRET) — used only to SIGN per-product archive-download
+   *  URLs; the connector never calls the Cloudinary API itself. Optional: when
+   *  absent the "Product Images (ZIP)" column exports blank. */
+  cloudinary?: { apiKey: string; apiSecret: string } | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -66,6 +72,24 @@ export const WHOLESALE_DEFAULTS = {
 } as const;
 
 const PRODUCT_URL_BASE = 'https://www.gantri.com/products';
+/** Cloudinary product environment (cloud name) the product assets live in —
+ *  the PROD cloud, same one IMAGE_URL_BASE points at. */
+const CLOUDINARY_CLOUD_NAME = 'gantri';
+/** Root folder of a product's assets in the prod cloud. A prefix archive over
+ *  this folder bundles every asset of the product: all SKU photos, and the
+ *  cut-sheet PDFs once they exist. */
+const CLOUDINARY_PRODUCTS_PREFIX = 'dynamic-assets/gantri/products';
+/** How long a generated images-ZIP link stays valid. Cloudinary's default is
+ *  1 hour — far too short for links embedded in a CSV that gets forwarded to
+ *  partners. A fresh export re-mints the links. */
+const ARCHIVE_URL_TTL_SECONDS = 365 * 24 * 60 * 60; // 1 year
+/** Transformation applied to every image in the archive: cap the long edge at
+ *  2400px, convert to JPEG with automatic quality. The `gantri` cloud enforces
+ *  a hard 100 MB archive cap and the source PNGs run ~3.5 MB even downscaled
+ *  (a ~200-photo product would truncate at ~28 files — verified live);
+ *  as JPEG (~200-400 KB each, fine for white-background shots — no
+ *  transparency) the full set fits with headroom. */
+const ARCHIVE_IMAGE_TRANSFORMATION = 'c_limit,w_2400,q_auto:good,f_jpg';
 /** Public Cloudinary base for product assets — photos, cut-sheet PDFs and
  *  download PDFs all live under this prefix (PDFs are served via image/upload).
  *  Verified against the live PDP + Porter's cut-sheet output. */
@@ -277,6 +301,11 @@ interface RowContext {
    *  from single-value to aggregated. */
   skus?: string[];
   colorNames?: string[];
+  /** Signed Cloudinary archive-download URL bundling every asset of the
+   *  product into one ZIP. Product-level (same for all of a product's rows);
+   *  set in run() only when Cloudinary creds are configured and the product
+   *  has photos. */
+  imagesZipUrl?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -422,6 +451,11 @@ const BASE_COLUMNS: ColumnDef[] = [
   // Full image URLs, one per line. At 'product' granularity: every photo across
   // all of the product's SKUs; at 'sku' granularity: the single SKU's photo(s).
   { header: 'Image URLs', value: (c) => imageUrls(c).join('\n') },
+  // ONE link per product: a signed Cloudinary archive URL that zips every
+  // asset in the product's folder at download time — always current, valid
+  // for 1 year from export. Blank when Cloudinary creds are not configured
+  // or the product has no photos.
+  { header: 'Product Images (ZIP)', value: (c) => c.imagesZipUrl ?? '' },
   { header: 'Cut Sheet URL', value: (c) => cutSheetUrl(c.product, c.sku) },
   { header: 'Install Instructions URLs', value: (c) => instructionUrls(c.product) },
 ];
@@ -453,7 +487,7 @@ export class ProductExportConnector implements Connector {
       description: [
         'Export Gantri product catalog data as a downloadable CSV attachment. Use this whenever the user asks for a product spec sheet / catalog / price list / "product data to share with a wholesale partner" / "export our products as a CSV".',
         '',
-        'ONE row per product by default — the SKU, Color and Image URLs columns each aggregate ALL of the product\'s variants into a single cell, one value per line. Color lists ALL colors the product can be ordered in (the full storefront palette set, not just the designer-picked subset), SKU the matching SKU per color, and Image URLs the full URL of every product photo. Columns: product name, designer, category, size, SKU(s), color(s), status, list price (USD), lead time, summary, description, material, recommended + compatible bulbs, dimensions, footprint, backplate, cord length, weight, return policy, warranty, country of origin, product URL, image URLs, and browser-clickable cut-sheet + install-instruction PDF URLs.',
+        'ONE row per product by default — the SKU, Color and Image URLs columns each aggregate ALL of the product\'s variants into a single cell, one value per line. Color lists ALL colors the product can be ordered in (the full storefront palette set, not just the designer-picked subset), SKU the matching SKU per color, and Image URLs the full URL of every product photo. The "Product Images (ZIP)" column additionally gives ONE link per product that downloads ALL of its photos as a single ZIP (built fresh on every click, so it always reflects the current photos; link valid 1 year). Columns: product name, designer, category, size, SKU(s), color(s), status, list price (USD), lead time, summary, description, material, recommended + compatible bulbs, dimensions, footprint, backplate, cord length, weight, return policy, warranty, country of origin, product URL, image URLs, product-images ZIP link, and browser-clickable cut-sheet + install-instruction PDF URLs.',
         '',
         'Filters: `status` (Active default, or "all"), `category` (single name or array — see below), `productIds` (explicit allow-list), `productNameContains` (single term or array, OR-matched — "catalog for eave, pier and drift" → ONE call with ["eave","pier","drift"]), `granularity` ("product" default = one row per product | "sku" = one row per color/SKU variant).',
         '',
@@ -509,6 +543,31 @@ export class ProductExportConnector implements Connector {
     }
 
     const contexts = expandRows(products, args.granularity);
+
+    // Product-level images-ZIP links (one per product, shared by all its
+    // rows). Signed locally — no Cloudinary API call happens during export.
+    if (this.deps.cloudinary) {
+      const { apiKey, apiSecret } = this.deps.cloudinary;
+      const nowSec = Math.floor(now / 1000);
+      const urlByProduct = new Map<number, string>();
+      for (const product of products) {
+        if (!productHasPhotos(product)) continue;
+        urlByProduct.set(
+          product.id,
+          productImagesArchiveUrl({
+            productId: product.id,
+            apiKey,
+            apiSecret,
+            timestamp: nowSec,
+            expiresAt: nowSec + ARCHIVE_URL_TTL_SECONDS,
+          }),
+        );
+      }
+      for (const ctx of contexts) {
+        ctx.imagesZipUrl = urlByProduct.get(ctx.product.id);
+      }
+    }
+
     const columns = args.includeInternalCost ? [...BASE_COLUMNS, ...INTERNAL_COST_COLUMNS] : BASE_COLUMNS;
     const headers = columns.map((c) => c.header);
     const data = contexts.map((ctx) => columns.map((col) => col.value(ctx)));
@@ -931,6 +990,59 @@ export function imageUrls(ctx: RowContext): string[] {
     }
   }
   return out;
+}
+
+/**
+ * Signed Cloudinary `generate_archive` download URL for ALL of a product's
+ * assets: one stable link that, when clicked, builds a ZIP on the fly from
+ * whatever is under `dynamic-assets/gantri/products/{id}/` AT THAT MOMENT.
+ * Nothing is stored or pre-generated, so the link needs no sync automation —
+ * photo updates/additions in FactoryOS are picked up by the next download.
+ *
+ * Signing follows Cloudinary's API authentication: SHA-1 over the
+ * alphabetically-sorted `key=value` params joined with `&`, with the API
+ * secret appended. `api_key` and `signature` itself are excluded from the
+ * signed string. The secret never appears in the URL.
+ */
+export function productImagesArchiveUrl(opts: {
+  productId: number;
+  apiKey: string;
+  apiSecret: string;
+  /** Unix seconds — signing time (becomes the `timestamp` param). */
+  timestamp: number;
+  /** Unix seconds — when the link stops working. */
+  expiresAt: number;
+}): string {
+  const params: Record<string, string> = {
+    expires_at: String(opts.expiresAt),
+    mode: 'download',
+    prefixes: `${CLOUDINARY_PRODUCTS_PREFIX}/${opts.productId}/`,
+    // Strip the transformation suffix from filenames inside the ZIP so they
+    // match the original asset names.
+    skip_transformation_name: 'true',
+    // Filename of the downloaded ZIP.
+    target_public_id: `gantri-product-${opts.productId}-images`,
+    timestamp: String(opts.timestamp),
+    transformations: ARCHIVE_IMAGE_TRANSFORMATION,
+  };
+  const toSign = Object.keys(params)
+    .sort()
+    .map((k) => `${k}=${params[k]}`)
+    .join('&');
+  const signature = createHash('sha1').update(toSign + opts.apiSecret).digest('hex');
+  const query = new URLSearchParams({ ...params, api_key: opts.apiKey, signature });
+  return `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/generate_archive?${query.toString()}`;
+}
+
+/** Whether the product has at least one white-background photo in skuAssets —
+ *  the gate for emitting an images-ZIP link (an archive over an assetless
+ *  product folder would 404). */
+export function productHasPhotos(product: CatalogProduct): boolean {
+  const assets = product.skuAssets;
+  if (!assets) return false;
+  return Object.values(assets).some(
+    (a) => !!a?.selectedWhiteBackgroundPhoto || (Array.isArray(a?.whiteBackgroundPhotos) && a.whiteBackgroundPhotos.some((f) => typeof f === 'string' && f.length > 0)),
+  );
 }
 
 export function productUrl(id: number, sku: string): string {

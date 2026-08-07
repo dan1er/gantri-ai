@@ -24,13 +24,14 @@ import { logger } from '../../logger.js';
  * additions + manual data entry in FactoryOS and light up automatically once
  * those columns exist.
  *
- * Output is ONE row per product by default: the SKU, Color and Image URLs
- * columns each aggregate every variant into a single cell, one value per line.
- * Color lists ALL colors the product can be ordered in (derived from the palette
- * via getColorsByProduct — the storefront "All colors" set — NOT just the
- * designer subset in `Products.colors`), SKU lists the matching SKU for each, and
- * Image URLs lists the full URL of every product photo we have. `granularity:
- * 'sku'` instead emits one row per available color/SKU variant.
+ * Output is ONE row per product by default: the SKU and Color columns each
+ * aggregate every variant into a single cell, one value per line. Color lists
+ * ALL colors the product can be ordered in (derived from the palette via
+ * getColorsByProduct — the storefront "All colors" set — NOT just the designer
+ * subset in `Products.colors`), SKU lists the matching SKU for each, and the
+ * Product Images (ZIP) column carries ONE signed archive link per product with
+ * every photo (see productImagesArchiveUrl). `granularity: 'sku'` instead
+ * emits one row per available color/SKU variant.
  *
  * Why one tool (not `grafana.sql` + `reports.attach_file`): the SKU/color/image
  * aggregation (Postgres `colors` text[] of JSON strings), the nested `specs`
@@ -448,13 +449,11 @@ const BASE_COLUMNS: ColumnDef[] = [
   { header: 'Warranty', value: () => WHOLESALE_DEFAULTS.warranty },
   { header: 'Country of Origin', value: () => WHOLESALE_DEFAULTS.countryOfOrigin },
   { header: 'Product URL', value: (c) => productUrl(c.product.id, c.sku) },
-  // Full image URLs, one per line. At 'product' granularity: every photo across
-  // all of the product's SKUs; at 'sku' granularity: the single SKU's photo(s).
-  { header: 'Image URLs', value: (c) => imageUrls(c).join('\n') },
   // ONE link per product: a signed Cloudinary archive URL that zips every
   // asset in the product's folder at download time — always current, valid
   // for 1 year from export. Blank when Cloudinary creds are not configured
-  // or the product has no photos.
+  // or the product has no photos. Replaces the old per-image "Image URLs"
+  // column (150-200 URLs per product) at marketing's request.
   { header: 'Product Images (ZIP)', value: (c) => c.imagesZipUrl ?? '' },
   { header: 'Cut Sheet URL', value: (c) => cutSheetUrl(c.product, c.sku) },
   { header: 'Install Instructions URLs', value: (c) => instructionUrls(c.product) },
@@ -487,7 +486,7 @@ export class ProductExportConnector implements Connector {
       description: [
         'Export Gantri product catalog data as a downloadable CSV attachment. Use this whenever the user asks for a product spec sheet / catalog / price list / "product data to share with a wholesale partner" / "export our products as a CSV".',
         '',
-        'ONE row per product by default — the SKU, Color and Image URLs columns each aggregate ALL of the product\'s variants into a single cell, one value per line. Color lists ALL colors the product can be ordered in (the full storefront palette set, not just the designer-picked subset), SKU the matching SKU per color, and Image URLs the full URL of every product photo. The "Product Images (ZIP)" column additionally gives ONE link per product that downloads ALL of its photos as a single ZIP (built fresh on every click, so it always reflects the current photos; link valid 1 year). Columns: product name, designer, category, size, SKU(s), color(s), status, list price (USD), lead time, summary, description, material, recommended + compatible bulbs, dimensions, footprint, backplate, cord length, weight, return policy, warranty, country of origin, product URL, image URLs, product-images ZIP link, and browser-clickable cut-sheet + install-instruction PDF URLs.',
+        'ONE row per product by default — the SKU and Color columns each aggregate ALL of the product\'s variants into a single cell, one value per line. Color lists ALL colors the product can be ordered in (the full storefront palette set, not just the designer-picked subset), SKU the matching SKU per color. Product images come as ONE link per product: the "Product Images (ZIP)" column downloads ALL of the product\'s photos as a single ZIP (built fresh on every click, so it always reflects the current photos; link valid 1 year; first click takes a couple of minutes while the images are prepared). Columns: product name, designer, category, size, SKU(s), color(s), status, list price (USD), lead time, summary, description, material, recommended + compatible bulbs, dimensions, footprint, backplate, cord length, weight, return policy, warranty, country of origin, product URL, product-images ZIP link, and browser-clickable cut-sheet + install-instruction PDF URLs.',
         '',
         'Filters: `status` (Active default, or "all"), `category` (single name or array — see below), `productIds` (explicit allow-list), `productNameContains` (single term or array, OR-matched — "catalog for eave, pier and drift" → ONE call with ["eave","pier","drift"]), `granularity` ("product" default = one row per product | "sku" = one row per color/SKU variant).',
         '',
@@ -952,44 +951,6 @@ export function certification(category: string | null): string {
   return WIRELESS_CATEGORIES.has(category) || HARDWIRED_CATEGORIES.has(category)
     ? 'UL Listed for US and Canada'
     : 'SGS for UL and CSA';
-}
-
-/**
- * The product-photo URLs for a row, in order and deduped. Built from the
- * existing `skuAssets` white-background photos (the selected photo plus the
- * gallery), Cloudinary URL pattern verified against the live PDP.
- *
- * - 'product' granularity (ctx.skus present): EVERY photo across ALL of the
- *   product's SKUs — "all the images we have".
- * - 'sku' granularity: just the given SKU's photo(s).
- */
-export function imageUrls(ctx: RowContext): string[] {
-  const { product } = ctx;
-  const assets = product.skuAssets;
-  if (!assets) return [];
-  const aggregate = ctx.skus != null; // product granularity → every SKU's photos
-  const skus = aggregate ? Object.keys(assets) : ctx.sku ? [ctx.sku] : [];
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (const sku of skus) {
-    const asset = assets[sku];
-    if (!asset) continue;
-    const fileNames: string[] = [];
-    if (asset.selectedWhiteBackgroundPhoto) fileNames.push(asset.selectedWhiteBackgroundPhoto);
-    if (Array.isArray(asset.whiteBackgroundPhotos)) {
-      for (const f of asset.whiteBackgroundPhotos) {
-        if (typeof f === 'string' && f.length > 0) fileNames.push(f);
-      }
-    }
-    for (const name of fileNames) {
-      const url = `${IMAGE_URL_BASE}/${product.id}/${sku}/product-photos/${name}`;
-      if (!seen.has(url)) {
-        seen.add(url);
-        out.push(url);
-      }
-    }
-  }
-  return out;
 }
 
 /**

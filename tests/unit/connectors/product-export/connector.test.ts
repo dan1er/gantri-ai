@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import Papa from 'papaparse';
+import { createHash } from 'node:crypto';
 import {
   ProductExportConnector,
   buildCatalogSql,
@@ -21,6 +22,8 @@ import {
   cutSheetUrl,
   instructionUrls,
   fullProductName,
+  productImagesArchiveUrl,
+  productHasPhotos,
   WHOLESALE_DEFAULTS,
   type CatalogProduct,
 } from '../../../../src/connectors/product-export/product-export-connector.js';
@@ -216,9 +219,12 @@ function paintedTableRow(): unknown[] {
   ];
 }
 
-function makeConnector(runSqlImpl: () => Promise<{ fields: string[]; rows: unknown[][] }>) {
+function makeConnector(
+  runSqlImpl: () => Promise<{ fields: string[]; rows: unknown[][] }>,
+  cloudinary?: { apiKey: string; apiSecret: string } | null,
+) {
   const grafana = { runSql: vi.fn(runSqlImpl) } as unknown as GrafanaConnector;
-  return { connector: new ProductExportConnector({ grafana }), grafana };
+  return { connector: new ProductExportConnector({ grafana, cloudinary }), grafana };
 }
 
 function parseCsv(content: string): Record<string, string>[] {
@@ -522,6 +528,48 @@ describe('products.export_catalog', () => {
     expect(row.SKU).toBe('');
     expect(row.Color).toBe('');
     expect(row['Image URLs']).toBe('');
+  });
+
+  it('emits ONE signed images-ZIP link per product when Cloudinary creds are configured', async () => {
+    const { connector } = makeConnector(
+      async () => ({ fields: FIELDS, rows: [lagoRow(), giftCardRow()] }),
+      { apiKey: 'test-key', apiSecret: 'test-secret' },
+    );
+    const result: any = await connector.tools[0].execute({
+      status: 'Active',
+      granularity: 'sku',
+      includeInternalCost: false,
+    });
+    const rows = parseCsv(result.attachment.content);
+
+    const snow = rows.find((r) => r.SKU === '10018-cm-snow')!;
+    const carbon = rows.find((r) => r.SKU === '10018-cm-carbon')!;
+    const zip = snow['Product Images (ZIP)'];
+    // Signed archive-download URL over the product's folder, minted locally.
+    expect(zip).toContain('https://api.cloudinary.com/v1_1/gantri/image/generate_archive?');
+    expect(zip).toContain('mode=download');
+    expect(zip).toContain(encodeURIComponent('dynamic-assets/gantri/products/10018/'));
+    expect(zip).toContain('signature=');
+    expect(zip).toContain('api_key=test-key');
+    // The secret must NEVER leak into the URL.
+    expect(zip).not.toContain('test-secret');
+    // Product-level link: identical for every row of the product.
+    expect(carbon['Product Images (ZIP)']).toBe(zip);
+    // Products without photos get no link (an empty-folder archive would 404).
+    const gift = rows.find((r) => r['Product Name'] === 'Gift Card')!;
+    expect(gift['Product Images (ZIP)']).toBe('');
+  });
+
+  it('leaves the images-ZIP column blank when Cloudinary creds are absent', async () => {
+    const { connector } = makeConnector(async () => ({ fields: FIELDS, rows: [lagoRow()] }));
+    const result: any = await connector.tools[0].execute({
+      status: 'Active',
+      granularity: 'sku',
+      includeInternalCost: false,
+    });
+    const rows = parseCsv(result.attachment.content);
+    expect(Object.keys(rows[0])).toContain('Product Images (ZIP)');
+    expect(rows[0]['Product Images (ZIP)']).toBe('');
   });
 
   it('returns NO_PRODUCTS when the filter matches nothing', async () => {
@@ -961,6 +1009,65 @@ describe('parsing + formatting helpers', () => {
     const opts = productColorOptions(p);
     expect(opts.find((o) => o.code === 'snow')!.sku).toBe('10018-snow'); // authoritative kept as-is
     expect(opts.find((o) => o.code === 'carbon')!.sku).toBe('10018-cm-carbon'); // safe fallback, not '10018-snow-carbon'
+  });
+
+  it('productImagesArchiveUrl signs the sorted params, excluding api_key and the secret', () => {
+    const url = productImagesArchiveUrl({
+      productId: 10501,
+      apiKey: 'key123',
+      apiSecret: 'secret456',
+      timestamp: 1_700_000_000,
+      expiresAt: 1_731_536_000,
+    });
+    const parsed = new URL(url);
+    expect(parsed.origin + parsed.pathname).toBe('https://api.cloudinary.com/v1_1/gantri/image/generate_archive');
+    const q = parsed.searchParams;
+    expect(q.get('mode')).toBe('download');
+    expect(q.get('prefixes')).toBe('dynamic-assets/gantri/products/10501/');
+    expect(q.get('expires_at')).toBe('1731536000');
+    expect(q.get('timestamp')).toBe('1700000000');
+    expect(q.get('transformations')).toBe('c_limit,w_2400,q_auto:good,f_jpg');
+    expect(q.get('skip_transformation_name')).toBe('true');
+    expect(q.get('target_public_id')).toBe('gantri-product-10501-images');
+    expect(q.get('api_key')).toBe('key123');
+
+    // Cloudinary signature: SHA-1 over sorted key=value params (WITHOUT
+    // api_key/signature) + secret appended.
+    const expected = createHash('sha1')
+      .update(
+        [
+          'expires_at=1731536000',
+          'mode=download',
+          'prefixes=dynamic-assets/gantri/products/10501/',
+          'skip_transformation_name=true',
+          'target_public_id=gantri-product-10501-images',
+          'timestamp=1700000000',
+          'transformations=c_limit,w_2400,q_auto:good,f_jpg',
+        ].join('&') + 'secret456',
+      )
+      .digest('hex');
+    expect(q.get('signature')).toBe(expected);
+
+    // Same params with a different api_key → same signature (api_key is not
+    // part of the signed string).
+    const other = new URL(
+      productImagesArchiveUrl({
+        productId: 10501,
+        apiKey: 'DIFFERENT',
+        apiSecret: 'secret456',
+        timestamp: 1_700_000_000,
+        expiresAt: 1_731_536_000,
+      }),
+    );
+    expect(other.searchParams.get('signature')).toBe(expected);
+  });
+
+  it('productHasPhotos detects any white-background photo across SKUs', () => {
+    expect(productHasPhotos({ skuAssets: { a: { selectedWhiteBackgroundPhoto: 'x.jpg' } } } as unknown as CatalogProduct)).toBe(true);
+    expect(productHasPhotos({ skuAssets: { a: { whiteBackgroundPhotos: ['y.jpg'] } } } as unknown as CatalogProduct)).toBe(true);
+    expect(productHasPhotos({ skuAssets: { a: { whiteBackgroundPhotos: [] } } } as unknown as CatalogProduct)).toBe(false);
+    expect(productHasPhotos({ skuAssets: { a: {} } } as unknown as CatalogProduct)).toBe(false);
+    expect(productHasPhotos({ skuAssets: null } as unknown as CatalogProduct)).toBe(false);
   });
 
   it('toBool coerces Postgres/Grafana booleans', () => {

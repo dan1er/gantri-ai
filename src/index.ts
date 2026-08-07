@@ -133,6 +133,7 @@ async function main() {
     asanaAccessToken,
     sendgridApiKey,
     notionApiTokenVault,
+    cloudinaryApiKey, cloudinaryApiSecret,
   ] = await Promise.all([
     readVaultSecret(supabase, 'NORTHBEAM_EMAIL'),
     readVaultSecret(supabase, 'NORTHBEAM_PASSWORD'),
@@ -157,6 +158,8 @@ async function main() {
     readVaultSecret(supabase, 'ASANA_ACCESS_TOKEN').catch(() => null),
     readVaultSecret(supabase, 'SENDGRID_API_KEY').catch(() => null),
     readVaultSecret(supabase, 'NOTION_API_TOKEN').catch(() => null),
+    readVaultSecret(supabase, 'CLOUDINARY_API_KEY').catch(() => null),
+    readVaultSecret(supabase, 'CLOUDINARY_API_SECRET').catch(() => null),
   ]);
 
   const registry = new ConnectorRegistry();
@@ -225,7 +228,18 @@ async function main() {
   registry.register(new ProductDurationsConnector({ grafana }));
   // Wholesale product catalog CSV export — reads the prod read-replica via
   // Grafana and returns a downloadable CSV attachment.
-  registry.register(new ProductExportConnector({ grafana }));
+  registry.register(
+    new ProductExportConnector({
+      grafana,
+      cloudinary:
+        cloudinaryApiKey && cloudinaryApiSecret
+          ? { apiKey: cloudinaryApiKey, apiSecret: cloudinaryApiSecret }
+          : null,
+    }),
+  );
+  if (!cloudinaryApiKey || !cloudinaryApiSecret) {
+    logger.warn('CLOUDINARY_API_KEY/SECRET not configured — catalog exports will omit the Product Images (ZIP) column');
+  }
 
   if (ga4PropertyId && ga4ServiceAccountKey) {
     const ga4 = new Ga4Connector({
